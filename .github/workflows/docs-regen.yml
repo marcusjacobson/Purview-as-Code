@@ -4,7 +4,7 @@ name: docs-regen
 # (docs/adr/) and reconciler scripts (scripts/) to regenerate the ADR
 # index (docs/adr/README.md) and the script reference
 # (docs/scripts-reference.md). Opens a docs-only PR when either artifact
-# is stale. Implements Slice 9 of the agentic-process-modernization-plan.
+# is stale. Regenerates the ADR index and script reference.
 #
 # This workflow is read-only against the tenant and the live Purview
 # account — it performs only git and filesystem operations. No Azure auth,

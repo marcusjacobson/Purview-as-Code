@@ -24,4 +24,4 @@ Process documentation for the Wave 0 governance primitives shipped by the v1 Pur
 
 - Every page that makes a product-capability or role-gating claim ends with a `## References` block per the "Evidence pattern for Microsoft Learn citations" section of [`.github/copilot-instructions.md`](../../../.github/copilot-instructions.md).
 - Real tenant / subscription / object IDs never appear here. Placeholders follow the "Environment and identifier boundaries" section of the same file.
-- These pages document the v1 build only. The archived strategic roadmap that produced them lives at [`docs/archive/project-plan-v1.md`](../../archive/project-plan-v1.md); the live v2 roadmap is at [`docs/project-plan.md`](../../project-plan.md).
+- These pages document the governance-foundation build. The roadmap is at [`docs/project-plan.md`](../../project-plan.md).

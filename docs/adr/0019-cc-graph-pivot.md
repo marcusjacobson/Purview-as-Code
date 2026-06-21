@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-05-16
-- **Gates:** Open-question row Q10 in [`docs/project-plan.md`](../project-plan.md#8-open-question-adrs) (carried from the v1 watch-list at [`docs/archive/project-plan-v1.md`](../archive/project-plan-v1.md#open-question-adrs)); governs the desired-state of [`data-plane/communication-compliance/policies.yaml`](../../data-plane/communication-compliance/policies.yaml) and the Create / Update / Remove branches of [`scripts/Deploy-CommunicationCompliance.ps1`](../../scripts/Deploy-CommunicationCompliance.ps1). Issue [#278](../../issues/278).
+- **Gates:** Open-question row Q10 in [`docs/project-plan.md`](../project-plan.md#8-open-question-adrs); governs the desired-state of [`data-plane/communication-compliance/policies.yaml`](../../data-plane/communication-compliance/policies.yaml) and the Create / Update / Remove branches of [`scripts/Deploy-CommunicationCompliance.ps1`](../../scripts/Deploy-CommunicationCompliance.ps1). Issue [#278](../../issues/278).
 - **Deciders:** @contoso
 
 ## Context
@@ -37,7 +37,7 @@ This ADR exists because issue [#278](../../issues/278) was filed to scope a pivo
 
 3. **Communication Compliance policies are authored in the Microsoft Purview portal** by an operator with the appropriate role-group membership (`Communication Compliance Admins` / `Communication Compliance Investigators` / `Communication Compliance Analysts` / `Communication Compliance Viewers`). Role-group membership stays managed by [`Deploy-PurviewRoleGroups.ps1`](../../scripts/Deploy-PurviewRoleGroups.ps1) per [ADR 0009](0009-portal-role-group-api-ship-order.md), which already covers the Communication Compliance role-group family.
 
-4. **A new open-question row `Q10` is added to the project plan §8** (originally to the v1 plan at [`docs/archive/project-plan-v1.md`](../archive/project-plan-v1.md#open-question-adrs); carried forward to the v2 plan at [`docs/project-plan.md`](../project-plan.md#8-open-question-adrs)) as the standing watch-list for this question. The row stays unticked until either of the watch triggers below fires, at which point it is closed and superseded by a new ADR.
+4. **A new open-question row `Q10` is added to the project plan §8** (see [`docs/project-plan.md`](../project-plan.md#8-open-question-adrs)) as the standing watch-list for this question. The row stays unticked until either of the watch triggers below fires, at which point it is closed and superseded by a new ADR.
 
 5. **Re-open triggers (the watch list).** This ADR is to be re-opened with a follow-up ADR if any of the following becomes true on Microsoft Learn:
    - A `communicationCompliance` resource lands under `https://learn.microsoft.com/en-us/graph/api/resources/` (beta or v1.0).

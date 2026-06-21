@@ -101,6 +101,6 @@ References:
 
 ## Status
 
-**v2 in flight.** v1 shipped the foundation Purview-as-Code build through Waves 0–4b — collections, glossary, classifications, sensitivity labels, audit, DLP, data lifecycle, records, insider risk, communication compliance, DSPM, and the Data Map — and every v1 row is ticked. v2 walks the live `contoso.onmicrosoft.com` tenant feature by feature and ratifies as-code governance for each one before moving on. See [`docs/project-plan.md`](docs/project-plan.md) for the roadmap and progress checklist, and [`docs/getting-started.md`](docs/getting-started.md) to set up the tenant connection.
+**Roadmap.** This template ships with an empty feature roadmap. See [`docs/project-plan.md`](docs/project-plan.md) to plan and track which Microsoft Purview features you adopt into as-code governance, and [`docs/getting-started.md`](docs/getting-started.md) to set up the tenant connection.
 
-Scheduled watch loops (drift, surface, and the planned code- and feature-currency loops) file their findings as review issues into a discoverable queue — see [Reviewing loop output](docs/governance/agentic-process-modernization-plan.md#reviewing-loop-output-the-review-queue).
+Scheduled watch loops (drift, surface, and the planned code- and feature-currency loops) file their findings as review issues into a discoverable queue — see [`.github/copilot-automations/README.md`](.github/copilot-automations/README.md).

@@ -36,7 +36,7 @@ Determine whether the work maps onto a row in the [`docs/project-plan.md`](../..
 
 Run the §6 dependency-matrix and §8 ADR gates inline. The branch must not be created until both gates pass.
 
-**§8 ADR gate.** Re-read §8 "Open-question ADRs" in [`docs/project-plan.md`](../../docs/project-plan.md). If the chosen item is gated by an unanswered open question (currently Q5 / Q6 / Q7), stop and tell the lab owner:
+**§8 ADR gate.** Re-read §8 "Open-question ADRs" in [`docs/project-plan.md`](../../docs/project-plan.md). If the chosen item is gated by an unanswered open question listed there (the template ships with none — populate as you adopt), stop and tell the lab owner:
 
 > "This item is gated by §8 Q\<N\>. The ADR must ship as its own item first."
 

@@ -177,7 +177,7 @@ Full placeholder table: [copilot-instructions.md](../../copilot-instructions.md)
 
 Write an ADR when:
 
-- A [`docs/project-plan.md`](../../../docs/project-plan.md) checklist item is gated by an open question in §8 (Q5, Q6, Q7, etc.).
+- A [`docs/project-plan.md`](../../../docs/project-plan.md) checklist item is gated by an open question in §8 (if any are listed).
 - A design decision affects multiple waves or multiple planes (control + data).
 - A decision constrains future work or changes a security principle.
 - A decision resolves a recurring question that contributors ask.

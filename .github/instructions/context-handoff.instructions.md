@@ -46,7 +46,7 @@ Both `/prepare-handoff` and any hand-rolled brief must produce, in this order:
 3. **Working-tree state** — output of `git status --short`. If empty, say "clean".
 4. **What `/build-item` already validated** — table or bulleted list. One row per command, with the command, the touched path(s), and one of `pass` / `fail` / `not run`. No raw output dumps.
 5. **What's left to do** — a concrete, single-paragraph next step. Not a wishlist. If the next step is not yet decided, say "decision needed: <one-sentence question>".
-6. **Open decisions / blockers** — bulleted, each with one-sentence context. Includes any unanswered open-question ADR from the Progress checklist of `docs/project-plan.md` that this item touches (Q5/Q6/Q7 currently open).
+6. **Open decisions / blockers** — bulleted, each with one-sentence context. Includes any unanswered open-question ADR from the Progress checklist of `docs/project-plan.md` that this item touches (none in the template — populate as you adopt).
 7. **Exit criteria still pending** — bullets copied from the item's Exit criteria block on the GitHub issue linked from the `docs/project-plan.md` Progress checklist row that have not yet been verified.
 8. **Pointers** — relative Markdown links to the files the next session will need first. **Links only**, not file contents.
 9. **Resume command** — explicit one-liner, one of:

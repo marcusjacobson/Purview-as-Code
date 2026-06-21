@@ -5,7 +5,7 @@ name: drift-detection
 # contoso.onmicrosoft.com tenant and opens a GitHub issue when drift is
 # detected between the repo's desired-state YAML and the live tenant.
 #
-# Part of the agentic-process-modernization-plan Slice 7.
+# A read-only, issue-only drift-detection watch loop.
 #
 # Read-only contract: every tenant call is -WhatIf only. No deploy step
 # exists. Per security principle #9 and mcp-tool-usage.instructions.md
@@ -191,7 +191,6 @@ jobs:
 
           ## References
 
-          - [Agentic process modernization plan — Slice 7](https://github.com/contoso/Purview-as-Code-Generic/blob/main/docs/governance/agentic-process-modernization-plan.md#slice-7--drift-detection-loop)
           - [ADR 0029 — Source-of-truth direction policy](https://github.com/contoso/Purview-as-Code-Generic/blob/main/docs/adr/0029-source-of-truth-direction-policy.md)
           "@
 

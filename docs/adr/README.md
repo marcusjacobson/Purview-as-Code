@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This folder holds **Architecture Decision Records (ADRs)** for the Purview-as-Code repo. Every open question in [`docs/project-plan.md`](../project-plan.md#8-open-question-adrs) (the **Open-question ADRs** section) that blocks a checklist item lands here as a numbered ADR before the item it gates can start. The v1 historical open-question ledger lives at [`docs/archive/project-plan-v1.md`](../archive/project-plan-v1.md#open-question-adrs).
+This folder holds **Architecture Decision Records (ADRs)** for the Purview-as-Code repo. Every open question in [`docs/project-plan.md`](../project-plan.md#8-open-question-adrs) (the **Open-question ADRs** section) that blocks a checklist item lands here as a numbered ADR before the item it gates can start.
 
 ADRs are immutable once accepted. If a decision is reversed, write a new ADR that `supersedes` the old one — do not edit the old file in place.
 
@@ -61,7 +61,7 @@ ADRs are immutable once accepted. If a decision is reversed, write a new ADR tha
 | [0040](0040-default-label-for-documents.md) | Default label for documents (`DefaultLabel` advanced setting; #471 row 5) | Accepted | Unblocks the [#471](../../issues/471) row 5 child PR; per [ADR 0030](0030-label-policies-tracked-field-expansion.md) |
 | [0041](0041-label-policy-fabric-powerbi.md) | Label-policy Fabric and Power BI compliance information (`powerBIComplianceInformation`; #471 row 7) | Accepted | Unblocks the [#471](../../issues/471) row 7 child PR; per [ADR 0030](0030-label-policies-tracked-field-expansion.md) |
 | [0042](0042-label-policy-admin-units.md) | Label-policy admin units scope (`includedAdministrativeUnits`; #471 row 6) | Accepted | Unblocks the [#471](../../issues/471) row 6 child PR; per [ADR 0030](0030-label-policies-tracked-field-expansion.md) |
-| [0043](0043-model-tier-policy.md) | Model-tier policy: prioritized model arrays across lifecycle and persona agents | Accepted | Slice 3 of the [agentic process modernization plan](../governance/agentic-process-modernization-plan.md) ([#680](../../issues/680), [#687](../../issues/687)); establishes [`docs/governance/model-policy.md`](../governance/model-policy.md) and converts the four `.github/agents/*.agent.md` `model:` fields to arrays |
+| [0043](0043-model-tier-policy.md) | Model-tier policy: prioritized model arrays across lifecycle and persona agents | Accepted | Establishes [`docs/governance/model-policy.md`](../governance/model-policy.md) and converts the four `.github/agents/*.agent.md` `model:` fields to arrays |
 
 > [!NOTE]
 > ADR numbers `0004`–`0007` were never assigned; the sequence jumps from `0003` to `0008`. This is an intentional numbering gap, not a set of missing files.

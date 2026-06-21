@@ -10,7 +10,7 @@ name: docs-freshness
 # This complements, and does not duplicate, docs-regen.yml: docs-regen regenerates the mechanical
 # indexes (ADR index, script reference) on a weekly schedule and opens a PR; docs-freshness gives a
 # per-PR nudge for the human-authored solution guides. Both only ever propose — neither gates the
-# lifecycle. See docs/governance/agentic-process-modernization-plan.md (Slice 10).
+# lifecycle. A read-only docs-freshness advisory check.
 #
 # Read-only: git + filesystem only. No Azure auth, no data-plane calls, no secrets.
 #

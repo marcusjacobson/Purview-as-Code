@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-19
-- **Gates:** Slice 3 of the [agentic process modernization plan](../governance/agentic-process-modernization-plan.md) (tracking issue [#680](../../issues/680); slice issue [#687](../../issues/687)). Establishes [`docs/governance/model-policy.md`](../governance/model-policy.md) as the canonical tier-to-array mapping and converts the `model:` field on all four [`.github/agents/`](../../.github/agents/) `*.agent.md` files from a single pinned model to a prioritized array.
+- **Gates:** Cross-cutting. Establishes [`docs/governance/model-policy.md`](../governance/model-policy.md) as the canonical tier-to-array mapping and converts the `model:` field on all four [`.github/agents/`](../../.github/agents/) `*.agent.md` files from a single pinned model to a prioritized array.
 - **Deciders:** @contoso
 
 ## Context
@@ -15,7 +15,7 @@ The VS Code custom-agent header schema accepts more than a single string for `mo
 
 Qualified model names use the format `Model Name (vendor)` — for example `GPT-5 (copilot)` or `Claude Sonnet 4.5 (copilot)`. The repo's agent-authoring rules already permit this: [`agents.instructions.md`](../../.github/instructions/agents.instructions.md) requires the `model` field and states it may "Pin a model **or prioritized list**".
 
-The [agentic process modernization plan](../governance/agentic-process-modernization-plan.md) §"Model-tier policy" defines three tiers (`fast`, `balanced`, `reasoning`), each a vendor-mixed prioritized array, and a recurring review cadence. This ADR ratifies that design and records the concrete decision; the live arrays live in the canonical policy doc, not here.
+[`docs/governance/model-policy.md`](../governance/model-policy.md) defines three tiers (`fast`, `balanced`, `reasoning`), each a vendor-mixed prioritized array, and a recurring review cadence. This ADR ratifies that design and records the concrete decision; the live arrays live in the canonical policy doc, not here.
 
 ## Decision
 
@@ -67,5 +67,4 @@ We will standardize three model tiers and express each agent's `model:` field as
   Fetch date: 2026-06-19
   > "the provider you want is already listed (Azure, Anthropic, Gemini, OpenAI, and others)."
 - [`agents.instructions.md`](../../.github/instructions/agents.instructions.md) — required `model` frontmatter field ("Pin a model or prioritized list").
-- [`docs/governance/agentic-process-modernization-plan.md`](../governance/agentic-process-modernization-plan.md) — Slice 3 source.
 - [Issue #687](../../issues/687) — Slice 3 work item.

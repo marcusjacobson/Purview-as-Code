@@ -24,7 +24,7 @@ This is distinct from the other Copilot primitives in this repo:
 | Trigger | Weekly schedule |
 | Model | A **reasoning-tier** model per [ADR 0043](../../docs/adr/0043-model-tier-policy.md) |
 | Tools | **Issue creation / commenting only** — no pull request, no code edit, no deploy |
-| Output | One deduplicated issue in the review queue ([agentic plan — Reviewing loop output](../../docs/governance/agentic-process-modernization-plan.md#reviewing-loop-output-the-review-queue)) |
+| Output | One deduplicated issue in the review queue (open issues bearing the loop's marker label) |
 
 ## Creating an automation in the GitHub UI
 
@@ -55,4 +55,3 @@ automation.
 - **[About Copilot automations](https://docs.github.com/en/copilot/concepts/agents/cloud-agent/about-automations)**
 - **[Creating automations with Copilot cloud agent](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/cloud-agent/create-automations)**
 - [ADR 0044 — Code- and feature-currency watch loops](../../docs/adr/0044-currency-watch-loops.md)
-- [Agentic process modernization plan](../../docs/governance/agentic-process-modernization-plan.md)

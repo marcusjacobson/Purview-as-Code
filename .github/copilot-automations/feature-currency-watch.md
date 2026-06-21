@@ -45,8 +45,7 @@ On each scheduled run:
 ## Hard rules
 
 - **Issue-only.** Do not open a pull request, edit any file, or deploy. The only write you may perform
-  is opening or commenting on one issue. This preserves the "loops produce issues only" invariant from
-  [`docs/governance/agentic-process-modernization-plan.md`](../../docs/governance/agentic-process-modernization-plan.md).
+  is opening or commenting on one issue. This preserves the "loops produce issues only" invariant.
 - **Ground every claim in Microsoft Learn.** If Learn does not document an as-code surface for a
   feature, say so explicitly rather than inferring one.
 - **No secrets, no real identifiers.** Use the placeholders defined in the repo's
@@ -57,5 +56,4 @@ On each scheduled run:
 ## References
 
 - [ADR 0044 — Code- and feature-currency watch loops](../../docs/adr/0044-currency-watch-loops.md)
-- [Agentic process modernization plan — Reviewing loop output](../../docs/governance/agentic-process-modernization-plan.md#reviewing-loop-output-the-review-queue)
 - [What's new in Microsoft Purview](https://learn.microsoft.com/en-us/purview/whats-new)

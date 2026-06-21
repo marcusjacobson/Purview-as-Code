@@ -50,7 +50,7 @@ Required fields, per [`context-handoff.instructions.md` §What a brief MUST cont
 3. **Working-tree state** — `git status --short` output, or "clean".
 4. **What `/build-item` already validated** — short table: `command | path | result`. No raw output.
 5. **What's left to do** — one paragraph, concrete next step.
-6. **Open decisions / blockers** — bulleted, including any open-question ADR from the Progress checklist (Q5/Q6/Q7 currently open).
+6. **Open decisions / blockers** — bulleted, including any open-question ADR from the Progress checklist (none in the template — populate as you adopt).
 7. **Exit criteria still pending** — bullets from the GitHub issue's Exit criteria block linked from the `docs/project-plan.md` Progress checklist row.
 8. **Pointers** — relative Markdown links to the files the next session will read first.
 9. **Resume command** — explicit one-liner, one of: `/build-item`, `@artifact-resolver`, or `Draft an ADR`.

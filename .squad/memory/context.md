@@ -70,7 +70,7 @@ This is a **personal lab**, not a regulated environment. There are no external c
 
 ## Current phase
 
-- **Phase:** v2 — per-feature governance review of the live `contoso.onmicrosoft.com` tenant (in progress, started 2026-05-25). v1 shipped the foundation through Waves 0–4b; every v1 row is ticked and archived at [`docs/archive/project-plan-v1.md`](../../docs/archive/project-plan-v1.md).
+- **Phase:** Template baseline — no features adopted yet. Populate [`docs/project-plan.md`](../../docs/project-plan.md) as you bring Microsoft Purview features into as-code governance.
 - **Next phase trigger:** each Microsoft Purview feature in [`docs/project-plan.md`](../../docs/project-plan.md) §5 reviewed, drift closed, hardened as-code, and ticked — one feature at a time, no batching.
 - **Cadence:** agent-led default flow per [ADR 0014](../../docs/adr/0014-agents-as-default-entry-point.md). All work — Progress-checklist items and cross-cutting work alike — enters through `@idea-intake` → `/build-item` → `@artifact-resolver` → `@owner-approval`. `@idea-intake` Step 0 enforces the [`docs/project-plan.md`](../../docs/project-plan.md) §6 dependency-matrix and §8 ADR gates inline when the work maps onto a Progress-checklist row. `@squad` is reserved for content-creation interviews and persona-led discussion. All flows finish at the `owner-approved` label.
 

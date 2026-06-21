@@ -21,3 +21,11 @@ To add an entry:
 ### Added
 
 - **repo:** initial generic Purview-as-Code template baseline — every tenant-specific identifier replaced with Microsoft's documented placeholders (`contoso`, `contoso.onmicrosoft.com`, zero-GUID), and the `@operator-tenant` Tenant Intake agent added for per-tenant tailoring.
+
+### Changed
+
+- **docs:** reset `docs/project-plan.md` to a generic, empty roadmap template (the §3/§5/§6/§8 framework is preserved so the Squad agents still resolve their gates).
+
+### Removed
+
+- **docs:** remove lab-only build-up and test working docs — the archived v1 plan, the wave-0 smoke-test log, the repo-consistency-housekeeping and role-group-backing audits, and the agentic-process-modernization plan (references repointed to surviving canonical docs).

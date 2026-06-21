@@ -43,7 +43,7 @@ name: code-currency-watch
 # Read-only / issue-only: the loop performs no resource read, no write, no deploy,
 # and only ever opens an issue (the "loops produce issues only" invariant). The
 # `code-currency` marker label makes the issue discoverable in the review queue
-# documented in docs/governance/agentic-process-modernization-plan.md
+# a read-only, issue-only scheduled watch loop (augment, never replace).
 # §"Reviewing loop output".
 #
 # References (Microsoft Learn + GitHub Docs):

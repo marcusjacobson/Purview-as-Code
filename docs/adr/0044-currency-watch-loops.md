@@ -2,7 +2,7 @@
 
 - **Status:** Proposed <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
 - **Date:** 2026-06-20
-- **Gates:** Cross-cutting. Enumerates two new slices in [`agentic-process-modernization-plan.md`](../governance/agentic-process-modernization-plan.md); no [`project-plan.md`](../project-plan.md) §5 / §8 row.
+- **Gates:** Cross-cutting; no [`project-plan.md`](../project-plan.md) §5 / §8 row.
 - **Deciders:** contoso
 
 ## Context
@@ -35,8 +35,7 @@ makes a reasoning-driven loop a real option alongside the repo's existing determ
 loops. This repo is **private**, which matters because Copilot automations are unavailable in public
 repositories.
 
-The non-negotiable invariant from [`agentic-process-modernization-plan.md`](../governance/agentic-process-modernization-plan.md)
-§"augment, never replace" applies: any new loop runs read-only, produces a GitHub issue upstream of
+The non-negotiable **augment, never replace** invariant applies: any new loop runs read-only, produces a GitHub issue upstream of
 `@idea-intake`, and never deploys, never mutates the data plane, and adds no lifecycle stage.
 
 ## Decision
@@ -70,9 +69,8 @@ left unchanged.
 `drift-detected` / `surface-watch` convention, the issue carries a stable per-loop marker label —
 `code-currency` (Slice 12) and `feature-currency` (Slice 13) — plus the `squad:*` routing labels and
 `needs-review`, and is deduplicated against the open issue bearing its marker label before a second one is
-filed. The open marker-labeled issues form a **review queue** surfaced through live label-filtered links in
-[`agentic-process-modernization-plan.md`](../governance/agentic-process-modernization-plan.md)
-§"Reviewing loop output" and a pointer in the top-level [`README.md`](../../README.md), so suggestions are
+filed. The open marker-labeled issues form a **review queue** surfaced through a pointer in the
+top-level [`README.md`](../../README.md), so suggestions are
 discoverable rather than buried in the issue backlog.
 
 This ADR **decides and enumerates only**. Implementing either loop is a separate future `@idea-intake`
@@ -153,5 +151,4 @@ on one-off manual surveys that do not scale across the §3 inventory.
 - [Microsoft Purview REST API reference](https://learn.microsoft.com/en-us/rest/api/purview/) — `api-version` currency source for the code-currency loop.
 - [Az PowerShell module reference](https://learn.microsoft.com/en-us/powershell/module/?view=azps-latest) and [Azure service retirements](https://learn.microsoft.com/en-us/azure/service-retirement/) — cmdlet / version deprecation sources.
 - [Schedule events for GitHub Actions workflows](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule) and [Security hardening for GitHub Actions](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions) — Slice 12 trigger and secure-by-default rules.
-- [`agentic-process-modernization-plan.md`](../governance/agentic-process-modernization-plan.md) — the "augment, never replace" invariant and the Slice 7–11 loop pattern these slices extend.
 - [ADR 0014](0014-agents-as-default-entry-point.md) — the unchanged lifecycle both loops feed.

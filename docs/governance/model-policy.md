@@ -1,7 +1,7 @@
 # Model-tier policy
 
 > **Status:** Canonical. This document is the authoritative tier-to-array mapping referenced by [ADR 0043](../adr/0043-model-tier-policy.md). The ADR records the decision and rules; this file holds the live arrays so they can be updated on the review cadence without amending an immutable ADR.
-> **Governed by:** [ADR 0043 — Model-tier policy](../adr/0043-model-tier-policy.md). Source: [agentic process modernization plan](agentic-process-modernization-plan.md) §"Model-tier policy".
+> **Governed by:** [ADR 0043 — Model-tier policy](../adr/0043-model-tier-policy.md).
 > **Maintained by:** Lead / Architect persona, reviewed quarterly (see "Review cadence").
 
 ## Why tiers

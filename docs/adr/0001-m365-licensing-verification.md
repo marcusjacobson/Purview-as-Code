@@ -34,7 +34,7 @@ The reference repo (`Azure-Deployment-Pipelines/Purview/*`) documents E5 as a pr
 
 - Operators get a single, human-readable failure message when a license is missing, instead of a cryptic REST 403.
 - Adding a new solution script is a standard pattern: declare the required plans, call the preflight, proceed.
-- Compliance audit: `Test-M365Licensing.ps1` output is pasted into the PR description as the "preflight passed" evidence per the cadence in [`docs/archive/project-plan-v1.md`](../archive/project-plan-v1.md#delivery-cadence--one-item-at-a-time) (historical) and [`docs/project-plan.md`](../project-plan.md#delivery-cadence--one-feature-at-a-time) (current).
+- Compliance audit: `Test-M365Licensing.ps1` output is pasted into the PR description as the "preflight passed" evidence per the delivery cadence in [`docs/project-plan.md`](../project-plan.md#delivery-cadence--one-feature-at-a-time).
 
 **Harder.**
 

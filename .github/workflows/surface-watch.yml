@@ -6,7 +6,7 @@ name: surface-watch
 # documented on Learn but missing from §3, or §3 features no longer on
 # Learn — the workflow opens a GitHub issue routed to @idea-intake.
 #
-# Part of the agentic-process-modernization-plan Slice 8.
+# A read-only, issue-only surface-watch loop.
 #
 # Read-only contract: no write operations to the repo or tenant. Fetches
 # public Microsoft Learn pages only. Per
