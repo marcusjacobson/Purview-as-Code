@@ -13,6 +13,16 @@ Declarative, version-controlled configuration of a Microsoft Purview environment
 
 > **Target account (placeholder):** `contoso-lab` Microsoft Purview account (tenant `contoso.onmicrosoft.com`).
 
+## Quick start
+
+From an empty clone to a tailored, deployable repo in five steps. Full detail: **[Tenant onboarding guide](docs/tenant-onboarding.md)**.
+
+1. **Clone** this template — click **Use this template** on GitHub, or `git clone https://github.com/<your-org>/<your-repo>.git`.
+2. **Tailor it.** Open the repo in VS Code, start Copilot Chat, and run the **Tenant Intake** agent [`@operator-tenant`](.github/agents/operator-tenant.agent.md). It interviews you for your tenant values and writes them into [`infra/parameters/lab.yaml`](infra/parameters/lab.yaml) and the identity-boundary statements.
+3. **Review the diff** the agent produced, then commit it on a branch.
+4. **Wire up identity.** Create the Microsoft Entra app + OIDC federated credential and set the GitHub Environment secrets — see [Getting started §1–§2](docs/getting-started.md).
+5. **Validate and deploy.** Run `az bicep build` and the Pester suite, then the `deploy-infra` / `deploy-data-plane` workflows — see the [Tenant onboarding guide](docs/tenant-onboarding.md) and [Getting started §4](docs/getting-started.md).
+
 ## Why two planes?
 
 Microsoft Purview does not expose a single "Purview-as-Code" product. A complete IaC repo must manage two independent planes, each with its own API surface and auth model:

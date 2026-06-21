@@ -1,4 +1,4 @@
-#Requires -Version 7.4
+﻿#Requires -Version 7.4
 <#
 .SYNOPSIS
     Deploy the lab automation RBAC grants via infra/modules/automation-rbac.bicep.

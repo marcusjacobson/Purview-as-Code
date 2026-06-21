@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Grant (or revoke) Microsoft Purview data-plane roles to a principal at the
     lowest collection that works.

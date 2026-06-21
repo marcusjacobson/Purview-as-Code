@@ -1,4 +1,4 @@
-#Requires -Version 7.4
+﻿#Requires -Version 7.4
 <#
 .SYNOPSIS
     Create (or reconcile) the data-plane automation certificate per ADR 0011.

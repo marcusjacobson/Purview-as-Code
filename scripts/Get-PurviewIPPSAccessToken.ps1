@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Acquire an OAuth2 access token for Microsoft Security & Compliance PowerShell
     (Connect-IPPSSession -AccessToken) using a JWT client_assertion signed by
