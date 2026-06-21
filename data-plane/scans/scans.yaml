@@ -1,0 +1,288 @@
+# Scans, scan rulesets, and triggers (desired state).
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/scans
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/scan-rulesets
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/triggers
+#
+# Notes:
+# - Each scan binds to an existing data source by `dataSource` (the source `name`
+#   from data-plane/data-sources/data-sources.yaml). The reconciler rejects
+#   scans whose dataSource is not currently registered in the tenant.
+# - `properties.collection.referenceName` must target an existing collection.
+# - Scans referencing custom scanRulesets must declare them under `scanRulesets`
+#   first. Custom rulesets live alongside the System rulesets Purview ships with.
+# - `trigger.recurrence` defines the default recurring trigger. Omit `trigger`
+#   to run the scan on-demand only (this is the current shape for every imported
+#   scan -- on-demand operator-launched only).
+# - Body imported from the live `contoso.onmicrosoft.com` tenant on 2026-06-14 under
+#   v2 §5.5 row 3 (issue #371). The 1 stale Wave 1 `-weekly` placeholder against
+#   AzureDataLakeStorage-TestData was dropped during the import.
+scanRulesets:
+  - name: AzureFiles
+    kind: AzureFileService
+    properties:
+      temporaryResourceFilters:
+        - resourceFilterPattern: '(_SUCCESS|_started_\d*|_committed_\d*|_committed_vacuum\d*)$'
+          dataSamplingPattern: top
+          ingestTemporaryResource: true
+          rowCountToSelect: 128
+      scanningRule:
+        fileExtensions:
+          - CSV
+          - JSON
+          - PSV
+          - SSV
+          - TSV
+          - TXT
+          - XML
+          - PARQUET
+          - AVRO
+          - ORC
+          - Documents
+          - GZ
+          - DOC
+          - DOCM
+          - DOCX
+          - DOT
+          - ODP
+          - ODS
+          - ODT
+          - PDF
+          - POT
+          - PPS
+          - PPSX
+          - PPT
+          - PPTM
+          - PPTX
+          - XLC
+          - XLS
+          - XLSB
+          - XLSM
+          - XLSX
+          - XLT
+        customFileExtensions: null
+      collection: null
+      description: ""
+      excludedSystemClassifications: []
+      includedCustomClassificationRuleNames: []
+
+scans:
+  - dataSource: AzureBlob-SampleData
+    name: Scan-DataLakeModernization
+    kind: AzureStorageMsi
+    properties:
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      scanRulesetName: AzureStorage
+      collection:
+        referenceName: jprasm
+      connectedVia:
+        managedVNetName: ManagedVnet-Purview-EastUS
+        integrationRuntimeType: Managed
+        referenceName: IntegrationRuntime-AzureSQL-EastUS
+        shirSupportKubernetes: false
+      scanScopeType: AutoDetect
+  - dataSource: AzureDataExplorer-TestData
+    name: Scan-TestPub
+    kind: AzureDataExplorerMsi
+    properties:
+      scanRulesetName: AzureDataExplorer
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      database: null
+      collection:
+        referenceName: "4khzmw"
+      scanScopeType: AutoDetect
+  - dataSource: AzureDataLakeStorage-SynapseDL-TestData
+    name: Scan-TestData
+    kind: AdlsGen2Msi
+    properties:
+      scanRulesetName: AdlsGen2
+      collection:
+        referenceName: c0fsrh
+      scanScopeType: AutoDetect
+      domain: purview-contoso-lab
+      scanRulesetType: System
+  - dataSource: AzureDataLakeStorage-TestData
+    name: Scan-DataLakeModernization
+    kind: AdlsGen2Msi
+    properties:
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      scanRulesetName: AdlsGen2
+      collection:
+        referenceName: js1tih
+      connectedVia:
+        managedVNetName: ManagedVnet-Purview-EastUS
+        integrationRuntimeType: Managed
+        referenceName: IntegrationRuntime-AzureSQL-EastUS
+        shirSupportKubernetes: false
+      scanScopeType: AutoDetect
+  - dataSource: AzureSqlDatabase-Test1
+    name: Scan-TestData-1
+    kind: AzureSqlDatabaseMsi
+    properties:
+      serverEndpoint: sql-contosolab-demo.database.windows.net
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      scanRulesetName: AzureSqlDatabase
+      collection:
+        referenceName: bbot46
+      enableLineage: false
+      databaseName: sqldb-purview-demo
+      connectedVia:
+        managedVNetName: ManagedVnet-Purview-EastUS
+        integrationRuntimeType: Managed
+        referenceName: IntegrationRuntime-AzureSQL-EastUS
+        shirSupportKubernetes: false
+      scanScopeType: AutoDetect
+  - dataSource: AzureSqlDatabase-Test1
+    name: Scan-TestData-with-Lineage
+    kind: AzureSqlDatabaseMsi
+    properties:
+      serverEndpoint: sql-contosolab-demo.database.windows.net
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      scanRulesetName: AzureSqlDatabase
+      collection:
+        referenceName: bbot46
+      enableLineage: true
+      databaseName: sqldb-purview-demo
+      connectedVia:
+        managedVNetName: ManagedVnet-Purview-EastUS
+        integrationRuntimeType: Managed
+        referenceName: IntegrationRuntime-AzureSQL-EastUS
+        shirSupportKubernetes: false
+      scanScopeType: AutoDetect
+  - dataSource: AzureSynapseAnalytics-RegulatedFinanceReporting
+    name: Scan-RegulatedFinanceReporting
+    kind: AzureSynapseWorkspaceMsi
+    properties:
+      resourceTypes:
+        AzureSynapseServerlessSql:
+          scanRulesetName: AzureSynapseSQL
+          resourceNameFilter:
+            resources:
+              - purview_demo
+          scanRulesetType: System
+      domain: purview-contoso-lab
+      collection:
+        referenceName: c0fsrh
+      queryTimeout: 0
+      credential: null
+      connectedVia:
+        managedVNetName: ManagedVnet-Purview-EastUS
+        integrationRuntimeType: Managed
+        referenceName: IntegrationRuntime-AzureSQL-EastUS
+        shirSupportKubernetes: false
+      scanScopeType: AutoDetect
+  - dataSource: DatabricksUnityCatalog-TestData
+    name: Scan-DataLakeModerninzation
+    kind: DatabricksUnityCatalogCredential
+    properties:
+      domain: purview-contoso-lab
+      collection:
+        referenceName: "4k3yky"
+      enableLineage: true
+      credential: null
+      connectionProperties:
+        httpPath: "/sql/1.0/warehouses/4226df5765f4793d"
+        dataSourceReference: DatabricksUnityCatalog-TestData
+        workspaceUrl: adb-7405610909470053.13.azuredatabricks.net
+        credentialReference:
+          credentialType: ServicePrincipal
+          referenceName: cred-databricks-uc
+      scanScopeType: AutoDetect
+  - dataSource: DatabricksUnityCatalog-TestData
+    name: Scan-TestData-UC
+    kind: DatabricksUnityCatalogCredential
+    properties:
+      domain: purview-contoso-lab
+      collection:
+        referenceName: "4k3yky"
+      enableLineage: true
+      credential: null
+      connectionProperties:
+        httpPath: "/sql/1.0/warehouses/4226df5765f4793d"
+        dataSourceReference: DatabricksUnityCatalog-TestData
+        workspaceUrl: adb-7405610909470053.13.azuredatabricks.net
+        credentialReference:
+          credentialType: ServicePrincipal
+          referenceName: cred-databricks-uc
+      scanScopeType: AutoDetect
+  - dataSource: Dataverse-TestData
+    name: Scan-Customer360
+    kind: DataverseMsi
+    properties:
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      scanRulesetName: Dataverse
+      collection:
+        referenceName: cqyzoe
+      webApiEndpoint: https://org5146e274.crm.dynamics.com/api/data/v9.2
+      scanScopeType: AutoDetect
+  - dataSource: Fabric-Main
+    name: Scan-SampleMedallion
+    kind: FabricMsi
+    properties:
+      collection:
+        referenceName: ncu25o
+      domain: purview-contoso-lab
+      includePersonalWorkspaces: false
+  - dataSource: Fabric-Main
+    name: Scan-Scenario1
+    kind: FabricMsi
+    properties:
+      collection:
+        referenceName: ncu25o
+      domain: purview-contoso-lab
+      includePersonalWorkspaces: false
+  - dataSource: Fabric-Main
+    name: Scan-Scenario2
+    kind: FabricMsi
+    properties:
+      collection:
+        referenceName: ncu25o
+      domain: purview-contoso-lab
+      includePersonalWorkspaces: false
+  - dataSource: Fabric-Main
+    name: Scan-Scenario3
+    kind: FabricMsi
+    properties:
+      collection:
+        referenceName: ncu25o
+      domain: purview-contoso-lab
+      includePersonalWorkspaces: true
+  - dataSource: Fabric-Main
+    name: Scan-Scenario4
+    kind: FabricMsi
+    properties:
+      collection:
+        referenceName: ncu25o
+      domain: purview-contoso-lab
+      includePersonalWorkspaces: false
+  - dataSource: Fabric-Main
+    name: Scan-Test-Workspace
+    kind: FabricMsi
+    properties:
+      collection:
+        referenceName: ncu25o
+      domain: purview-contoso-lab
+      includePersonalWorkspaces: true
+  - dataSource: PostgreSQL-TestData
+    name: Scan-RegulatedFinanceReporting
+    kind: PostgreSqlCredential
+    properties:
+      port: 0
+      driverLocation: null
+      collection:
+        referenceName: a5oe4c
+      domain: purview-contoso-lab
+      database: purviewdemodb
+      mitiCache: null
+      maximumMemoryAllowedInGb: "20"
+      schema: null
+      credential:
+        credentialType: BasicAuth
+        referenceName: cred-postgresql
+      isTroubleshooting: false
+      host: null

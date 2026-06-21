@@ -1,0 +1,106 @@
+name: PR Auto-Merge on Owner Approval
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    if: github.event.label.name == 'owner-approved'
+    steps:
+      - name: Verify owner identity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ACTOR="${{ github.event.sender.login }}"
+          if [ "$ACTOR" != "contoso" ]; then
+            echo "::error::Gate failed: 'owner-approved' label was applied by '$ACTOR', not the lab owner 'contoso'."
+            exit 1
+          fi
+
+      - name: Verify sanity gates
+        id: gates
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+
+          # Gate 1: PR must be open (not closed or merged)
+          STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')
+          if [ "$STATE" != "OPEN" ]; then
+            echo "::error::Gate failed: PR #$PR_NUMBER is not open (state: $STATE)."
+            exit 1
+          fi
+
+          # Gate 2: PR must not be a draft
+          IS_DRAFT=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isDraft --jq '.isDraft')
+          if [ "$IS_DRAFT" = "true" ]; then
+            echo "::error::Gate failed: PR #$PR_NUMBER is a draft. Convert to ready for review before approving."
+            exit 1
+          fi
+
+          # Gate 3: PR must carry needs-review label
+          LABELS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
+          if ! echo "$LABELS" | grep -q "needs-review"; then
+            echo "::error::Gate failed: PR #$PR_NUMBER does not carry the 'needs-review' label."
+            exit 1
+          fi
+
+          echo "All sanity gates passed for PR #$PR_NUMBER."
+
+      - name: Enable auto-merge with squash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+
+          gh pr merge "$PR_NUMBER" \
+            --repo "$REPO" \
+            --squash \
+            --auto \
+            --delete-branch
+
+          echo "Auto-merge enabled for PR #$PR_NUMBER (squash + delete branch on merge)."
+
+      - name: Post confirmation comment
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body "<!-- pr-auto-merge:confirmation -->
+          ## Auto-merge enabled
+
+          The \`owner-approved\` label has been detected. Auto-merge has been enabled with squash strategy. This branch will be deleted after merge.
+
+          *Triggered by the \`pr-auto-merge\` workflow.*"
+
+      - name: Post failure comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body "<!-- pr-auto-merge:failure -->
+          ## Auto-merge failed — sanity gate failure
+
+          The \`owner-approved\` label was applied but one or more sanity gates failed. Auto-merge was **not** enabled.
+
+          Please check the workflow run logs for details and resolve the issue before re-applying the label.
+
+          *Triggered by the \`pr-auto-merge\` workflow.*"

@@ -1,0 +1,159 @@
+# Microsoft Purview as-Code — Entra directory-role assignments (desired state)
+#
+# Desired state for Microsoft Entra ID **directory-role** assignments in the
+# `contoso.onmicrosoft.com` tenant. These are tenant-scoped Entra ID roles
+# administered through the Microsoft Graph unified RBAC surface
+# (`/roleManagement/directory/roleAssignments`). They are a different RBAC
+# surface than the Microsoft 365 / Microsoft Purview portal role groups
+# tracked in `data-plane/purview-role-groups/role-groups.yaml` — mixing the
+# two breaks least privilege.
+#
+# Scope: this file tracks the three directory roles cited as
+# Purview-relevant in [Permissions in the Microsoft Purview portal]
+# (https://learn.microsoft.com/en-us/purview/purview-permissions):
+#
+#   * Compliance Administrator
+#   * Compliance Data Administrator
+#   * Information Protection Administrator
+#
+# Other Entra directory roles are out of scope for Purview-as-Code and must
+# not be added without an ADR.
+#
+# The reconciler (`scripts/Deploy-EntraDirectoryRoles.ps1`, tracked in the
+# Wave 0 checklist as the next item) consumes this file, compares each
+# listed role's current `principalId` set at the requested `scope` against
+# the desired `members` list, and performs Create/NoChange/Revoke/NoOp
+# operations row-by-row by composing `scripts/Grant-EntraDirectoryRole.ps1`.
+# Roles not listed in this file are left untouched. Default steady state is
+# an empty `directoryRoles` list — no-op safe on first run.
+#
+# First-run bootstrap against an existing tenant (REQUIRED):
+#   Before the first reconciler `-Apply` run against this file, run:
+#       ./scripts/Deploy-EntraDirectoryRoles.ps1 -ExportCurrentState
+#   That switch populates `directoryRoles:` with the live assignments of
+#   every in-scope directory role the automation identity can see. Review
+#   the resulting diff in a pull request, then merge. Only after that PR
+#   lands is it safe to run `-Apply` (or `-Apply -PruneMissing`) —
+#   otherwise the reconciler would treat your existing portal-configured
+#   permissions as drift and remove them. This first-run contract is
+#   mandatory for every `Deploy-*.ps1` per
+#   `.github/instructions/powershell.instructions.md`
+#   (section: "First-run-against-an-existing-tenant contract").
+#
+# Decision context:
+#   docs/adr/0002-administrative-units.md (AU scope today: directory-wide
+#                                          only; AU-scoped assignments
+#                                          deferred until the AU scaffold
+#                                          lists at least one AU).
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/purview-permissions
+#   https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/permissions-reference
+#   https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/groups-concept
+#   https://learn.microsoft.com/en-us/graph/api/resources/rbacapplication
+#   https://learn.microsoft.com/en-us/graph/api/rbacapplication-list-roledefinitions
+#   https://learn.microsoft.com/en-us/graph/api/unifiedroledefinition-get
+#   https://learn.microsoft.com/en-us/graph/api/rbacapplication-list-roleassignments
+#   https://learn.microsoft.com/en-us/graph/api/rbacapplication-post-roleassignments
+#
+# Fields per entry:
+#   name         (required, string) Canonical Microsoft-published
+#                directory-role display name. Must be one of the three
+#                in-scope roles listed above. Used as a human-readable
+#                key; if `templateId` is present it wins for resolution.
+#   templateId   (optional, string GUID) Stable templateId of the role
+#                (`unifiedRoleDefinition.id` for built-in roles -- per
+#                Graph the `id` is immutable and equals templateId).
+#                Strongly recommended: some tenants expose a role under a
+#                legacy displayName (for example, `Information Protection
+#                Administrator` is exposed as `Azure Information
+#                Protection Administrator` in tenants that pre-date the
+#                rename), so resolving by templateId is the only stable
+#                path. When supplied, the reconciler resolves the role
+#                definition via
+#                `GET /roleManagement/directory/roleDefinitions/{templateId}`
+#                and validates that `name` matches the canonical name in
+#                the in-scope allowlist. If both `name` and `templateId`
+#                appear, they must agree.
+#   description  (optional, string) Short prose explaining why this entry
+#                exists. Not read by the reconciler; for human reviewers.
+#   scope        (optional, string) `directoryScopeId` for the assignment.
+#                Defaults to `/` (directory-wide). The only other supported
+#                value today is `/administrativeUnits/{auObjectId}`, and
+#                only when that AU object ID is also tracked in
+#                `data-plane/administrative-units/administrative-units.yaml`
+#                per [ADR 0002](../../docs/adr/0002-administrative-units.md).
+#                Other scope shapes are rejected by the reconciler.
+#   members      (required, list of strings) Entra (Azure AD) **group**
+#                object IDs. One group OID per line. Each group must have
+#                `isAssignableToRole = true` per [Use Microsoft Entra
+#                groups to manage role assignments]
+#                (https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/groups-concept);
+#                the reconciler enforces this via the same Graph
+#                `GET /groups/{id}` probe used by
+#                `scripts/Grant-EntraDirectoryRole.ps1`. User UPNs and
+#                individual user object IDs are intentionally rejected per
+#                `.github/instructions/security.instructions.md` rule #4
+#                (least privilege — assign to groups, not users). Empty
+#                list is valid and means "this directory role should have
+#                zero declarative assignments at the requested scope"; the
+#                reconciler will remove any drift.
+#
+# Authentication note:
+#   The reconciler authenticates to Microsoft Graph using the data-plane
+#   automation identity certificate stored in `kv-contoso-lab-01` and the
+#   federated credential produced by `scripts/New-AutomationEntraApp.ps1`.
+#   Runtime, invocation shape, and session-reuse rules are mandated in
+#   `.github/instructions/powershell.instructions.md`. The
+#   `Grant-EntraDirectoryRole.ps1` imperative primitive (Wave 0, already
+#   merged) runs delegated against the local contributor's `az login`
+#   session and is not used by the reconciler.
+#
+# Example (commented-out; do not uncomment on main):
+#   - name: Compliance Administrator
+#     templateId: 17315797-102d-40b4-93e0-432062caca18
+#     description: Tenant-wide read + configure of compliance solutions.
+#     scope: /
+#     members:
+#       - 00000000-0000-0000-0000-000000000000   # Entra group OID for the Compliance Admins group (isAssignableToRole=true)
+#
+#   - name: Compliance Data Administrator
+#     templateId: e6d1a23a-da11-4be4-9570-befc86d067a7
+#     description: Read + manage data classification and DLP signals.
+#     scope: /
+#     members: []
+#
+#   - name: Information Protection Administrator
+#     templateId: 7495fdc4-34c4-4d15-a289-98788ce399fd
+#     description: Manage sensitivity labels and label policies.
+#     scope: /
+#     members:
+#       - 00000000-0000-0000-0000-000000000000   # Entra group OID for the IP Admins group (isAssignableToRole=true)
+
+# Default steady state is an empty list.
+# Add one or more entries using the shape above, run the reconciler, and
+# review the drift report before merging.
+directoryRoles:
+  - name: Compliance Administrator
+    templateId: 17315797-102d-40b4-93e0-432062caca18
+    description: Lab admin group for Compliance Administrator in contoso.onmicrosoft.com. Beast-Mode is the lab owner's PIM-for-Groups break-glass group; user-to-group membership is activated via PIM and is out of scope for this file.
+    scope: /
+    members:
+      - d9ddec15-1408-4c40-ba1e-88e6a194de17   # GRP-Entra-Compliance-Administrators (isAssignableToRole=true)
+      - d768ff6d-570d-4164-a792-44b417c18fd8   # Beast-Mode (isAssignableToRole=true; PIM-for-Groups)
+      - ba9a8511-dd8f-4c6a-9eaf-28dc39444657   # sg-purview-data-plane-compliance-admin (isAssignableToRole=true; wraps gh-oidc-purview-data-plane SP per #410)
+
+  - name: Compliance Data Administrator
+    templateId: e6d1a23a-da11-4be4-9570-befc86d067a7
+    description: Lab admin group for Compliance Data Administrator in contoso.onmicrosoft.com. Beast-Mode is the lab owner's PIM-for-Groups break-glass group; user-to-group membership is activated via PIM and is out of scope for this file.
+    scope: /
+    members:
+      - adbf0ebb-7b68-486f-bb5b-3addd8b5ea9a   # GRP-Entra-Compliance-Data-Administrators (isAssignableToRole=true)
+      - d768ff6d-570d-4164-a792-44b417c18fd8   # Beast-Mode (isAssignableToRole=true; PIM-for-Groups)
+
+  - name: Information Protection Administrator
+    templateId: 7495fdc4-34c4-4d15-a289-98788ce399fd
+    description: Lab admin group for Information Protection Administrator in contoso.onmicrosoft.com. Tenant exposes this role under the legacy displayName 'Azure Information Protection Administrator'; templateId resolution is required.
+    scope: /
+    members:
+      - 32ee3734-9289-4ef3-a07c-70cd9db2c824   # GRP-Entra-Information-Protection-Administrators (isAssignableToRole=true)

@@ -1,0 +1,794 @@
+#Requires -Version 7.4
+<#
+.SYNOPSIS
+    Reconcile Microsoft Purview business glossary terms against
+    `data-plane/glossary/glossary.yaml`.
+
+.DESCRIPTION
+    Reconciler per ADR 0026 (Phase 1+2) and issue #644 (Phase 3+4 ADR
+    0029 retrofit). The YAML file is the desired state. This script performs:
+
+      1. GET current glossaries + terms from the Data Map data plane.
+      2. Diff desired vs. tenant by term `name` within the target
+         glossary container.
+      3. Emit a per-object plan table:
+           Create / Update / NoChange / Orphan / Conflict / Skip.
+      4. Apply the ADR 0029 direction-policy pass (audit / portal-wins /
+         repo-wins) before any write.
+      5. Apply only authorized actions (`-WhatIf`, `-PruneMissing`,
+         `-Force`, `-DirectionPolicy`, `-SkipNames`) using per-write
+         `$PSCmdlet.ShouldProcess(...)`.
+      6. Support deterministic `-ExportCurrentState` to hydrate the YAML.
+
+    Apply ordering:
+      The target glossary container must exist before any term POST,
+      because the term anchor carries the glossaryGuid. When the target
+      glossary is absent the script plans a glossary Create row first,
+      then term Create rows; -WhatIf surfaces both. Apply runs glossary
+      Create before any term operation.
+
+    Still deferred (separate follow-up):
+      * `experts` / `stewards` Entra principal resolution (ADR 0023
+        Category 3). These fields are stripped from comparison; a
+        future item wires `displayName` resolution.
+
+    YAML schema:
+      glossary: <name>          # one container; default name `Glossary`
+      terms:
+        - name: <unique>        # composite key, case-insensitive
+          shortDescription: <text>
+          longDescription: <text>           # optional, multi-line
+          status: Draft|Approved|Alert|Expired
+          expert: []|[<displayName>]        # Phase 3+4 only
+          steward: []|[<displayName>]       # Phase 3+4 only
+
+    References:
+      Atlas Glossary REST:
+        https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary
+      Purview API auth:
+        https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane
+      ShouldProcess:
+        https://learn.microsoft.com/en-us/powershell/scripting/learn/deep-dives/everything-about-shouldprocess
+      ADR 0012 (-ParametersFile contract):
+        docs/adr/0012-environment-parameters-file.md
+      ADR 0026 (this reconciler):
+        docs/adr/0026-glossary-custom-classifications-reconciler.md
+
+.PARAMETER Path
+    Desired-state YAML path. Defaults to `data-plane/glossary/glossary.yaml`.
+
+.PARAMETER PruneMissing
+    Remove tenant terms not present in YAML. Default `$false`.
+
+.PARAMETER Force
+    Allow overwriting conflict rows (`updatedBy` differs from deploy
+    principal) and allow overwriting a non-empty YAML on export.
+
+.PARAMETER ExportCurrentState
+    Export live tenant glossary terms to YAML and exit. Makes no writes
+    to Purview.
+
+.PARAMETER ParametersFile
+    Environment parameters YAML path (ADR 0012). Defaults to
+    `infra/parameters/lab.yaml` resolved from repo root.
+
+.PARAMETER AccountName
+    Purview account name. When omitted, resolved from `purviewAccountName`
+    in `-ParametersFile`.
+
+.PARAMETER DirectionPolicy
+    Source-of-truth direction for shared-property drift between the
+    desired YAML and the live tenant. One of:
+      * `audit`       -- read-only verification. Build the plan,
+                         emit the categorized report, and exit. No
+                         POST / PUT / DELETE writes against the REST
+                         surface fire under any circumstance.
+      * `portal-wins` -- (default) skip any term whose tracked fields
+                         differ; emit a Skip plan row per skipped term
+                         and a `[ADR0029-SKIP] <name>` line per skip so
+                         an upstream workflow can capture the list.
+                         Create / NoChange / Orphan handling unchanged.
+      * `repo-wins`   -- apply the full plan including shared-property
+                         drift. Emit one Write-Warning per overwritten
+                         term naming the drifted field(s). The typed
+                         `confirm_overwrite_glossary='overwrite portal'`
+                         gate is a CI-layer concern enforced by the
+                         workflow; local operator callers are trusted.
+    Default `portal-wins`.
+    Reference: docs/adr/0029-source-of-truth-direction-policy.md.
+
+.PARAMETER SkipNames
+    Caller-supplied list of term names to force-skip regardless of
+    drift category. A matched name becomes a Skip plan row and emits a
+    `[ADR0029-SKIP] <name>` machine-readable marker. Match is
+    case-insensitive. `-PruneMissing` still respects `-SkipNames` -- a
+    skipped term is never deleted. Names absent from both YAML and
+    tenant are silently ignored. Ignored in audit mode. Default `@()`.
+    Reference: docs/adr/0029-source-of-truth-direction-policy.md.
+
+.EXAMPLE
+    ./scripts/Deploy-Glossary.ps1 -AccountName purview-contoso-lab -WhatIf
+
+.EXAMPLE
+    ./scripts/Deploy-Glossary.ps1 -AccountName purview-contoso-lab -ExportCurrentState
+#>
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Apply')]
+param(
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [ValidateNotNullOrEmpty()]
+    [string]$Path = (Join-Path $PSScriptRoot '..\data-plane\glossary\glossary.yaml'),
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateSet('audit', 'portal-wins', 'repo-wins')]
+    [string]$DirectionPolicy = 'portal-wins',
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [string[]]$SkipNames = @(),
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [switch]$Force,
+
+    [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
+    [switch]$ExportCurrentState,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [ValidateNotNullOrEmpty()]
+    [string]$ParametersFile,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [ValidatePattern('^[A-Za-z][A-Za-z0-9-]{1,62}[A-Za-z0-9]$')]
+    [Alias('PurviewAccountName')]
+    [string]$AccountName
+)
+
+$ErrorActionPreference = 'Stop'
+
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary
+# Pinned per ADR 0026 Decision item 2.
+$script:GlossaryApiVersion = '2023-09-01'
+
+# Server-computed fields that the Atlas glossary GET returns but the POST/PUT
+# body must not (and the desired-state YAML must not) carry. Stripping these
+# symmetrically before comparison guarantees deterministic round-trips.
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary/get-term
+$script:TermComputedFields = @(
+    'guid',
+    'qualifiedName',
+    'anchor',
+    'createTime',
+    'createdBy',
+    'updateTime',
+    'updatedBy',
+    'lastModifiedTS',
+    'version',
+    'classifications',
+    'attributes',
+    'additionalAttributes'
+)
+# `experts` and `stewards` are stripped because Phase 1+2 does not resolve
+# Entra principal references (ADR 0023 Category 3 wiring is Phase 3+4 scope
+# per issue #628). If the live tenant carries populated lists, the export
+# walker emits an empty `expert: []` / `steward: []` in YAML and the
+# comparator ignores the field; a Phase 3+4 follow-up adds the displayName
+# round-trip.
+$script:TermDeferredFields = @('experts', 'stewards')
+
+function Get-ComparableTermProperty {
+    param([Parameter(Mandatory = $true)][AllowNull()]$Term)
+
+    if ($null -eq $Term) { return @{} }
+    if (-not ($Term -is [System.Collections.IDictionary])) { return $Term }
+
+    $out = @{}
+    foreach ($key in $Term.Keys) {
+        $name = [string]$key
+        if ($script:TermComputedFields -contains $name) { continue }
+        if ($script:TermDeferredFields -contains $name) { continue }
+        $out[$name] = $Term[$key]
+    }
+    return $out
+}
+
+function ConvertTo-DesiredTermHash {
+    param([Parameter(Mandatory = $true)][hashtable]$Term)
+
+    if (-not $Term.ContainsKey('name') -or [string]::IsNullOrWhiteSpace([string]$Term.name)) {
+        throw "Glossary term entry is missing required field 'name'."
+    }
+    $out = @{ name = [string]$Term.name }
+    foreach ($k in @('shortDescription', 'longDescription', 'status')) {
+        if ($Term.ContainsKey($k) -and $null -ne $Term[$k]) {
+            $out[$k] = [string]$Term[$k]
+        }
+    }
+    return $out
+}
+
+function ConvertTo-TenantTermHash {
+    param([Parameter(Mandatory = $true)]$Term)
+
+    $h = ($Term | ConvertTo-Json -Depth 25 | ConvertFrom-Json -AsHashtable)
+    return (Get-ComparableTermProperty -Term $h)
+}
+
+function ConvertTo-CanonicalValue {
+    param([AllowNull()]$Value)
+
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $ordered = [ordered]@{}
+        foreach ($key in @($Value.Keys | Sort-Object)) {
+            $ordered[[string]$key] = ConvertTo-CanonicalValue -Value $Value[$key]
+        }
+        return $ordered
+    }
+    if (($Value -is [System.Collections.IEnumerable]) -and -not ($Value -is [string])) {
+        $list = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($item in $Value) {
+            $list.Add((ConvertTo-CanonicalValue -Value $item)) | Out-Null
+        }
+        return $list.ToArray()
+    }
+    return $Value
+}
+
+function ConvertTo-ComparableJson {
+    param([AllowNull()]$Value)
+    $canonical = ConvertTo-CanonicalValue -Value $Value
+    return ($canonical | ConvertTo-Json -Depth 25 -Compress)
+}
+
+function Compare-TermHash {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Desired,
+        [Parameter(Mandatory = $true)][hashtable]$Tenant
+    )
+
+    $diffs = New-Object 'System.Collections.Generic.List[string]'
+    $desiredStripped = Get-ComparableTermProperty -Term $Desired
+    $tenantStripped  = Get-ComparableTermProperty -Term $Tenant
+    foreach ($k in @('name', 'shortDescription', 'longDescription', 'status')) {
+        $d = if ($desiredStripped.ContainsKey($k)) { [string]$desiredStripped[$k] } else { '' }
+        $t = if ($tenantStripped.ContainsKey($k))  { [string]$tenantStripped[$k]  } else { '' }
+        if ($d -ne $t) { $diffs.Add($k) | Out-Null }
+    }
+    return $diffs.ToArray()
+}
+
+function Format-PurviewRestError {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+    $message = $ErrorRecord.Exception.Message
+    try {
+        if ($ErrorRecord.Exception.Response) {
+            $resp = $ErrorRecord.Exception.Response
+            $stream = $resp.GetResponseStream()
+            if ($stream) {
+                $reader = New-Object System.IO.StreamReader($stream)
+                $body = $reader.ReadToEnd()
+                if (-not [string]::IsNullOrWhiteSpace($body)) {
+                    return "HTTP response: $body"
+                }
+            }
+            return $message
+        }
+    } catch { return $message }
+    return $message
+}
+
+function Get-LastModifiedByIdentity {
+    param([Parameter(Mandatory = $true)]$Term)
+    foreach ($c in @($Term.updatedBy, $Term.createdBy)) {
+        if ($null -ne $c -and -not [string]::IsNullOrWhiteSpace([string]$c)) { return [string]$c }
+    }
+    return $null
+}
+
+function Test-ConflictRow {
+    param(
+        [Parameter(Mandatory = $true)]$TenantRaw,
+        [Parameter(Mandatory = $true)][string]$DeployIdentity,
+        [Parameter(Mandatory = $true)][bool]$ForceEnabled
+    )
+    if ($ForceEnabled) { return $false }
+    if ([string]::IsNullOrWhiteSpace($DeployIdentity)) { return $false }
+    $last = Get-LastModifiedByIdentity -Term $TenantRaw
+    if ([string]::IsNullOrWhiteSpace($last)) { return $false }
+    return ($last -notlike "*$DeployIdentity*")
+}
+
+function Get-TenantGlossary {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseUri,
+        [Parameter(Mandatory = $true)][hashtable]$Headers,
+        [Parameter(Mandatory = $true)][string]$ApiVersion
+    )
+    # Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary/list-glossaries
+    $uri = "$BaseUri/datamap/api/atlas/v2/glossary?limit=1000&api-version=$ApiVersion"
+    $resp = Invoke-RestMethod -Method GET -Uri $uri -Headers $Headers -ErrorAction Stop
+    return @($resp)
+}
+
+function Get-TenantTerm {
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseUri,
+        [Parameter(Mandatory = $true)][hashtable]$Headers,
+        [Parameter(Mandatory = $true)][string]$ApiVersion,
+        [Parameter(Mandatory = $true)][string]$GlossaryGuid
+    )
+    # Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary/list-terms-by-glossary
+    $uri = "$BaseUri/datamap/api/atlas/v2/glossary/$([uri]::EscapeDataString($GlossaryGuid))/terms?limit=1000&api-version=$ApiVersion"
+    $resp = Invoke-RestMethod -Method GET -Uri $uri -Headers $Headers -ErrorAction Stop
+    return @($resp)
+}
+
+function ConvertTo-GlossaryExportDoc {
+    param(
+        [Parameter(Mandatory = $true)][string]$GlossaryName,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable[]]$Terms
+    )
+    $ordered = @($Terms | Sort-Object -Property { $_.name.ToLowerInvariant() })
+    return [ordered]@{
+        glossary = $GlossaryName
+        terms = @($ordered | ForEach-Object {
+            $entry = [ordered]@{ name = $_.name }
+            foreach ($k in @('shortDescription', 'longDescription', 'status')) {
+                if ($_.ContainsKey($k)) { $entry[$k] = $_[$k] }
+            }
+            # Phase 1+2: emit empty principal lists; Phase 3+4 round-trips displayNames.
+            $entry['expert']  = @()
+            $entry['steward'] = @()
+            $entry
+        })
+    }
+}
+
+function Invoke-GlossaryExport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$GlossaryName,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable[]]$Terms,
+        [Parameter(Mandatory = $true)][bool]$ForceOverwrite
+    )
+    if (Test-Path -LiteralPath $Path) {
+        $existing = Get-Content -LiteralPath $Path -Raw
+        $hasBody = $false
+        if ($existing) {
+            try {
+                $existingDoc = $existing | ConvertFrom-Yaml -ErrorAction Stop
+                if ($existingDoc -and $existingDoc.ContainsKey('terms') -and $existingDoc.terms -and $existingDoc.terms.Count -gt 0) {
+                    $hasBody = $true
+                }
+            } catch { $hasBody = $false }
+        }
+        if ($hasBody -and -not $ForceOverwrite) {
+            Write-Error ("Target YAML '{0}' already declares terms. Re-run with -Force to overwrite." -f $Path)
+            return
+        }
+    }
+    $headerLines = @()
+    if (Test-Path -LiteralPath $Path) {
+        foreach ($line in (Get-Content -LiteralPath $Path)) {
+            if ($line -match '^\s*$' -or $line -match '^\s*#') { $headerLines += $line } else { break }
+        }
+    }
+    $doc = ConvertTo-GlossaryExportDoc -GlossaryName $GlossaryName -Terms $Terms
+    $body = ConvertTo-Yaml $doc
+    $nl = [Environment]::NewLine
+    $output = if ($headerLines.Count) { ($headerLines -join $nl) + $nl + $body } else { $body }
+    Set-Content -LiteralPath $Path -Value $output -Encoding utf8
+    Write-Information ("Exported {0} term(s) from glossary '{1}' to '{2}'." -f $Terms.Count, $GlossaryName, $Path) -InformationAction Continue
+}
+
+# Reference: https://www.powershellgallery.com/packages/powershell-yaml
+if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
+    Write-Information 'Installing powershell-yaml module to CurrentUser scope.' -InformationAction Continue
+    Install-Module -Name 'powershell-yaml' -Scope CurrentUser -Force -AllowClobber
+}
+Import-Module 'powershell-yaml' -ErrorAction Stop
+# Reference: docs/adr/0029-source-of-truth-direction-policy.md
+Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+$scriptRoot = Split-Path -Parent $PSCommandPath
+$repoRoot = Split-Path -Parent $scriptRoot
+
+if (-not $ParametersFile) {
+    $ParametersFile = Join-Path $repoRoot 'infra/parameters/lab.yaml'
+}
+if (-not (Test-Path -LiteralPath $ParametersFile)) {
+    Write-Error ("Parameters file not found: '{0}'. See docs/adr/0012-environment-parameters-file.md." -f $ParametersFile)
+    return
+}
+$ParametersFile = (Resolve-Path -LiteralPath $ParametersFile).Path
+$parameters = Get-Content -LiteralPath $ParametersFile -Raw | ConvertFrom-Yaml
+if (-not $parameters -or -not $parameters.ContainsKey('purviewAccountName')) {
+    Write-Error ("Parameters file '{0}' is missing required key 'purviewAccountName'." -f $ParametersFile)
+    return
+}
+if (-not $AccountName) { $AccountName = [string]$parameters.purviewAccountName }
+
+$mode = if ($ExportCurrentState.IsPresent) { 'Export' } else { 'Apply' }
+Write-Information ("Parameters file : {0}" -f $ParametersFile) -InformationAction Continue
+Write-Information ("Purview account : {0}" -f $AccountName) -InformationAction Continue
+Write-Information ("YAML path       : {0}" -f $Path) -InformationAction Continue
+Write-Information ("Mode            : {0}" -f $mode) -InformationAction Continue
+if ($mode -eq 'Apply') {
+    Write-Information ("DirectionPolicy : {0}" -f $DirectionPolicy) -InformationAction Continue
+    Write-Information ("SkipNames count : {0}" -f $SkipNames.Count) -InformationAction Continue
+}
+
+$desiredGlossaryName = $null
+$desiredTerms = @()
+if ($mode -eq 'Apply') {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Error ("Desired-state YAML not found at '{0}'." -f $Path)
+        return
+    }
+    $Path = (Resolve-Path -LiteralPath $Path).Path
+    $desiredRoot = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Yaml
+    if (-not $desiredRoot) {
+        Write-Error ("Desired-state YAML '{0}' parsed as empty." -f $Path)
+        return
+    }
+    if (-not $desiredRoot.ContainsKey('glossary') -or [string]::IsNullOrWhiteSpace([string]$desiredRoot.glossary)) {
+        Write-Error ("Desired-state YAML '{0}' is missing top-level key 'glossary'." -f $Path)
+        return
+    }
+    if (-not $desiredRoot.ContainsKey('terms')) {
+        Write-Error ("Desired-state YAML '{0}' is missing top-level key 'terms' (use [] when none)." -f $Path)
+        return
+    }
+    $desiredGlossaryName = [string]$desiredRoot.glossary
+    $desiredTerms = @($desiredRoot.terms | ForEach-Object { ConvertTo-DesiredTermHash -Term ([hashtable]$_) })
+    Write-Information ("Desired         : glossary '{0}' with {1} term(s)" -f $desiredGlossaryName, $desiredTerms.Count) -InformationAction Continue
+}
+
+# Reference: https://learn.microsoft.com/en-us/cli/azure/account#az-account-show
+$accountJson = az account show -o json --only-show-errors 2>$null
+if (-not $accountJson) {
+    Write-Error 'No active Azure CLI session. Run `az login` before invoking this script.'
+    return
+}
+$account = ($accountJson -join "`n") | ConvertFrom-Json
+$deployIdentity = [string]$account.user.name
+Write-Information ("Subscription    : {0}" -f $account.name) -InformationAction Continue
+
+$connectScript = Join-Path $scriptRoot 'Connect-Purview.ps1'
+if (-not (Test-Path -LiteralPath $connectScript)) {
+    Write-Error ("Helper not found: '{0}'." -f $connectScript)
+    return
+}
+$ctx = & $connectScript -AccountName $AccountName
+if (-not $ctx -or -not $ctx.DataHeaders -or -not $ctx.Endpoint) {
+    Write-Error 'Connect-Purview.ps1 did not return data-plane headers.'
+    return
+}
+$baseUri = $ctx.Endpoint
+Write-Information ("Endpoint        : {0}" -f $baseUri) -InformationAction Continue
+
+# --- Enumerate tenant state ---
+try {
+    $tenantGlossaries = @(Get-TenantGlossary -BaseUri $baseUri -Headers $ctx.DataHeaders -ApiVersion $script:GlossaryApiVersion)
+} catch {
+    Write-Error ("Failed to list tenant glossaries: {0}" -f (Format-PurviewRestError -ErrorRecord $_))
+    return
+}
+Write-Information ("Tenant          : {0} glossary/glossaries" -f $tenantGlossaries.Count) -InformationAction Continue
+
+# Pick the target glossary (case-insensitive name match). If absent in Apply
+# mode, it will be planned for Create. In Export mode an empty tenant exports
+# the YAML scaffold with 0 terms under the requested name.
+$targetGlossary = $null
+$targetGlossaryName = if ($mode -eq 'Apply') { $desiredGlossaryName } else { 'Glossary' }
+if ($tenantGlossaries.Count -gt 0) {
+    $targetGlossary = $tenantGlossaries | Where-Object { [string]$_.name -ieq $targetGlossaryName } | Select-Object -First 1
+}
+
+$tenantTermsRaw = @()
+if ($targetGlossary) {
+    try {
+        $tenantTermsRaw = @(Get-TenantTerm -BaseUri $baseUri -Headers $ctx.DataHeaders -ApiVersion $script:GlossaryApiVersion -GlossaryGuid ([string]$targetGlossary.guid))
+    } catch {
+        Write-Error ("Failed to list terms for glossary '{0}': {1}" -f $targetGlossaryName, (Format-PurviewRestError -ErrorRecord $_))
+        return
+    }
+}
+Write-Information ("Tenant terms    : {0} in glossary '{1}'" -f $tenantTermsRaw.Count, $targetGlossaryName) -InformationAction Continue
+
+# --- Export branch ---
+if ($mode -eq 'Export') {
+    $tenantTermHashes = @($tenantTermsRaw | ForEach-Object { ConvertTo-TenantTermHash -Term $_ })
+    $exportTarget = if (Test-Path -LiteralPath $Path) {
+        (Resolve-Path -LiteralPath $Path).Path
+    } else {
+        $parent = Split-Path -Parent $Path
+        if (-not (Test-Path -LiteralPath $parent)) {
+            Write-Error ("Parent directory does not exist: '{0}'." -f $parent)
+            return
+        }
+        Join-Path ((Resolve-Path -LiteralPath $parent).Path) (Split-Path -Leaf $Path)
+    }
+    if ($PSCmdlet.ShouldProcess($exportTarget, 'Write exported glossary state')) {
+        Invoke-GlossaryExport -Path $exportTarget -GlossaryName $targetGlossaryName -Terms $tenantTermHashes -ForceOverwrite $Force.IsPresent
+    } else {
+        Write-Information '-WhatIf specified with -ExportCurrentState. Planned behaviour (no file written):' -InformationAction Continue
+        Write-Information ("  Would write {0} term(s) under glossary '{1}' to '{2}'." -f $tenantTermHashes.Count, $targetGlossaryName, $exportTarget) -InformationAction Continue
+    }
+    return
+}
+
+# --- Plan (Apply mode) ---
+$plan = New-Object 'System.Collections.Generic.List[object]'
+
+# Glossary container plan row. If absent, will be Created before any term op.
+if (-not $targetGlossary) {
+    $plan.Add([pscustomobject]@{ Kind = 'Glossary'; Action = 'Create'; Name = $targetGlossaryName; Desired = @{ name = $targetGlossaryName }; Reason = 'Glossary container absent from tenant.' }) | Out-Null
+} else {
+    $plan.Add([pscustomobject]@{ Kind = 'Glossary'; Action = 'NoChange'; Name = $targetGlossaryName; Desired = $null; Reason = 'Glossary container exists.' }) | Out-Null
+}
+
+$desiredByName = @{}
+foreach ($t in $desiredTerms) {
+    $key = $t.name.ToLowerInvariant()
+    if ($desiredByName.ContainsKey($key)) {
+        Write-Error ("Duplicate term name '{0}' in YAML. Names must be unique within a glossary." -f $t.name)
+        return
+    }
+    $desiredByName[$key] = $t
+}
+
+$tenantByName = @{}
+$tenantRawByName = @{}
+foreach ($t in $tenantTermsRaw) {
+    $h = ConvertTo-TenantTermHash -Term $t
+    if (-not $h.ContainsKey('name') -or [string]::IsNullOrWhiteSpace([string]$h.name)) { continue }
+    $key = ([string]$h.name).ToLowerInvariant()
+    $tenantByName[$key] = $h
+    $tenantRawByName[$key] = $t
+}
+
+foreach ($d in ($desiredTerms | Sort-Object -Property { $_.name.ToLowerInvariant() })) {
+    $key = $d.name.ToLowerInvariant()
+    if ($tenantByName.ContainsKey($key)) {
+        $diffs = Compare-TermHash -Desired $d -Tenant $tenantByName[$key]
+        if ($diffs.Count -eq 0) {
+            $plan.Add([pscustomobject]@{ Kind = 'Term'; Action = 'NoChange'; Name = $d.name; Desired = $d; Reason = 'In sync with tenant.' }) | Out-Null
+        } else {
+            $isConflict = Test-ConflictRow -TenantRaw $tenantRawByName[$key] -DeployIdentity $deployIdentity -ForceEnabled $Force.IsPresent
+            if ($isConflict) {
+                $who = Get-LastModifiedByIdentity -Term $tenantRawByName[$key]
+                $plan.Add([pscustomobject]@{ Kind = 'Term'; Action = 'Conflict'; Name = $d.name; Desired = $d; Reason = ("Drift in: {0}; updatedBy '{1}' differs from deploy principal." -f ($diffs -join ', '), $who) }) | Out-Null
+            } else {
+                $plan.Add([pscustomobject]@{ Kind = 'Term'; Action = 'Update'; Name = $d.name; Desired = $d; Reason = ('Drift in: {0}' -f ($diffs -join ', ')) }) | Out-Null
+            }
+        }
+    } else {
+        $plan.Add([pscustomobject]@{ Kind = 'Term'; Action = 'Create'; Name = $d.name; Desired = $d; Reason = 'Declared in YAML; absent from tenant.' }) | Out-Null
+    }
+}
+foreach ($t in ($tenantByName.Values | Where-Object { -not $desiredByName.ContainsKey($_.name.ToLowerInvariant()) } | Sort-Object -Property { $_.name.ToLowerInvariant() })) {
+    $reason = if ($PruneMissing.IsPresent) { 'Tenant-only; will be removed (-PruneMissing).' } else { 'Tenant-only; skipped (no -PruneMissing).' }
+    $plan.Add([pscustomobject]@{ Kind = 'Term'; Action = 'Orphan'; Name = $t.name; Desired = $null; Reason = $reason }) | Out-Null
+}
+
+#region ADR 0029 direction-policy pass
+
+# Audit short-circuit: `-DirectionPolicy audit` flips $WhatIfPreference
+# for the rest of this script so every $PSCmdlet.ShouldProcess(...)
+# call in the apply loop returns false. No POST / PUT / DELETE writes
+# fire under any circumstance, while the categorized plan is preserved.
+# Reference: docs/adr/0029-source-of-truth-direction-policy.md
+if ($DirectionPolicy -eq 'audit') {
+    Write-Information '[ADR0029-AUDIT] DirectionPolicy=audit - no writes will fire. Plan below is read-only.' -InformationAction Continue
+    $WhatIfPreference = $true
+}
+
+# Direction-policy pass on Term rows. -SkipNames matches any row
+# category; portal-wins drift arbitration applies to Update rows only.
+# The Glossary container row (Kind='Glossary') is intentionally excluded
+# -- the container is infrastructure, not a managed term.
+# Reference: docs/adr/0029-source-of-truth-direction-policy.md
+$script:Adr0029Skips = New-Object 'System.Collections.Generic.List[object]'
+if ($DirectionPolicy -ne 'audit') {
+    foreach ($row in $plan) {
+        if ($row.Kind -ne 'Term') { continue }
+        if ($row.Action -notin @('Create', 'Update', 'NoChange', 'Orphan', 'Conflict')) { continue }
+        $hasDrift = ($row.Action -eq 'Update')
+        $decision = Resolve-DirectionPolicyAction `
+            -Policy      $DirectionPolicy `
+            -SkipList    $SkipNames `
+            -DisplayName ([string]$row.Name) `
+            -HasDrift    $hasDrift
+        if ($decision.Action -eq 'Skip') {
+            $row.Action = 'Skip'
+            $row.Reason = $decision.Reason
+            $script:Adr0029Skips.Add([pscustomobject]@{
+                Kind        = 'Term'
+                DisplayName = [string]$row.Name
+                Reason      = $decision.Reason
+            })
+            continue
+        }
+        if ($row.Action -eq 'Update' -and $DirectionPolicy -eq 'repo-wins') {
+            $fieldsText = ($row.Reason -replace '^Drift in: ', '')
+            Write-Warning ("repo-wins overwriting tenant on glossary term '{0}' fields: {1}" -f $row.Name, $fieldsText)
+        }
+    }
+    # Machine-readable marker per skipped term for the workflow's
+    # auto-PR step. Format must match `^\[ADR0029-SKIP\] (.+)$`.
+    foreach ($s in $script:Adr0029Skips) {
+        Write-Information ("[ADR0029-SKIP] {0}" -f $s.DisplayName) -InformationAction Continue
+    }
+}
+
+#endregion
+
+# --- Apply ---
+$report = New-Object 'System.Collections.Generic.List[object]'
+
+function Invoke-GlossaryCreate {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    # Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary/create
+    $uri = "$baseUri/datamap/api/atlas/v2/glossary?api-version=$script:GlossaryApiVersion"
+    $payload = @{ name = $Name; qualifiedName = $Name } | ConvertTo-Json -Depth 5 -Compress
+    return Invoke-RestMethod -Method POST -Uri $uri -Headers $ctx.DataHeaders -Body $payload -ContentType 'application/json' -ErrorAction Stop
+}
+
+function Invoke-TermCreate {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Desired,
+        [Parameter(Mandatory = $true)][string]$GlossaryGuid
+    )
+    # Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary/create-term
+    $body = @{
+        name = $Desired.name
+        anchor = @{ glossaryGuid = $GlossaryGuid }
+    }
+    foreach ($k in @('shortDescription', 'longDescription', 'status')) {
+        if ($Desired.ContainsKey($k)) { $body[$k] = $Desired[$k] }
+    }
+    $uri = "$baseUri/datamap/api/atlas/v2/glossary/term?api-version=$script:GlossaryApiVersion"
+    $payload = $body | ConvertTo-Json -Depth 10 -Compress
+    $null = Invoke-RestMethod -Method POST -Uri $uri -Headers $ctx.DataHeaders -Body $payload -ContentType 'application/json' -ErrorAction Stop
+}
+
+function Invoke-TermUpdate {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Desired,
+        [Parameter(Mandatory = $true)]$TenantRaw
+    )
+    # Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary/update-term
+    $guid = [string]$TenantRaw.guid
+    $body = @{
+        name = $Desired.name
+        anchor = @{ glossaryGuid = [string]$TenantRaw.anchor.glossaryGuid }
+    }
+    foreach ($k in @('shortDescription', 'longDescription', 'status')) {
+        if ($Desired.ContainsKey($k)) { $body[$k] = $Desired[$k] }
+    }
+    $uri = "$baseUri/datamap/api/atlas/v2/glossary/term/$([uri]::EscapeDataString($guid))?api-version=$script:GlossaryApiVersion"
+    $payload = $body | ConvertTo-Json -Depth 10 -Compress
+    $null = Invoke-RestMethod -Method PUT -Uri $uri -Headers $ctx.DataHeaders -Body $payload -ContentType 'application/json' -ErrorAction Stop
+}
+
+function Invoke-TermDelete {
+    param([Parameter(Mandatory = $true)]$TenantRaw)
+    # Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary/delete-term
+    $guid = [string]$TenantRaw.guid
+    $uri = "$baseUri/datamap/api/atlas/v2/glossary/term/$([uri]::EscapeDataString($guid))?api-version=$script:GlossaryApiVersion"
+    $null = Invoke-RestMethod -Method DELETE -Uri $uri -Headers $ctx.DataHeaders -ErrorAction Stop
+}
+
+# Process the glossary Create row first so subsequent term rows can use the
+# new guid. NoChange row is a no-op.
+$activeGlossaryGuid = if ($targetGlossary) { [string]$targetGlossary.guid } else { $null }
+foreach ($row in $plan) {
+    if ($row.Kind -ne 'Glossary') { continue }
+    if ($row.Action -eq 'Create') {
+        if ($PSCmdlet.ShouldProcess("Purview glossary '$($row.Name)'", 'POST glossary (Create)')) {
+            try {
+                $created = Invoke-GlossaryCreate -Name $row.Name
+                $activeGlossaryGuid = [string]$created.guid
+                $report.Add([pscustomobject]@{ Category = 'Create'; Kind = 'Glossary'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+            } catch {
+                $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Glossary'; Name = $row.Name; Reason = ("Glossary Create failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_)) }) | Out-Null
+            }
+        } else {
+            $report.Add([pscustomobject]@{ Category = 'Create'; Kind = 'Glossary'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+        }
+    } else {
+        $report.Add([pscustomobject]@{ Category = 'NoChange'; Kind = 'Glossary'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+    }
+}
+
+foreach ($row in $plan) {
+    if ($row.Kind -ne 'Term') { continue }
+    $target = "Purview glossary term '$($row.Name)'"
+    switch ($row.Action) {
+        'NoChange' {
+            $report.Add([pscustomobject]@{ Category = 'NoChange'; Kind = 'Term'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+            continue
+        }
+        'Skip' {
+            # ADR 0029 portal-wins drift skip or -SkipNames pre-pass.
+            # Reported but never written; -PruneMissing is bypassed.
+            $report.Add([pscustomobject]@{ Category = 'Skip'; Kind = 'Term'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+            continue
+        }
+        'Conflict' {
+            $report.Add([pscustomobject]@{ Category = 'Conflict'; Kind = 'Term'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+            continue
+        }
+        'Create' {
+            if (-not $activeGlossaryGuid) {
+                $report.Add([pscustomobject]@{ Category = 'Create'; Kind = 'Term'; Name = $row.Name; Reason = ("Would be created after glossary '{0}' is provisioned." -f $targetGlossaryName) }) | Out-Null
+                continue
+            }
+            if ($PSCmdlet.ShouldProcess($target, 'POST glossary term (Create)')) {
+                try {
+                    Invoke-TermCreate -Desired $row.Desired -GlossaryGuid $activeGlossaryGuid
+                    $report.Add([pscustomobject]@{ Category = 'Create'; Kind = 'Term'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+                } catch {
+                    $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Term'; Name = $row.Name; Reason = ("Create failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_)) }) | Out-Null
+                }
+            } else {
+                $report.Add([pscustomobject]@{ Category = 'Create'; Kind = 'Term'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+            }
+            continue
+        }
+        'Update' {
+            if ($PSCmdlet.ShouldProcess($target, 'PUT glossary term (Update)')) {
+                try {
+                    Invoke-TermUpdate -Desired $row.Desired -TenantRaw $tenantRawByName[$row.Name.ToLowerInvariant()]
+                    $report.Add([pscustomobject]@{ Category = 'Update'; Kind = 'Term'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+                } catch {
+                    $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Term'; Name = $row.Name; Reason = ("Update failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_)) }) | Out-Null
+                }
+            } else {
+                $report.Add([pscustomobject]@{ Category = 'Update'; Kind = 'Term'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+            }
+            continue
+        }
+        'Orphan' {
+            if (-not $PruneMissing.IsPresent) {
+                $report.Add([pscustomobject]@{ Category = 'Orphan'; Kind = 'Term'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+                continue
+            }
+            if ($PSCmdlet.ShouldProcess($target, 'DELETE glossary term')) {
+                try {
+                    Invoke-TermDelete -TenantRaw $tenantRawByName[$row.Name.ToLowerInvariant()]
+                    $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Term'; Name = $row.Name; Reason = 'Deleted (-PruneMissing).' }) | Out-Null
+                } catch {
+                    $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Term'; Name = $row.Name; Reason = ("Delete failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_)) }) | Out-Null
+                }
+            } else {
+                $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Term'; Name = $row.Name; Reason = 'Would be deleted (-PruneMissing).' }) | Out-Null
+            }
+            continue
+        }
+    }
+}
+
+$report
+
+$counts = @{}
+foreach ($r in $report) {
+    if (-not $counts.ContainsKey($r.Category)) { $counts[$r.Category] = 0 }
+    $counts[$r.Category]++
+}
+$bannerParts = @()
+foreach ($k in @('Create', 'Update', 'NoChange', 'Orphan', 'Conflict', 'Skip', 'Removed', 'Failed')) {
+    if ($counts.ContainsKey($k)) { $bannerParts += ("{0} {1}" -f $counts[$k], $k) }
+}
+if ($bannerParts.Count -gt 0) {
+    Write-Information ("Plan: {0}" -f ($bannerParts -join ', ')) -InformationAction Continue
+} else {
+    Write-Information 'Plan: 0 changes.' -InformationAction Continue
+}

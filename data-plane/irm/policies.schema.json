@@ -1,0 +1,62 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/irm/policies.schema.json",
+    "title": "Microsoft Purview Insider Risk Management policies",
+    "description": "Desired state for Microsoft Purview Insider Risk Management policies consumed by scripts/Deploy-IRMPolicies.ps1. Reference: https://learn.microsoft.com/en-us/purview/insider-risk-management",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "policies" ],
+    "properties": {
+        "policies": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/irmPolicy" }
+        }
+    },
+    "definitions": {
+        "irmPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "scenario" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Unique policy identifier. Maps to the -Name parameter of New-InsiderRiskPolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-insiderriskpolicy"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Free-form policy description. Maps to -Comment on New-InsiderRiskPolicy."
+                },
+                "scenario": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "IRM scenario template. Maps to the -InsiderRiskScenario parameter of New-InsiderRiskPolicy. The enum below was extracted directly from the PlaybookScenarioType validation error returned by a live Security & Compliance PowerShell session in the lab tenant (issue #267). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-insiderriskpolicy",
+                    "enum": [
+                        "TenantSetting",
+                        "IntellectualPropertyTheft",
+                        "LeakOfInformation",
+                        "DisgruntledEmployeeDataLeak",
+                        "HighValueEmployeeDataLeak",
+                        "SecurityAlertSPV",
+                        "DepartingEmployeeSPV",
+                        "DisgruntledEmployeeSPV",
+                        "HighValueEmployeeSPV",
+                        "SecurityPolicyViolation",
+                        "WorkplaceThreat",
+                        "HealthcareDataThreat",
+                        "SessionRecordingSetting",
+                        "SessionRecording",
+                        "UnacceptableUsage",
+                        "RiskyAIUsage",
+                        "RiskyAgents"
+                    ]
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether the policy is active. When omitted, the cmdlet default applies."
+                }
+            }
+        }
+    }
+}

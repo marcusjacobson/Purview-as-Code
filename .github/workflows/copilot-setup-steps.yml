@@ -1,0 +1,65 @@
+# copilot-setup-steps.yml
+#
+# Pre-installs the Purview-as-Code build-loop toolchain so the GitHub-hosted
+# Copilot coding agent (the headless @artifact-resolver) runs the same G2
+# (lint / build) and G3 (unit test) gates as the local /build-item loop. The
+# job ID MUST be `copilot-setup-steps` so the coding agent discovers it; the
+# agent ignores the triggers below and runs only this job before it starts.
+#
+# This workflow only provisions the agent build environment. It makes no
+# live-tenant call, no deploy, and no data-plane mutation.
+#
+# References:
+#   - Customize the Copilot coding agent environment (job ID + behaviour):
+#     https://docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/customize-the-agent-environment
+#   - Security hardening for GitHub Actions (least-privilege permissions, action pinning):
+#     https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   - Install the Bicep CLI with Azure CLI:
+#     https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/install
+#   - Install-Module (PowerShellGet):
+#     https://learn.microsoft.com/en-us/powershell/module/powershellget/install-module
+name: copilot-setup-steps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+# Least-privilege: deny by default at the workflow scope. The setup job opts
+# in to only the read access it needs to check out the repository.
+permissions: {}
+
+jobs:
+  # Job ID is fixed by the Copilot coding agent contract; do not rename.
+  copilot-setup-steps:
+    name: Provision build-loop toolchain
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Bicep CLI backs the G2 lint / build gate for infra/** changes, matching
+      # the validate.yml `bicep` job (`az bicep install`). The az CLI is
+      # preinstalled on the ubuntu-latest runner the coding agent uses.
+      # Reference: https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/install
+      - name: Install Bicep CLI
+        run: az bicep install
+
+      # PowerShell modules prime the G3 unit-test gate (Pester, pinned to the
+      # same minimum the tests/Run-Pester.ps1 runner enforces), the G2 lint gate
+      # for scripts/** (PSScriptAnalyzer), and data-plane YAML parsing used by
+      # the reconcilers (powershell-yaml). Mirrors the validate.yml `powershell`
+      # and `dspm-posture` jobs.
+      # Reference: https://learn.microsoft.com/en-us/powershell/module/powershellget/install-module
+      - name: Install PowerShell build-loop modules
+        shell: pwsh
+        run: |
+          Install-Module -Name Pester -MinimumVersion 5.5.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
+          Install-Module -Name powershell-yaml -Scope CurrentUser -Force

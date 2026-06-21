@@ -1,0 +1,80 @@
+name: PR Stacked — Retarget on Merge
+
+# Intentionally NOT gated to actor.login. The job already gates on
+# `github.event.pull_request.merged == true`, and only contributors with
+# write access to main can produce a merge event. An extra actor check
+# would not narrow the surface further.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  retarget-stacked-prs:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    steps:
+      - name: Find stacked PRs to retarget
+        id: find-stacked
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MERGED_HEAD="${{ github.event.pull_request.head.ref }}"
+          DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+          REPO="${{ github.repository }}"
+
+          echo "Merged branch: $MERGED_HEAD"
+          echo "Default branch: $DEFAULT_BRANCH"
+
+          STACKED_PRS=$(gh pr list \
+            --repo "$REPO" \
+            --state open \
+            --json number,baseRefName,title \
+            --jq ".[] | select(.baseRefName == \"$MERGED_HEAD\") | .number" \
+            2>/dev/null || echo "")
+
+          if [ -z "$STACKED_PRS" ]; then
+            echo "No stacked PRs found targeting '$MERGED_HEAD'."
+            echo "stacked_prs=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Found stacked PRs: $STACKED_PRS"
+            echo "stacked_prs=$STACKED_PRS" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "merged_head=$MERGED_HEAD" >> "$GITHUB_OUTPUT"
+          echo "default_branch=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Retarget stacked PRs
+        if: steps.find-stacked.outputs.stacked_prs != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MERGED_HEAD="${{ steps.find-stacked.outputs.merged_head }}"
+          DEFAULT_BRANCH="${{ steps.find-stacked.outputs.default_branch }}"
+          REPO="${{ github.repository }}"
+          MERGED_PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          for PR_NUMBER in ${{ steps.find-stacked.outputs.stacked_prs }}; do
+            echo "Retargeting PR #$PR_NUMBER from '$MERGED_HEAD' to '$DEFAULT_BRANCH'..."
+
+            gh api -X PATCH \
+              "repos/$REPO/pulls/$PR_NUMBER" \
+              -f base="$DEFAULT_BRANCH"
+
+            gh pr comment "$PR_NUMBER" \
+              --repo "$REPO" \
+              --body "<!-- pr-stacked-retarget:notice -->
+          ## Base branch retargeted
+
+          PR #$MERGED_PR_NUMBER (\`$MERGED_HEAD\`) was merged. This stacked PR's base branch has been automatically retargeted from \`$MERGED_HEAD\` to \`$DEFAULT_BRANCH\`.
+
+          Please review the diff to ensure the changes are still correct after retargeting. You may need to rebase this branch.
+
+          *Triggered by the \`pr-stacked-retarget\` workflow.*"
+
+            echo "PR #$PR_NUMBER retargeted successfully."
+          done

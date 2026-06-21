@@ -1,0 +1,252 @@
+name: validate-oidc-auth
+
+# Wave 0 #15 -- end-to-end proof that GitHub Actions OIDC mints tokens for
+# both the control-plane Entra app (used for ARM / Bicep deploys) and the
+# data-plane Entra app (used for Security & Compliance Center PowerShell
+# via Connect-IPPSSession -AccessToken).
+#
+# This workflow performs no persistent state changes. It only:
+#   1. Federates an OIDC token to the control-plane app and reads the lab
+#      resource group via ARM as proof of the handshake.
+#   2. Briefly opens the Key Vault firewall (publicNetworkAccess Enabled)
+#      so the GitHub-hosted runner can read the data-plane cert. The
+#      control-plane app authorizes this via Contributor on the RG (Wave
+#      0 #5d). The vault is re-locked at the end of the job whether the
+#      smoke passes or fails -- steady state remains Disabled (Wave 0 #5a).
+#   3. Federates a fresh OIDC token to the data-plane app, fetches a
+#      Key-Vault-signed S&C app-only access token via
+#      scripts/Get-PurviewIPPSAccessToken.ps1, opens an S&C PowerShell
+#      session, lists one role group as proof, and disconnects.
+#
+# The two app identities are kept distinct per ADR 0010 (per-workflow
+# identity, single-subject federated credential `environment:lab`). The
+# certificate-backed JWT path is required because the data-plane app's
+# private key is a non-exportable Key Vault managed key per ADR 0011 -- the
+# default Connect-IPPSSession -CertificateThumbprint path is impossible by
+# design.
+#
+# References:
+#   https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+#   https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust
+#   https://learn.microsoft.com/en-us/entra/identity-platform/certificate-credentials
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/connect-ippssession
+#   https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+# Shared concurrency group across every workflow that toggles the lab Key
+# Vault firewall (`kv-contoso-lab-01`). Currently shared with
+# `.github/workflows/kv-temp-unlock.yml`. Two firewall-toggling runs must
+# never overlap, otherwise one run's re-lock can clobber another run's
+# open window or vice versa. `cancel-in-progress: false` so an in-flight
+# run always reaches its re-lock / cleanup step.
+# Reference: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs
+concurrency:
+  group: kv-firewall-lab
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate OIDC to ARM and Security & Compliance PowerShell
+    runs-on: ubuntu-latest
+    environment: lab
+    env:
+      # All values below are environment-variable, sourced from
+      # infra/parameters/lab.yaml. They are not secrets; the secret material
+      # is only the federated app credentials.
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      RESOURCE_GROUP: rg-purview-lab
+      KEY_VAULT_NAME: kv-contoso-lab-01
+      DATA_PLANE_CERT_NAME: gh-oidc-purview-data-plane
+      TENANT_DOMAIN: contoso.onmicrosoft.com
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # 1. Control-plane proof -- ARM
+      # ------------------------------------------------------------------
+      # Reference: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+      - name: Azure login (control-plane app)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID_CONTROL_PLANE }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ARM proof -- account context
+        id: arm-account
+        # `az account show` succeeds only when the OIDC token exchange and
+        # the federated credential subject match. It does not require any
+        # data-plane RBAC.
+        # Reference: https://learn.microsoft.com/en-us/cli/azure/account#az-account-show
+        run: |
+          az account show --query "{tenant:tenantId,subscription:id,user:user.name}" -o json
+
+      - name: ARM proof -- read lab resource group
+        id: arm-rg
+        # Requires the control-plane app to hold at least Reader on the RG.
+        # If this fails with AuthorizationFailed, the OIDC handshake itself
+        # still passed and the failure is an RBAC finding for the build PR.
+        # Reference: https://learn.microsoft.com/en-us/cli/azure/group#az-group-show
+        run: |
+          az group show --name "$RESOURCE_GROUP" --query "{name:name,location:location,id:id}" -o json
+
+      # ------------------------------------------------------------------
+      # 1b. Open Key Vault firewall (temporary, control-plane SP)
+      # ------------------------------------------------------------------
+      # Wave 0 #5e. The vault is publicNetworkAccess: Disabled in steady
+      # state per Wave 0 #5a. The GitHub-hosted runner has no private link
+      # or trusted-service path, so the data-plane cert read fails with
+      # `ForbiddenByConnection`. The control-plane SP holds Contributor on
+      # rg-purview-lab via Wave 0 #5d, which authorizes the toggle. The
+      # paired close step below runs with `if: always()` so the vault is
+      # re-locked even when the S&C proof fails.
+      #
+      # Note: a separate `kv-temp-unlock.yml` workflow exists for
+      # owner-approved ad-hoc unlocks (see docs/runbooks/kv-temp-unlock.md
+      # and issue #244). This OIDC-validation workflow deliberately keeps
+      # its inline unlock rather than calling the shared workflow so it
+      # remains self-contained and trivially auditable for the OIDC
+      # contract it proves.
+      # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
+      # Reference: https://learn.microsoft.com/en-us/azure/key-vault/general/network-security
+      - name: Open Key Vault firewall (temporary)
+        id: kv-open
+        run: |
+          az keyvault update \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --public-network-access Enabled \
+            --query "properties.publicNetworkAccess" -o tsv
+          # Brief settle window. KV firewall changes are typically
+          # near-instant but the data-plane RBAC cache can lag a few
+          # seconds; 10s keeps the cert read deterministic.
+          sleep 10
+
+      # ------------------------------------------------------------------
+      # 2. Data-plane proof -- Security & Compliance PowerShell
+      # ------------------------------------------------------------------
+      # The data-plane app's federated credential carries the same
+      # `environment:lab` subject as the control-plane app (different app,
+      # same subject). azure/login@v2 re-mints a token under the new
+      # client-id; the previous CLI session is overwritten in-place.
+      - name: Azure login (data-plane app)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify data-plane CLI context
+        # Confirms the second OIDC exchange replaced the control-plane CLI
+        # session with the data-plane one before any Key Vault call.
+        run: |
+          az account show --query "{tenant:tenantId,user:user.name}" -o json
+
+      - name: S&C proof -- mint app-only token and list one role group
+        id: scc
+        shell: pwsh
+        env:
+          # Promote the env-block values into the pwsh session so the
+          # Get-PurviewIPPSAccessToken.ps1 invocation references them by
+          # name rather than by ${{ ... }} expansion (which would happen
+          # before the shell quoting boundary -- see
+          # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+          # Although these particular values are non-secret, keeping the
+          # pattern uniform across every step keeps reviews simple.
+          DATA_PLANE_APP_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host "Installing ExchangeOnlineManagement module..."
+          # Connect-IPPSSession -AccessToken support requires v3.7.0+.
+          # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/connect-ippssession
+          Install-Module ExchangeOnlineManagement -Scope CurrentUser -Force -AllowClobber -MinimumVersion 3.7.0
+
+          Write-Host "Acquiring S&C app-only access token via Key Vault-signed JWT..."
+          # Reference: https://learn.microsoft.com/en-us/entra/identity-platform/certificate-credentials
+          $tok = ./scripts/Get-PurviewIPPSAccessToken.ps1 `
+              -VaultName        $env:KEY_VAULT_NAME `
+              -CertificateName  $env:DATA_PLANE_CERT_NAME `
+              -AppId            $env:DATA_PLANE_APP_ID `
+              -TenantId         $env:AZURE_TENANT_ID
+
+          Write-Host "Token acquired. Expires (UTC): $($tok.ExpiresOn)"
+
+          Write-Host "Opening Security & Compliance PowerShell session..."
+          # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/connect-ippssession
+          Connect-IPPSSession `
+              -AccessToken   $tok.AccessToken `
+              -Organization  $env:TENANT_DOMAIN `
+              -ShowBanner:$false
+
+          try {
+              Write-Host "S&C proof -- read one role group:"
+              # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-rolegroup
+              $rg = Get-RoleGroup -ResultSize 1 -ErrorAction Stop
+              if (-not $rg) {
+                  throw 'Get-RoleGroup returned no rows. The S&C session opened but the data-plane app has no read access to the role-group surface.'
+              }
+              $rg | Select-Object Name, RoleAssignments | Format-Table | Out-String | Write-Host
+              Write-Host "S&C proof: PASS"
+          }
+          finally {
+              # Always disconnect; never leave a session open on a runner.
+              # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/disconnect-exchangeonline
+              Disconnect-ExchangeOnline -Confirm:$false | Out-Null
+          }
+
+      # ------------------------------------------------------------------
+      # 3. Re-lock Key Vault firewall (always, control-plane SP)
+      # ------------------------------------------------------------------
+      # Both steps below run with `if: always()` so the vault returns to
+      # publicNetworkAccess: Disabled regardless of S&C proof outcome.
+      # The data-plane azure/login above replaced the CLI session, so we
+      # re-mint a control-plane OIDC token before the firewall close.
+      # Reference: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+      - name: Azure login (control-plane app, re-lock)
+        if: always() && steps.kv-open.outcome == 'success'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID_CONTROL_PLANE }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
+      - name: Close Key Vault firewall
+        id: kv-close
+        if: always() && steps.kv-open.outcome == 'success'
+        run: |
+          az keyvault update \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --public-network-access Disabled \
+            --query "properties.publicNetworkAccess" -o tsv
+
+      - name: Job summary
+        if: always()
+        env:
+          ARM_ACCOUNT_OUTCOME: ${{ steps.arm-account.outcome }}
+          ARM_RG_OUTCOME: ${{ steps.arm-rg.outcome }}
+          KV_OPEN_OUTCOME: ${{ steps.kv-open.outcome }}
+          SCC_OUTCOME: ${{ steps.scc.outcome }}
+          KV_CLOSE_OUTCOME: ${{ steps.kv-close.outcome }}
+        run: |
+          {
+            echo "## OIDC validation result"
+            echo ""
+            echo "| Step | Outcome |"
+            echo "|------|---------|"
+            echo "| Control-plane OIDC -> ARM \`az account show\` | $ARM_ACCOUNT_OUTCOME |"
+            echo "| Control-plane OIDC -> ARM \`az group show\` | $ARM_RG_OUTCOME |"
+            echo "| KV firewall open (temporary) | $KV_OPEN_OUTCOME |"
+            echo "| Data-plane OIDC -> S&C \`Get-RoleGroup\` | $SCC_OUTCOME |"
+            echo "| KV firewall re-lock | $KV_CLOSE_OUTCOME |"
+          } >> "$GITHUB_STEP_SUMMARY"

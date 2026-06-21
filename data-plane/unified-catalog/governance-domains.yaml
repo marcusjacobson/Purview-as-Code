@@ -1,0 +1,41 @@
+# Microsoft Purview Unified Catalog — Governance domains (desired state)
+#
+# A governance domain is the top-level boundary inside which data products,
+# OKRs, critical data elements, and health controls are organized. One
+# domain typically maps to a business unit, regulatory scope, functional
+# area, or project. This file is the central source of truth: add /
+# rename / remove flows through this file, and the reconciler
+# (scripts/Deploy-UnifiedCatalog.ps1 — tracked in #340) converges the
+# live tenant to match.
+#
+# Default steady state is an empty list (`items: []`) — no-op safe on
+# first run. Populating this file with real domain content is tracked
+# separately as a content-onboarding issue and depends on #340 shipping
+# first.
+#
+# Decision context:
+#   docs/adr/0024-unified-catalog-folder-placement.md
+#     (folder placement + per-concept YAML split decided 2026-05-24;
+#      authoring-surface ADR deferred to follow-up research)
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/unified-catalog
+#
+# Field shape (validated against governance-domains.schema.json):
+#   name         (required, string)  Display name. Unique across the file.
+#   description  (optional, string)  Short prose describing the domain.
+#   type         (optional, string)  One of: Regulatory, BusinessUnit,
+#                                    DataDomain, Functional, ProjectName.
+#   owners       (optional, string[]) Entra group display names. Resolved
+#                                    at deploy time per ADR 0023.
+#   status       (optional, string)  One of: Draft, Published, Expired.
+#
+# Example (commented-out; do not uncomment on main):
+#   - name: Finance
+#     description: Financial reporting, treasury, and tax data.
+#     type: BusinessUnit
+#     owners:
+#       - sg-purview-finance-domain-owners
+#     status: Draft
+
+items: []

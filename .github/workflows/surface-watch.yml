@@ -1,0 +1,244 @@
+name: surface-watch
+
+# Scheduled surface-watch loop for the Purview-as-Code lab. Monitors
+# Microsoft Purview's documentation surface against the project plan's
+# §3 feature inventory. When the inventory is stale — new features
+# documented on Learn but missing from §3, or §3 features no longer on
+# Learn — the workflow opens a GitHub issue routed to @idea-intake.
+#
+# Part of the agentic-process-modernization-plan Slice 8.
+#
+# Read-only contract: no write operations to the repo or tenant. Fetches
+# public Microsoft Learn pages only. Per
+# mcp-tool-usage.instructions.md read-only default, this workflow never
+# deploys or mutates state. The issue is routed to @idea-intake via
+# labels.
+#
+# Design approach: fetch each URL from the §3 "Microsoft Learn entry
+# point" column, confirm HTTP 200, extract page title. A 404 or title
+# change signals drift. Use GitHub's issue search API to de-duplicate
+# before filing.
+#
+# References (Microsoft Learn, GitHub Docs):
+#   https://learn.microsoft.com/en-us/purview/
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+
+on:
+  schedule:
+    # Weekly Monday at 03:00 UTC, 1 hour after drift-detection. Cron
+    # grammar:
+    # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read            # Checkout only; no writes.
+  issues: write             # gh issue create when drift detected.
+
+concurrency:
+  group: surface-watch
+  cancel-in-progress: false
+
+jobs:
+  check-surface:
+    name: Check Learn surface
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Parse §3 inventory and fetch Learn pages
+        id: check
+        shell: pwsh
+        run: |
+          # Parse the §3 feature inventory table from docs/project-plan.md.
+          # Expected table format (Markdown pipe table):
+          # | Feature | Microsoft Learn entry point | Desired-state YAML | Reconciler | v1 origin |
+          
+          $planPath = 'docs/project-plan.md'
+          if (-not (Test-Path $planPath)) {
+            throw "docs/project-plan.md not found"
+          }
+          
+          $content = Get-Content $planPath -Raw
+          
+          # Extract the §3 inventory table. Find the table under "## 3. Feature inventory".
+          # The table starts after the header row and continues until the next section or blank line.
+          $section3 = $content -split '(?m)^## 3\. Feature inventory' | Select-Object -Last 1
+          $tableLines = ($section3 -split '(?m)^##')[0] -split "`n" | Where-Object {
+            $_ -match '^\|' -and $_ -notmatch '^\|\s*Feature\s*\|' -and $_ -notmatch '^\|\s*---'
+          }
+          
+          Write-Host "Found $($tableLines.Count) inventory rows"
+          
+          $inventory = @()
+          foreach ($line in $tableLines) {
+            # Parse pipe-delimited table row.
+            $cells = $line -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            if ($cells.Count -ge 2) {
+              $featureName = $cells[0]
+              $learnCell = $cells[1]
+              
+              # Extract URL from Markdown link: [text](url)
+              if ($learnCell -match '\[([^\]]+)\]\(([^)]+)\)') {
+                $linkText = $matches[1]
+                $url = $matches[2]
+                $inventory += [PSCustomObject]@{
+                  Feature = $featureName
+                  LinkText = $linkText
+                  Url = $url
+                }
+              }
+            }
+          }
+          
+          Write-Host "Parsed $($inventory.Count) Learn URLs from inventory"
+          
+          # Fetch each URL and check status + title.
+          $driftDetected = $false
+          $additionsReport = @()
+          $removalsReport = @()
+          $changesReport = @()
+          
+          foreach ($item in $inventory) {
+            Write-Host "::group::Checking $($item.Feature)"
+            Write-Host "URL: $($item.Url)"
+            
+            try {
+              $response = Invoke-WebRequest -Uri $item.Url -Method Head -TimeoutSec 10 -ErrorAction Stop
+              $statusCode = $response.StatusCode
+              
+              if ($statusCode -eq 200) {
+                # Fetch full page to extract title.
+                $page = Invoke-WebRequest -Uri $item.Url -TimeoutSec 10 -ErrorAction Stop
+                
+                # Extract <title> tag.
+                if ($page.Content -match '<title>([^<]+)</title>') {
+                  $pageTitle = $matches[1].Trim()
+                  # Clean up common suffixes like " | Microsoft Learn"
+                  $pageTitle = $pageTitle -replace '\s*\|\s*Microsoft Learn\s*$', ''
+                  
+                  Write-Host "Page title: $pageTitle"
+                  Write-Host "Expected: $($item.LinkText)"
+                  
+                  # Check if title has changed significantly.
+                  # Allow minor variations (case, whitespace).
+                  $normalizedPage = $pageTitle -replace '\s+', ' ' | ForEach-Object { $_.ToLowerInvariant() }
+                  $normalizedExpected = $item.LinkText -replace '\s+', ' ' | ForEach-Object { $_.ToLowerInvariant() }
+                  
+                  if ($normalizedPage -ne $normalizedExpected) {
+                    Write-Host "::warning::Title mismatch for $($item.Feature)"
+                    $changesReport += "- **$($item.Feature)**: Title changed from `"$($item.LinkText)`" to `"$pageTitle`" ([link]($($item.Url)))"
+                    $driftDetected = $true
+                  } else {
+                    Write-Host "::notice::$($item.Feature) — OK"
+                  }
+                } else {
+                  Write-Host "::warning::Could not extract title from $($item.Url)"
+                }
+              } else {
+                Write-Host "::warning::Non-200 status: $statusCode"
+                $removalsReport += "- **$($item.Feature)**: Learn page returned HTTP $statusCode ([link]($($item.Url)))"
+                $driftDetected = $true
+              }
+            }
+            catch {
+              $errorMsg = $_.Exception.Message
+              if ($errorMsg -match '404' -or $_ -match 'NotFound') {
+                Write-Host "::warning::404 Not Found: $($item.Url)"
+                $removalsReport += "- **$($item.Feature)**: Learn page not found (404) ([link]($($item.Url)))"
+                $driftDetected = $true
+              } else {
+                Write-Host "::error::Failed to fetch $($item.Url): $errorMsg"
+              }
+            }
+            
+            Write-Host "::endgroup::"
+          }
+          
+          # Write drift status to output for the issue-creation step.
+          if ($driftDetected) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "drift=true"
+            
+            # Build issue body.
+            $issueBody = @"
+## Surface-watch drift detected
+
+The Microsoft Purview documentation surface has diverged from the [project plan §3 feature inventory](../../docs/project-plan.md#3-feature-inventory).
+
+"@
+            
+            if ($removalsReport.Count -gt 0) {
+              $issueBody += "`n### Features in §3 but not accessible on Learn`n`n"
+              $issueBody += ($removalsReport -join "`n")
+              $issueBody += "`n"
+            }
+            
+            if ($changesReport.Count -gt 0) {
+              $issueBody += "`n### Features with changed titles`n`n"
+              $issueBody += ($changesReport -join "`n")
+              $issueBody += "`n"
+            }
+            
+            if ($additionsReport.Count -gt 0) {
+              $issueBody += "`n### New features on Learn (not in §3)`n`n"
+              $issueBody += ($additionsReport -join "`n")
+              $issueBody += "`n"
+            }
+            
+            $issueBody += "`n---`n`n"
+            $issueBody += "**Next steps:**`n`n"
+            $issueBody += "1. Review each drift entry above`n"
+            $issueBody += "2. Update ``docs/project-plan.md`` §3 to reflect current Learn surface`n"
+            $issueBody += "3. File new §5 Progress checklist rows for net-new features (if applicable)`n"
+            $issueBody += "4. File new §8 Q-rows for unanswered design questions (if applicable)`n"
+            
+            Set-Content -Path surface-report.txt -Value $issueBody
+            Write-Host "::notice::Drift detected. Issue will be opened."
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "drift=false"
+            Write-Host "::notice::No drift detected. All §3 Learn URLs are current."
+          }
+
+      - name: Check for existing surface-watch issue
+        if: steps.check.outputs.drift == 'true'
+        id: check-issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          # Search for open issues with labels 'surface-watch' and
+          # 'squad:automation-engineer'.
+          $existingIssues = gh issue list `
+            --label 'surface-watch' `
+            --label 'squad:automation-engineer' `
+            --state open `
+            --json number,title `
+            --jq 'length'
+          
+          if ($existingIssues -gt 0) {
+            Write-Host "::notice::Found $existingIssues existing surface-watch issue(s). Skipping duplicate."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "exists=true"
+          } else {
+            Write-Host "::notice::No existing surface-watch issue found."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "exists=false"
+          }
+
+      - name: Create surface-watch issue
+        if: steps.check.outputs.drift == 'true' && steps.check-issue.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $body = Get-Content surface-report.txt -Raw
+          
+          gh issue create `
+            --title "Surface-watch drift detected — §3 inventory stale" `
+            --body $body `
+            --label "squad:automation-engineer" `
+            --label "squad:scribe" `
+            --label "needs-review" `
+            --label "surface-watch"
+          
+          Write-Host "::notice::Issue created successfully."

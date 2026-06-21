@@ -1,0 +1,62 @@
+# Microsoft Purview as-Code -- Unified audit log retention policies (desired state)
+#
+# Desired-state declaration for Microsoft Purview audit retention
+# policies, consumed by `scripts/Set-AuditRetentionPolicy.ps1` (lands
+# in a later phase of issue #69). The script compares each desired
+# policy against the live tenant via
+# `Get-UnifiedAuditLogRetentionPolicy`, then performs Create / Update
+# / NoChange operations. Orphan policies (live in tenant, absent from
+# this YAML) are reported and skipped unless `-PruneMissing` is
+# specified.
+#
+# Schema: ./retention-policies.schema.json (Draft-07).
+#
+# Default state: empty `policies:` list. The Wave 2a scaffolding ships
+# without any tenant-scoped retention overrides; the tenant continues
+# to use the built-in retention (180 days for Microsoft 365 E5 /
+# audit add-on as documented at the Learn references below) until a
+# subsequent issue adds the first policy declaration.
+#
+# Each policy entry maps directly to the parameter set of
+# `New-UnifiedAuditLogRetentionPolicy`:
+#
+#   name              -- Unique policy identifier (string, required).
+#                         Becomes the `-Name` argument.
+#   description       -- Free-form description (string, optional).
+#   recordTypes       -- One or more values from the
+#                         AuditLogRecordType enum. Restricts the policy
+#                         to events of these record types only. Either
+#                         `recordTypes`, `operations`, or `userIds`
+#                         must be supplied per the cmdlet contract.
+#   operations        -- One or more audit operation names (e.g.
+#                         `FileAccessed`). See the Audited activities
+#                         reference at Learn.
+#   userIds           -- One or more user principal names to scope the
+#                         policy to specific users.
+#   retentionDuration -- Required. Tenant-supported enum values only:
+#                         `OneYear`, `ThreeYears`, `SevenYears`, `TenYears`.
+#                         Long retention (>180 days) requires the
+#                         Microsoft 365 E5 / audit add-on per the
+#                         Learn page on retention policies.
+#   priority          -- Optional integer used to break ties when an
+#                         event matches multiple policies. Lower values
+#                         win. Defaults applied by the cmdlet when
+#                         omitted.
+#
+# References:
+#   Manage audit log retention policies:
+#     https://learn.microsoft.com/en-us/purview/audit-log-retention-policies
+#   New-UnifiedAuditLogRetentionPolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/new-unifiedauditlogretentionpolicy
+#   Get-UnifiedAuditLogRetentionPolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-unifiedauditlogretentionpolicy
+#   Set-UnifiedAuditLogRetentionPolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/set-unifiedauditlogretentionpolicy
+#   Remove-UnifiedAuditLogRetentionPolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/remove-unifiedauditlogretentionpolicy
+#   Audited activities (operation names):
+#     https://learn.microsoft.com/en-us/purview/audit-log-activities
+#   AuditLogRecordType enum:
+#     https://learn.microsoft.com/en-us/office/office-365-management-api/office-365-management-activity-api-schema#auditlogrecordtype
+
+policies: []

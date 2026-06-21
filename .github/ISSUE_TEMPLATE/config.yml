@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Microsoft Purview documentation
+    url: https://learn.microsoft.com/en-us/purview/
+    about: Authoritative reference for Purview control plane, data plane, and REST APIs.
+  - name: Azure Bicep documentation
+    url: https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/
+    about: For questions about the control-plane templates under infra/.

@@ -1,0 +1,175 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/labels.schema.json",
+    "title": "Microsoft Purview sensitivity label taxonomy",
+    "description": "Desired state for sensitivity labels consumed by scripts/Deploy-Labels.ps1. Reference: https://learn.microsoft.com/en-us/purview/sensitivity-labels and https://learn.microsoft.com/en-us/powershell/module/exchange/new-label",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "labels" ],
+    "properties": {
+        "labels": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/label" },
+            "description": "Ordered list of sensitivity labels. Parents may appear before or after their children; the reconciler resolves parent GUIDs at apply time."
+        }
+    },
+    "definitions": {
+        "hexColor": {
+            "type": "string",
+            "pattern": "^#[0-9A-Fa-f]{6}$",
+            "description": "Six-digit hex color in #RRGGBB form."
+        },
+        "contentMarkingBlock": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "enabled" ],
+            "properties": {
+                "enabled":   { "type": "boolean" },
+                "text":      { "type": "string" },
+                "fontSize":  { "type": "integer", "minimum": 1, "maximum": 128 },
+                "fontColor": { "$ref": "#/definitions/hexColor" },
+                "alignment": { "type": "string", "enum": [ "", "Left", "Center", "Right" ] },
+                "layout":    { "type": "string", "enum": [ "", "Horizontal", "Diagonal" ] }
+            }
+        },
+        "rightsDefinition": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "Identity", "Rights" ],
+            "properties": {
+                "Identity": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "User UPN, group SMTP, or 'AuthenticatedUsers'. Synthetic identifiers only per .github/instructions/sample-data.instructions.md."
+                },
+                "Rights": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Comma-separated MIP usage rights (e.g. VIEW,EDIT,PRINT). Reference: https://learn.microsoft.com/en-us/azure/information-protection/configure-usage-rights"
+                }
+            }
+        },
+        "sensitiveInformationTypeCondition": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "sitId" ],
+            "properties": {
+                "sitId": {
+                    "type": "string",
+                    "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+                    "description": "SIT GUID present in data-plane/classifications/sit-catalog.yaml. Same reference shape as auto-label-policies.yaml (ADR 0016 §4). Reference: https://learn.microsoft.com/en-us/purview/sensitive-information-type-entity-definitions"
+                },
+                "minCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 1,
+                    "description": "Minimum number of SIT matches required to trigger the condition."
+                },
+                "minConfidence": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "default": 75,
+                    "description": "Minimum SIT confidence (accuracy) percentage required. Same default as ADR 0016 §4."
+                }
+            }
+        },
+        "autoApplicationOfBlock": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "mode", "sensitiveInformationTypes" ],
+            "description": "Client-side auto-labeling — recommendation or auto-apply conditions surfaced by Office apps when a user is editing content. Distinct from service-side auto-labeling policies in auto-label-policies.yaml (which act on data-at-rest in Exchange / SharePoint / OneDrive). Reference: https://learn.microsoft.com/en-us/purview/apply-sensitivity-label-automatically",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": [ "Recommend", "Automatic" ],
+                    "description": "'Recommend' prompts the user to apply the label; 'Automatic' applies it without prompting. Reference: https://learn.microsoft.com/en-us/purview/apply-sensitivity-label-automatically#how-to-configure-auto-labeling-for-office-apps"
+                },
+                "policyTip": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 280,
+                    "description": "Text shown to the user when the condition matches. <=280 characters to match the tooltip ceiling."
+                },
+                "sensitiveInformationTypes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/sensitiveInformationTypeCondition" },
+                    "description": "Conditions evaluated by the Office client. At least one entry required; multi-SIT grouping semantics are Learn-silent and deferred per ADR 0017."
+                }
+            }
+        },
+        "label": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "displayName", "tooltip" ],
+            "properties": {
+                "displayName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Human-visible label name. Unique per parent."
+                },
+                "parent": {
+                    "type": [ "string", "null" ],
+                    "description": "DisplayName of the parent label, or null/omitted for top-level labels."
+                },
+                "tooltip": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 280,
+                    "description": "Hover text shown to users. <=280 characters per Office client constraints."
+                },
+                "comment": { "type": "string" },
+                "contentType": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                        "type": "string",
+                        "enum": [ "File", "Email", "Site", "UnifiedGroup", "PurviewAssets", "SchematizedData", "Teamwork" ]
+                    },
+                    "description": "Object kinds the label applies to. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-label"
+                },
+                "contentMarking": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "header":    { "$ref": "#/definitions/contentMarkingBlock" },
+                        "footer":    { "$ref": "#/definitions/contentMarkingBlock" },
+                        "watermark": { "$ref": "#/definitions/contentMarkingBlock" }
+                    }
+                },
+                "encryption": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [ "enabled" ],
+                    "properties": {
+                        "enabled": { "type": "boolean" },
+                        "protectionType": {
+                            "type": "string",
+                            "enum": [ "Template", "UserDefined", "RemoveProtection" ],
+                            "description": "Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/set-label"
+                        },
+                        "contentExpiredOnDateInDaysOrNever": {
+                            "oneOf": [
+                                { "type": "string", "enum": [ "Never" ] },
+                                { "type": "integer", "minimum": 0 }
+                            ]
+                        },
+                        "offlineAccessDays": {
+                            "type": "integer",
+                            "minimum": -1,
+                            "description": "-1 = always allowed offline; 0 = never; positive = days."
+                        },
+                        "doNotForward":  { "type": "boolean" },
+                        "encryptOnly":   { "type": "boolean" },
+                        "rightsDefinitions": {
+                            "type": "array",
+                            "items": { "$ref": "#/definitions/rightsDefinition" }
+                        }
+                    }
+                },
+                "autoApplicationOf": { "$ref": "#/definitions/autoApplicationOfBlock" }
+            }
+        }
+    }
+}

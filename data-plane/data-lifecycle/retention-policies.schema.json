@@ -1,0 +1,116 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/data-lifecycle/retention-policies.schema.json",
+    "title": "Microsoft Purview Data Lifecycle Management retention policies",
+    "description": "Desired state for Microsoft Purview Data Lifecycle Management retention policies consumed by scripts/Deploy-RetentionPolicies.ps1. Reference: https://learn.microsoft.com/en-us/purview/retention",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "policies" ],
+    "properties": {
+        "policies": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/retentionPolicy" }
+        }
+    },
+    "definitions": {
+        "retentionPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "locations", "rules" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Unique policy identifier. Maps to the -Name parameter of New-RetentionCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-retentioncompliancepolicy"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Free-form policy description. Maps to -Comment on New-RetentionCompliancePolicy."
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether the policy is active. Defaults to true when omitted. Reference: https://learn.microsoft.com/en-us/purview/retention"
+                },
+                "restrictiveRetention": {
+                    "type": "boolean",
+                    "description": "Enables Preservation Lock. Irreversible. Treat first apply as destructive. Reference: https://learn.microsoft.com/en-us/purview/retention-preservation-lock"
+                },
+                "locations": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "minProperties": 1,
+                    "properties": {
+                        "exchange":            { "$ref": "#/definitions/locationBucket" },
+                        "sharePoint":          { "$ref": "#/definitions/locationBucket" },
+                        "oneDrive":            { "$ref": "#/definitions/locationBucket" },
+                        "modernGroup":         { "$ref": "#/definitions/locationBucket" },
+                        "skype":               { "$ref": "#/definitions/locationBucket" },
+                        "teamsChannel":        { "$ref": "#/definitions/locationBucket" },
+                        "teamsChat":           { "$ref": "#/definitions/locationBucket" },
+                        "teamsPrivateChannel": { "$ref": "#/definitions/locationBucket" },
+                        "publicFolder":        { "$ref": "#/definitions/locationBucket" }
+                    },
+                    "description": "Workload-location buckets. At least one bucket required. Maps to the corresponding -*Location parameters on New-RetentionCompliancePolicy."
+                },
+                "rules": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/retentionRule" },
+                    "description": "One or more nested rule entries. Each rule maps to New-RetentionComplianceRule. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-retentioncompliancerule"
+                }
+            }
+        },
+        "locationBucket": {
+            "oneOf": [
+                { "type": "string", "enum": [ "All" ] },
+                {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true
+                }
+            ],
+            "description": "Either the literal string `All` or an array of workload-specific identifiers (UPNs, group SMTP addresses, site URLs)."
+        },
+        "retentionRule": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "retentionDuration", "retentionAction" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Unique rule identifier within the parent policy."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Free-form rule description. Maps to -Comment on New-RetentionComplianceRule."
+                },
+                "retentionDuration": {
+                    "oneOf": [
+                        { "type": "string", "enum": [ "Unlimited" ] },
+                        { "type": "integer", "minimum": 1 }
+                    ],
+                    "description": "Either the literal string `Unlimited` or a positive integer number of days. Maps to -RetentionDuration."
+                },
+                "retentionAction": {
+                    "type": "string",
+                    "enum": [ "Keep", "Delete", "KeepAndDelete" ],
+                    "description": "Maps to -RetentionComplianceAction. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-retentioncompliancerule"
+                },
+                "expirationDateOption": {
+                    "type": "string",
+                    "enum": [ "CreationAgeInDays", "ModificationAgeInDays", "TaggedAgeInDays" ],
+                    "description": "Anchors the retention duration. Required when retentionDuration is an integer and retentionAction is Delete or KeepAndDelete. Maps to -ExpirationDateOption."
+                },
+                "contentMatchQuery": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional KQL query restricting which content the rule applies to. Maps to -ContentMatchQuery. Reference: https://learn.microsoft.com/en-us/purview/ediscovery-keyword-queries-and-search-conditions"
+                }
+            }
+        }
+    }
+}

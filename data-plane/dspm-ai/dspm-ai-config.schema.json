@@ -1,0 +1,78 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/dspm-ai/dspm-ai-config.schema.json",
+    "title": "Microsoft Purview DSPM for AI lab configuration",
+    "description": "Declarative scope and cadence for the Wave 3b read-only DSPM-for-AI posture verifier (scripts/Test-DSPMforAIPosture.ps1). Per ADR 0022 Microsoft Learn documents no programmatic authoring API for DSPM for AI; this file therefore omits a `policies:` field and is a scope descriptor only. References: https://learn.microsoft.com/en-us/purview/dspm-for-ai, docs/adr/0022-dspm-for-ai-authoring-surface.md.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "scope", "posture" ],
+    "properties": {
+        "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "labels", "workloads", "roleGroups" ],
+            "description": "Inputs the verifier iterates: which labels, which Copilot workloads, and which AI role groups are in scope.",
+            "properties": {
+                "labels": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [ "sources", "include" ],
+                    "description": "Sensitivity labels source. Default source is data-plane/information-protection/labels.yaml (Wave 1).",
+                    "properties": {
+                        "sources": {
+                            "type": "array",
+                            "minItems": 1,
+                            "uniqueItems": true,
+                            "description": "Repo-relative paths to upstream desired-state label YAMLs.",
+                            "items": { "type": "string", "minLength": 1 }
+                        },
+                        "include": {
+                            "oneOf": [
+                                {
+                                    "type": "string",
+                                    "enum": [ "all" ],
+                                    "description": "Include every label the upstream YAMLs produce."
+                                },
+                                {
+                                    "type": "array",
+                                    "uniqueItems": true,
+                                    "description": "Include only the named labels (by displayName).",
+                                    "items": { "type": "string", "minLength": 1 }
+                                }
+                            ]
+                        }
+                    }
+                },
+                "workloads": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "Copilot surfaces the lab scopes for DSPM-for-AI posture reporting. Reference: https://learn.microsoft.com/en-us/purview/dspm-for-ai",
+                    "items": {
+                        "type": "string",
+                        "enum": [ "M365Copilot", "CopilotForSecurity", "CopilotStudio" ]
+                    }
+                },
+                "roleGroups": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "description": "Microsoft Purview portal role groups required for DSPM-for-AI administration. Operators populate this list from https://learn.microsoft.com/en-us/purview/ai-microsoft-purview-permissions; an empty array is permitted (no-op check). Each entry must match a role group already managed by scripts/Deploy-PurviewRoleGroups.ps1.",
+                    "items": { "type": "string", "minLength": 1 }
+                }
+            }
+        },
+        "posture": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "cadence" ],
+            "description": "Posture-check cadence knob. The actual schedule, when one ships, will live in a GitHub Actions workflow; this field is a human-readable contract anchor.",
+            "properties": {
+                "cadence": {
+                    "type": "string",
+                    "enum": [ "weekly", "monthly", "on-demand" ],
+                    "description": "Primary cadence label. ADR 0022 selects 'weekly' to mirror Wave 3a (ADR 0021 Decision 1)."
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,684 @@
+# Microsoft Purview as-Code -- Data Loss Prevention (DLP) policies (desired state)
+#
+# Desired-state declaration for Microsoft Purview DLP policies, consumed
+# by `scripts/Deploy-DLPPolicies.ps1` (Wave 2b, issue #70). The script
+# compares each desired policy + its rules against the live tenant via
+# `Get-DlpCompliancePolicy` and `Get-DlpComplianceRule`, then performs
+# Create / Update / NoChange operations. Orphan policies and rules
+# (live in tenant, absent from this YAML) are reported and skipped
+# unless `-PruneMissing` is specified.
+#
+# Schema: ./policies.schema.json (Draft-07).
+#
+# Default state: empty `policies:` list. The Wave 2b scaffolding ships
+# without any tenant-scoped DLP policies. The first policy entry lands
+# in a subsequent issue.
+#
+# Each policy entry maps directly to the parameter set of
+# `New-DlpCompliancePolicy`:
+#
+#   name              -- Unique policy identifier (string, required).
+#                         Becomes the `-Name` argument.
+#   description       -- Free-form description (string, optional).
+#   mode              -- Policy enforcement mode. One of:
+#                         `TestWithoutNotifications` (default, dry run),
+#                         `TestWithNotifications`, `Enable`, `Disable`.
+#                         Required. Simulation-first per project-plan
+#                         guiding principle 3.
+#   priority          -- Optional integer used to order policy match
+#                         evaluation. Lower values win.
+#   locations         -- One or more workload-location buckets. Each
+#                         bucket is either the literal string `All` or
+#                         a list of identifiers (group UPNs, site URLs,
+#                         tenant IDs, etc.). Supported buckets:
+#                           exchange    -> -ExchangeLocation
+#                           sharePoint  -> -SharePointLocation
+#                           oneDrive    -> -OneDriveLocation
+#                           teams       -> -TeamsLocation
+#                           endpoint    -> -EndpointDlpLocation
+#   rules             -- One or more nested rule entries. Each rule maps
+#                         to `New-DlpComplianceRule` and binds to the
+#                         parent policy via `-Policy <policy.name>`.
+#
+# Each rule entry:
+#
+#   name                -- Unique rule identifier within the policy.
+#   priority            -- Optional integer; lower wins within the policy.
+#   sensitiveInfoTypes  -- List of SIT references by GUID. Each entry:
+#                            guid             (required, GUID literal)
+#                            minCount         (optional, integer >= 1)
+#                            maxCount         (optional, integer)
+#                            confidenceLevel  (optional, one of Low /
+#                                              Medium / High)
+#                          SIT GUIDs are sourced from
+#                          `data-plane/classifications/sit-catalog.yaml`
+#                          (Wave 1, issue #80). The deploy script does
+#                          not resolve SITs by name -- GUIDs are the
+#                          contract.
+#   sensitivityLabels   -- List of sensitivity-label references by
+#                          display name. The deploy script resolves each
+#                          name via `Get-Label` (Wave 1 labels, issue
+#                          #65) and errors out if a name does not match.
+#   blockAccess         -- Optional boolean. `true` blocks the protected
+#                          action (download, share, etc.) for matched
+#                          content.
+#   notifyUser          -- Optional list of policy-tip recipients. Each
+#                          item is one of:
+#                            SiteAdmin, LastModifier, Owner,
+#                            <UPN>          (specific user)
+#                            <Group UPN>    (mail-enabled group)
+#   generateIncidentReport
+#                       -- Optional list of recipients for an incident
+#                          report email per match.
+#   generateAlert       -- Optional list of recipients for the
+#                          high-severity alert. Empty / omitted means
+#                          no alert is generated.
+#
+# References:
+#   Microsoft Purview Data Loss Prevention overview:
+#     https://learn.microsoft.com/en-us/purview/dlp-learn-about-dlp
+#   Get-DlpCompliancePolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-dlpcompliancepolicy
+#   New-DlpCompliancePolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy
+#   Set-DlpCompliancePolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/set-dlpcompliancepolicy
+#   Remove-DlpCompliancePolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/remove-dlpcompliancepolicy
+#   Get-DlpComplianceRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-dlpcompliancerule
+#   New-DlpComplianceRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule
+#   Set-DlpComplianceRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/set-dlpcompliancerule
+#   Remove-DlpComplianceRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/remove-dlpcompliancerule
+#   Create, test, and tune a DLP policy:
+#     https://learn.microsoft.com/en-us/purview/dlp-test-dlp-policies
+
+policies:
+  - name: Default Office 365 DLP policy
+    description: "'This policy detects the presence of credit card numbers in externally shared documents and emails. End users are notified of the detection with the suggestion to consider either removing the sensitive data or restricting the sharing.'"
+    mode: Enable
+    priority: 0
+    locations:
+      exchange: All
+      sharePoint: All
+      oneDrive: All
+    rules:
+      - name: Items containing 1-9 credit card numbers shared externally
+        priority: 0
+        sensitiveInfoTypes:
+          - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+            minCount: 1
+            maxCount: 9
+            confidenceLevel: High
+        blockAccess: false
+        notifyUser:
+          - LastModifier
+          - Owner
+          - SiteAdmin
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'This rule detects credit card numbers in documents & emails that are shared externally. End users are notified of any detection. This rule does NOT block end users from sharing documents and emails with external users. This is a default rule provided by Office 365.'"
+        accessScope: NotInOrganization
+        notifyEmailCustomText: "'You shared content that contains 1 or more credit card numbers with people outside your organization. Consider removing the numbers or make sure it''s OK that everyone you''re sharing with can view them.'"
+        notifyPolicyTipCustomText: "'This item contains 1 or more credit card numbers and is being shared with people outside your organization. Consider removing the numbers or make sure it''s OK that everyone you''re sharing with can view them.'"
+        notifyPolicyTipDisplayOption: Tip
+        notifyUserType: NotSet
+        notifyOverrideRequirements: None
+        notifyEmailOnedriveRemediationActions: NotSet
+      - name: Items with 10 or more credit card numbers shared externally
+        priority: 1
+        sensitiveInfoTypes:
+          - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+            minCount: 10
+            maxCount: -1
+            confidenceLevel: High
+        blockAccess: false
+        notifyUser:
+          - LastModifier
+          - Owner
+          - SiteAdmin
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'This rule detects credit card numbers in documents & emails that are shared externally. End users are notified of any detection. This rule does NOT block end users from sharing documents and emails with external users. This is a default rule provided by Office 365.'"
+        accessScope: NotInOrganization
+        notifyEmailCustomText: "'You shared content that contains 10 or more credit card numbers with people outside your organization. Consider removing the numbers or make sure it''s OK that everyone you''re sharing with can view them.'"
+        notifyPolicyTipCustomText: "'This item contains 10 or more credit card numbers and is being shared with people outside your organization. Consider removing the numbers or make sure it''s OK that everyone you''re sharing with can view them.'"
+        notifyPolicyTipDisplayOption: Tip
+        notifyUserType: NotSet
+        notifyOverrideRequirements: None
+        notifyEmailOnedriveRemediationActions: NotSet
+      - name: Content matches U.S HIPAA Enhanced Default Rule
+        priority: 2
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'Helps detect the presence of information subject to United States Health Insurance Portability and Accountability Act (HIPAA). This rule will detect specific combinations of PII Identifiers (such as SSN, DEA Numbers, and U.S addresses), specific ICD-9/10 Code descriptions, and full person names. We have also enhanced this template with Trainable Classifier Business-Healthcare which can detect healthcare and medical content in your tenant such as Medical records, Health benefits documents, Insurance forms, Prior authorizations and referral forms.'"
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: PII Identifiers
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+                  name: U.S. Social Security Number (SSN)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+                - guid: 9a5445ad-406e-43eb-8bd7-cac17ab6d0e4
+                  name: Drug Enforcement Agency (DEA) Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: 44aa44f2-63d1-41df-af0d-970283ac41e2
+                  name: U.S. Physical Addresses
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+            - name: ICD-9/10 code descriptions
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: 3356946c-6bb7-449b-b253-6ffa419c0ce7
+                  name: International Classification of Diseases (ICD-10-CM)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: fa3f9c74-ee07-4c52-b5f2-085d6b2c0ec4
+                  name: International Classification of Diseases (ICD-9-CM)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: 065bdd91-ef07-40d3-b8a4-0aea722eaa49
+                  name: All Medical Terms And Conditions
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+            - name: Names
+              operator: And
+              sensitiveInfoTypes:
+                - guid: 50b8b56b-4ef8-44c2-a924-03374f5831ce
+                  name: All Full Names
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+            - name: Trainable Classifiers
+              operator: Or
+              trainableClassifiers:
+                - guid: dcbada08-65bf-4561-b140-25d8fee4d143
+      - name: Content matches Source Code Default Rule
+        priority: 3
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'By leveraging the Trainable Classifier Source Code, this rule detects items that contain a set of instructions and statements written computer programming languages on GitHub: ActionScript, C, C#, C++, Clojure, CoffeeScript, Go, Haskell, Java, JavaScript, Lua, MATLAB, Objective-C, Perl, PHP, Python, R, Ruby, Scala, Shell, Swift, TeX, Vim Script. Detects content in .msg, .as, .h, .c, .cs, .cc, .cpp, .hpp, .cxx, .hh, .c++, .clj, .edn, .cljc, .cljs, .coffee, .litcoffee, .go, .hs, .lhs, .java, .jar, .js, .mjs, .lua, .m, .mm, .pl, .pm, .t, .xs, .pod, .php, .phar, .php4, .pyc, .R, .r, .rda, .RData, .rds, .rb, .scala, .sc, .sh, .swift files'"
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: Default
+              operator: Or
+              trainableClassifiers:
+                - guid: 8aef6743-61aa-44b9-9ae5-3bb3d77df535
+      - name: Content Contains Intellectual Property
+        priority: 4
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'Helps to detect content containg intellectual property by leveraging several Trainable clasifiers. Namely Project Documents, Mergers & Acquistions (M&A), Software code & design, Network security information, and other Strategic Business Documents'"
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: Default
+              operator: Or
+              trainableClassifiers:
+                - guid: 495fad07-d6e4-4da4-9c64-5b9b109a5f59
+                - guid: e062df90-816c-47ca-8913-db647510d3b5
+                - guid: eeffbf7c-fd04-40ef-a156-b37bf61832f7
+                - guid: 813aa6d8-0727-48d8-acb7-06e1819ee339
+  - name: Default policy for Teams
+    description: "\"This policy detects the presence of credit card numbers in Teams chats and channel messages. When this sensitive info is detected, admins will receive an alert but policy tips won't be displayed to users. You can edit these actions at any time.\""
+    mode: Enable
+    priority: 1
+    locations:
+      teams: All
+    rules:
+      - name: Default Teams DLP policy rule
+        priority: 0
+        sensitiveInfoTypes:
+          - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+            minCount: 1
+            maxCount: -1
+            confidenceLevel: High
+        blockAccess: false
+        generateIncidentReport:
+          - SiteAdmin
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'This rule detects the presence of one or more credit card numbers. Admins will be alerted in email when 10 or more instances are detected within a 24-hour period for all users.'"
+        incidentReportContent: Title, DocumentAuthor, DocumentLastModifier, Service, MatchedItem, RulesMatched, Detections, Severity, RetentionLabel, SensitivityLabel
+      - name: Teams Content matches U.S HIPAA Enhanced Default Rule
+        priority: 1
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'Helps detect the presence of information subject to United States Health Insurance Portability and Accountability Act (HIPAA). This rule will detect specific combinations of PII Identifiers (such as SSN, DEA Numbers, and U.S addresses), specific ICD-9/10 Code descriptions, and full person names. We have also enhanced this template with Trainable Classifier Business-Healthcare which can detect healthcare and medical content in your tenant such as Medical records, Health benefits documents, Insurance forms, Prior authorizations and referral forms.'"
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: PII Identifiers
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+                  name: U.S. Social Security Number (SSN)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+                - guid: 9a5445ad-406e-43eb-8bd7-cac17ab6d0e4
+                  name: Drug Enforcement Agency (DEA) Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: 44aa44f2-63d1-41df-af0d-970283ac41e2
+                  name: U.S. Physical Addresses
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+            - name: ICD-9/10 code descriptions
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: 3356946c-6bb7-449b-b253-6ffa419c0ce7
+                  name: International Classification of Diseases (ICD-10-CM)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: fa3f9c74-ee07-4c52-b5f2-085d6b2c0ec4
+                  name: International Classification of Diseases (ICD-9-CM)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: 065bdd91-ef07-40d3-b8a4-0aea722eaa49
+                  name: All Medical Terms And Conditions
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+            - name: Names
+              operator: And
+              sensitiveInfoTypes:
+                - guid: 50b8b56b-4ef8-44c2-a924-03374f5831ce
+                  name: All Full Names
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+            - name: Trainable Classifiers
+              operator: Or
+              trainableClassifiers:
+                - guid: dcbada08-65bf-4561-b140-25d8fee4d143
+      - name: Teams Content matches Source Code Default Rule
+        priority: 2
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'By leveraging the Trainable Classifier Source Code, this rule detects items that contain a set of instructions and statements written computer programming languages on GitHub: ActionScript, C, C#, C++, Clojure, CoffeeScript, Go, Haskell, Java, JavaScript, Lua, MATLAB, Objective-C, Perl, PHP, Python, R, Ruby, Scala, Shell, Swift, TeX, Vim Script. Detects content in .msg, .as, .h, .c, .cs, .cc, .cpp, .hpp, .cxx, .hh, .c++, .clj, .edn, .cljc, .cljs, .coffee, .litcoffee, .go, .hs, .lhs, .java, .jar, .js, .mjs, .lua, .m, .mm, .pl, .pm, .t, .xs, .pod, .php, .phar, .php4, .pyc, .R, .r, .rda, .RData, .rds, .rb, .scala, .sc, .sh, .swift files'"
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: Default
+              operator: Or
+              trainableClassifiers:
+                - guid: 8aef6743-61aa-44b9-9ae5-3bb3d77df535
+      - name: Teams Content Contains Intellectual Property
+        priority: 3
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'Helps to detect content containg intellectual property by leveraging several Trainable clasifiers. Namely Project Documents, Mergers & Acquistions (M&A), Software code & design, Network security information, and other Strategic Business Documents'"
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: Default
+              operator: Or
+              trainableClassifiers:
+                - guid: 495fad07-d6e4-4da4-9c64-5b9b109a5f59
+                - guid: e062df90-816c-47ca-8913-db647510d3b5
+                - guid: eeffbf7c-fd04-40ef-a156-b37bf61832f7
+                - guid: 813aa6d8-0727-48d8-acb7-06e1819ee339
+  - name: Default policy for devices
+    description: This policy detects the presence of credit card numbers in files on devices when users perform specific activities (such as printing a file). When detected, the activity is only audited (not blocked). Admins will receive an alert, but policy tips won't be displayed to users. You can edit these actions at any time.
+    mode: Enable
+    priority: 2
+    locations:
+      endpoint: All
+    rules:
+      - name: Default Endpoint DLP Policy Rule - Low Volume
+        priority: 0
+        sensitiveInfoTypes:
+          - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+            minCount: 1
+            maxCount: 9
+            confidenceLevel: High
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "\"This rule is matched if 1 to 9 credit card numbers are detected in a file when a user performs certain device-related activities. When detected within a 24-hour period, the activity is only audited (not blocked). Admins won't receive alerts.\""
+        endpointDlpRestrictions:
+          - setting: CloudEgress
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: CopyPaste
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: NetworkShare
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: Print
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: RemoteDesktopServices
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: RemovableMedia
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: UnallowedApps
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: UnallowedBluetoothTransferApps
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+      - name: Default Endpoint DLP Policy Rule - High Volume
+        priority: 1
+        sensitiveInfoTypes:
+          - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+            minCount: 10
+            maxCount: -1
+            confidenceLevel: High
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Medium
+        comment: "'This rule is matched if 10 or more credit card numbers are detected in a file when a user performs certain device-related activities. When detected within a 24-hour period, the activity is only audited (not blocked), and admins will be alerted in email.'"
+        endpointDlpRestrictions:
+          - setting: CloudEgress
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: CopyPaste
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: NetworkShare
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: Print
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: RemoteDesktopServices
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: RemovableMedia
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: UnallowedApps
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+          - setting: UnallowedBluetoothTransferApps
+            value: Audit
+            appgroup: none
+            defaultmessage: none
+      - name: EndpointDevices Content matches U.S HIPAA Enhanced Default Rule
+        priority: 2
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'Helps detect the presence of information subject to United States Health Insurance Portability and Accountability Act (HIPAA). This rule will detect specific combinations of PII Identifiers (such as SSN, DEA Numbers, and U.S addresses), specific ICD-9/10 Code descriptions, and full person names. We have also enhanced this template with Trainable Classifier Business-Healthcare which can detect healthcare and medical content in your tenant such as Medical records, Health benefits documents, Insurance forms, Prior authorizations and referral forms.'"
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: PII Identifiers
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+                  name: U.S. Social Security Number (SSN)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+                - guid: 9a5445ad-406e-43eb-8bd7-cac17ab6d0e4
+                  name: Drug Enforcement Agency (DEA) Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: 44aa44f2-63d1-41df-af0d-970283ac41e2
+                  name: U.S. Physical Addresses
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+            - name: ICD-9/10 code descriptions
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: 3356946c-6bb7-449b-b253-6ffa419c0ce7
+                  name: International Classification of Diseases (ICD-10-CM)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: fa3f9c74-ee07-4c52-b5f2-085d6b2c0ec4
+                  name: International Classification of Diseases (ICD-9-CM)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: 065bdd91-ef07-40d3-b8a4-0aea722eaa49
+                  name: All Medical Terms And Conditions
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+            - name: Names
+              operator: And
+              sensitiveInfoTypes:
+                - guid: 50b8b56b-4ef8-44c2-a924-03374f5831ce
+                  name: All Full Names
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+            - name: Trainable Classifiers
+              operator: Or
+              trainableClassifiers:
+                - guid: dcbada08-65bf-4561-b140-25d8fee4d143
+      - name: EndpointDevices Content matches Source Code Default Rule
+        priority: 3
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'By leveraging the Trainable Classifier Source Code, this rule detects items that contain a set of instructions and statements written computer programming languages on GitHub: ActionScript, C, C#, C++, Clojure, CoffeeScript, Go, Haskell, Java, JavaScript, Lua, MATLAB, Objective-C, Perl, PHP, Python, R, Ruby, Scala, Shell, Swift, TeX, Vim Script. Detects content in .msg, .as, .h, .c, .cs, .cc, .cpp, .hpp, .cxx, .hh, .c++, .clj, .edn, .cljc, .cljs, .coffee, .litcoffee, .go, .hs, .lhs, .java, .jar, .js, .mjs, .lua, .m, .mm, .pl, .pm, .t, .xs, .pod, .php, .phar, .php4, .pyc, .R, .r, .rda, .RData, .rds, .rb, .scala, .sc, .sh, .swift files'"
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: Default
+              operator: Or
+              trainableClassifiers:
+                - guid: 8aef6743-61aa-44b9-9ae5-3bb3d77df535
+      - name: EndpointDevices Content Contains Intellectual Property
+        priority: 4
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: "'Helps to detect content containg intellectual property by leveraging several Trainable clasifiers. Namely Project Documents, Mergers & Acquistions (M&A), Software code & design, Network security information, and other Strategic Business Documents'"
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: Default
+              operator: Or
+              trainableClassifiers:
+                - guid: 495fad07-d6e4-4da4-9c64-5b9b109a5f59
+                - guid: e062df90-816c-47ca-8913-db647510d3b5
+                - guid: eeffbf7c-fd04-40ef-a156-b37bf61832f7
+                - guid: 813aa6d8-0727-48d8-acb7-06e1819ee339
+  - name: Fabric PII Detection - CoA Demo Workspace
+    description: Detects SSN, credit card, and financial data in Fabric Lakehouse, Warehouse, and other items.
+    mode: Enable
+    priority: 3
+    locations:
+      powerBI: All
+    rules:
+      - name: Detect PII and Financial Data
+        priority: 0
+        blockAccess: false
+        notifyUser:
+          - LastModifier
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: Detects SSN, Credit Card, and bank account patterns in Fabric data
+        notifyPolicyTipCustomText: This data contains PII and must not be exported.
+        notifyPolicyTipDisplayOption: Tip
+        notifyUserType: NotSet
+        notifyOverrideRequirements: None
+        notifyEmailOnedriveRemediationActions: NotSet
+        notifyAllowOverride: WithJustification
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: PII Detection
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+                  name: Credit Card Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: a2ce32a8-f935-4bb6-8e96-2a5157672e2c
+                  name: U.S. Bank Account Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+                - guid: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+                  name: U.S. Social Security Number (SSN)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+  - name: Default DLP policy - Protect sensitive M365 Copilot interactions
+    description: Prevent data leakage and oversharing by restricting Microsoft 365 Copilot and Copilot Chat from using sensitive info in prompts.
+    mode: TestWithoutNotifications
+    priority: 4
+    genericLocations:
+      - workload: Applications
+        location: Copilot.M365
+        locationDisplayName:
+        locationSource: Unknown
+        locationType: Unknown
+        inclusions:
+          - type: Tenant
+            identity: All
+            displayName: All
+            name: All
+    enforcementPlanes: CopilotExperiences
+    policyTemplateInfo:
+      CategoryId: DlpPolicyCategoryCustom
+      Id: DlpPolicyTemplatesCustom
+    rules:
+      - name: Default DLP policy - Protect sensitive M365 Copilot interactions
+        priority: 0
+        blockAccess: false
+        generateAlert:
+          - "true"
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        alertProperties:
+          AggregationType: None
+        restrictAccess:
+          - setting: UploadText
+            value: Block
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: Default
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+                  name: U.S. Social Security Number (SSN)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+                - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+                  name: Credit Card Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100

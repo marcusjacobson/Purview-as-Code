@@ -1,0 +1,29 @@
+# Custom classifications & classification rules.
+# Reference:
+#   https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/type
+#   https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/classification-rules
+#   https://learn.microsoft.com/en-us/purview/create-a-custom-classification-and-classification-rule
+#
+# Regex-safety rules enforced by `scripts/Deploy-Classifications.ps1`
+# (see `.github/instructions/sample-data.instructions.md` §"Regex rules
+# for classification patterns"): every pattern below is anchored with
+# `\b` word boundaries, uses bounded repetition (`{N}`, `{0,N}`), and
+# avoids nested unbounded quantifier shapes such as `(x+)+`.
+
+classifications:
+  - name: CUSTOM.EmployeeId
+    description: Internal employee identifier (EMP-####).
+
+rules:
+  - name: CUSTOM.EmployeeIdRule
+    classificationName: CUSTOM.EmployeeId
+    ruleStatus: Enabled
+    kind: Regex
+    minimumPercentageMatch: 60
+    regex:
+      pattern: '\bEMP-\d{4}\b'
+      regexFlags:
+        ignoreCase: true
+    columnPatterns:
+      - kind: Regex
+        pattern: '(?i)\bemployee[_\s-]{0,3}id\b'

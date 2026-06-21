@@ -1,0 +1,28 @@
+# Test fixture for labels.schema.json — exercises the autoApplicationOf block
+# added by issue #208. Not consumed by Deploy-Labels.ps1 in any workflow; the
+# Apply / ExportCurrentState code paths default to labels.yaml. Used for ad-hoc
+# `Test-Json` validation only. Synthetic SIT references taken from
+# data-plane/classifications/sit-catalog.yaml.
+# Reference: https://learn.microsoft.com/en-us/purview/apply-sensitivity-label-automatically
+labels:
+  - displayName: Recommend-Sample
+    parent: Confidential
+    tooltip: Synthetic fixture entry exercising mode=Recommend.
+    autoApplicationOf:
+      mode: Recommend
+      policyTip: Consider applying Confidential when credit card data is detected.
+      sensitiveInformationTypes:
+        - sitId: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+          minCount: 1
+          minConfidence: 75
+
+  - displayName: Automatic-Sample
+    parent: Highly Confidential
+    tooltip: Synthetic fixture entry exercising mode=Automatic.
+    autoApplicationOf:
+      mode: Automatic
+      policyTip: Highly Confidential applied automatically — content contains U.S. SSN.
+      sensitiveInformationTypes:
+        - sitId: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+          minCount: 1
+          minConfidence: 85

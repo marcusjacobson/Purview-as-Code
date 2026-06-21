@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "Purview-as-Code-Generic",
+			"path": "../Purview-as-Code-Generic"
+		}
+	],
+	"settings": {
+		"powershell.cwd": "Purview-as-Code-Generic"
+	}
+}

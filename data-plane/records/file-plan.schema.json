@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/contoso/Purview-as-Code-Generic/data-plane/records/file-plan.schema.json",
+  "title": "Microsoft Purview Records Management — file plan + retention labels",
+  "description": "Draft-07 schema for data-plane/records/file-plan.yaml. Validates file plan property objects (authorities, categories, citations, departments, referenceIds, subCategories) and retention labels (ComplianceTag).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["retentionLabels"],
+  "properties": {
+    "filePlanProperties": { "$ref": "#/definitions/filePlanProperties" },
+    "retentionLabels": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/retentionLabel" }
+    }
+  },
+  "definitions": {
+    "filePlanProperties": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "authorities":   { "type": "array", "items": { "$ref": "#/definitions/namedOnly" } },
+        "categories":    { "type": "array", "items": { "$ref": "#/definitions/namedOnly" } },
+        "citations":     { "type": "array", "items": { "$ref": "#/definitions/citation" } },
+        "departments":   { "type": "array", "items": { "$ref": "#/definitions/namedOnly" } },
+        "referenceIds":  { "type": "array", "items": { "$ref": "#/definitions/namedOnly" } },
+        "subCategories": { "type": "array", "items": { "$ref": "#/definitions/subCategory" } }
+      }
+    },
+    "namedOnly": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name":         { "type": "string", "minLength": 1, "maxLength": 64 },
+        "url":          { "type": "string", "format": "uri" },
+        "jurisdiction": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "subCategory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "parentCategory"],
+      "properties": {
+        "name":           { "type": "string", "minLength": 1, "maxLength": 64 },
+        "parentCategory": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "retentionLabel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "retentionDuration", "retentionAction", "retentionType"],
+      "properties": {
+        "name":              { "type": "string", "minLength": 1, "maxLength": 64 },
+        "description":       { "type": "string" },
+        "notes":             { "type": "string" },
+        "isRecordLabel":     { "type": "boolean" },
+        "regulatory":        { "type": "boolean" },
+        "retentionDuration": {
+          "oneOf": [
+            { "type": "string", "enum": ["Unlimited"] },
+            { "type": "integer", "minimum": 1 }
+          ]
+        },
+        "retentionAction":   { "type": "string", "enum": ["Keep", "Delete", "KeepAndDelete"] },
+        "retentionType": {
+          "type": "string",
+          "description": "EventAgeInDays is intentionally NOT allowed until Wave 2f (#82) ships its retention-event-type bootstrap.",
+          "enum": ["ModificationAgeInDays", "CreationAgeInDays", "TaggedAgeInDays"]
+        },
+        "reviewerEmail": {
+          "type": "array",
+          "items": { "type": "string", "format": "email" },
+          "uniqueItems": true
+        },
+        "filePlanProperty": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "authority":   { "type": "string", "minLength": 1, "maxLength": 64 },
+            "category":    { "type": "string", "minLength": 1, "maxLength": 64 },
+            "subCategory": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "citation":    { "type": "string", "minLength": 1, "maxLength": 64 },
+            "department":  { "type": "string", "minLength": 1, "maxLength": 64 },
+            "referenceId": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
+        }
+      }
+    }
+  }
+}

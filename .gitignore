@@ -1,0 +1,77 @@
+# Secrets and local env
+*.env
+.env*
+!.env.example
+*.secret
+# Private-key file formats. ADR 0028 stores the local-cert private key
+# in Cert:\CurrentUser\My (non-exportable), so the documented happy
+# path never produces one of these files; the patterns are defensive
+# in case anyone generates a PFX out-of-band.
+*.pfx
+*.p12
+*.key
+*.pem
+
+# Azure / Bicep
+*.bicep.json
+.azure/
+*.lock.json
+
+# PowerShell
+*.ps1.bak
+
+# Python (helper scripts may use venv)
+.venv/
+__pycache__/
+*.pyc
+
+# Node (if any tooling added later)
+node_modules/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+
+# Build / logs
+*.log
+out/
+dist/
+tmp/
+
+# Copilot per-item working notes (session state for /checkpoint, /resume-item).
+# These are local-only scratch files — never commit.
+.copilot-tracking/
+
+# Output of scripts/Verify-SetLabelAutoApply.ps1 — captures live tenant cmdlet
+# help and label shapes; redact before pasting into issues, never commit raw.
+verify-set-label-output/
+
+# Output of scripts/Set-AuditRetentionPolicy.ps1 smoke runs (-WhatIf preview,
+# -ExportCurrentState snapshot); redact before pasting into issues, never commit raw.
+verify-audit-retention-output/
+
+# Output of scripts/Export-ContentExplorerData.ps1 -- timestamped per-(item,Workload)
+# JSON pulls from Microsoft Purview Content Explorer plus manifest.json. May contain
+# tenant content samples; redact before pasting into issues, never commit raw.
+# Cadence + retention contract: docs/adr/0021-dspm-content-explorer-cadence.md.
+verify-dspm-export-output/
+
+# Output of scripts/Invoke-SITConfidenceAnalysis.ps1 -- timestamped Markdown +
+# CSV reports derived from a Content Explorer export run. Inherits the same
+# redaction caveat as verify-dspm-export-output/. See
+# docs/runbooks/sit-confidence-analysis.md.
+verify-sit-confidence-output/
+
+# Output of scripts/Test-DSPMforAIPosture.ps1 -- timestamped local smoke runs of
+# the DSPM for AI posture verifier. Local developer artifacts only, never
+# committed. See docs/adr/0022-dspm-for-ai-authoring-surface.md.
+verify-dspm-ai-output/
+
+# Output of `Invoke-Pester -CI` -- NUnit-format report written to the working
+# directory by default. Local test artifact, never committed.
+# See https://pester.dev/docs/usage/configuration#testresult.
+testResults.xml

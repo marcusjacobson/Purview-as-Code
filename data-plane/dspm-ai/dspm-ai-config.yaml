@@ -1,0 +1,72 @@
+# Microsoft Purview as-Code -- DSPM for AI lab configuration (desired state)
+#
+# Wave 3b (issue #75) Phase 2 scaffold. Per ADR 0022
+# (docs/adr/0022-dspm-for-ai-authoring-surface.md), this file is a
+# scope-and-cadence descriptor only. Microsoft Learn currently
+# documents no programmatic authoring API for DSPM for AI -- the
+# "Activate Microsoft Purview for AI" path is a one-click portal
+# action that fans out to already-shipped surfaces (DLP, IRM,
+# Communication Compliance, audit) covered by their own waves.
+#
+# This file therefore intentionally OMITS a `policies:` field. There
+# is no `Deploy-DSPMforAI.ps1` reconciler and no cmdlet to drive
+# Create / Update / Remove against. ADR 0022 enumerates the watch-list
+# triggers that would re-open this question.
+#
+# Schema: ./dspm-ai-config.schema.json (Draft-07).
+#
+# One script consumes this file:
+#
+#   scripts/Test-DSPMforAIPosture.ps1
+#       Read-only posture verifier. Validates the schema, confirms
+#       referenced upstream label YAMLs exist, and -- when
+#       -ConnectTenant is supplied -- asserts that the unified audit
+#       log is enabled (Get-AdminAuditLogConfig), that every role
+#       group named in `scope.roleGroups` exists in the tenant
+#       (Get-RoleGroup), and that every label named in `scope.labels`
+#       resolves to a published label (Get-Label). Zero tenant writes.
+#
+# Default state (Phase 2):
+#   * labels.sources = data-plane/information-protection/labels.yaml
+#                      (Wave 1).
+#   * labels.include = "all".
+#   * workloads = the three Copilot surfaces the lab plans to scope
+#                 (operators should narrow this to what their tenant
+#                 actually uses).
+#   * roleGroups = the three AI-specific role groups documented at
+#                   https://learn.microsoft.com/en-us/purview/ai-microsoft-purview-permissions
+#                   and provisioned via scripts/Deploy-PurviewRoleGroups.ps1
+#                   from data-plane/purview-role-groups/role-groups.yaml.
+#                   The verifier iterates the list and asserts each
+#                   one exists; populated as part of the v2 §5.4
+#                   DSPM-for-AI watch-list re-verification (issue #368).
+#   * posture.cadence = "weekly" -- mirrors ADR 0021 Decision 1.
+#
+# References:
+#   ADR 0022 (this file's governing decision):
+#     docs/adr/0022-dspm-for-ai-authoring-surface.md
+#   Microsoft Purview DSPM for AI overview:
+#     https://learn.microsoft.com/en-us/purview/dspm-for-ai
+#   Considerations for deploying Microsoft Purview AI controls:
+#     https://learn.microsoft.com/en-us/purview/ai-microsoft-purview-considerations
+#   Permissions for Microsoft Purview AI features:
+#     https://learn.microsoft.com/en-us/purview/ai-microsoft-purview-permissions
+#   Get started with Microsoft Purview AI:
+#     https://learn.microsoft.com/en-us/purview/ai-microsoft-purview
+
+scope:
+  labels:
+    sources:
+      - data-plane/information-protection/labels.yaml
+    include: all
+  workloads:
+    - M365Copilot
+    - CopilotForSecurity
+    - CopilotStudio
+  roleGroups:
+    - DataSecurityAIAdmins
+    - DataSecurityAIContentViewers
+    - DataSecurityAIViewers
+
+posture:
+  cadence: weekly

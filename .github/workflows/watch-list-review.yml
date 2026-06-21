@@ -1,0 +1,235 @@
+name: watch-list-review
+
+# Scheduled watch-list re-verification loop for the Purview-as-Code lab (#725).
+#
+# The repository's standing §8 watch-list ADRs (0019 / 0022 / 0027 / 0035 / 0036 /
+# 0037) each define re-open triggers — Microsoft Learn / REST / Graph pages that,
+# if they change, unblock deferred work. Those triggers are otherwise re-verified
+# manually on a quarterly cadence. This loop watches the trigger pages enumerated
+# in docs/adr/watch-list.yml and opens a nudge issue routed to @idea-intake when a
+# page materially changes, so re-verification is event-driven, not calendar-driven.
+#
+# It is the same read-only, issue-only loop pattern as surface-watch.yml (Slice 8)
+# and drift-detection.yml (Slice 7).
+#
+# Material-change rules (see docs/adr/watch-list.yml for per-entry baselines):
+#   signal: updated-since  -> flag when the page's `updated_at` date differs from
+#                             the recorded baseline, OR the status is no longer 200
+#                             (moved / retired).
+#   signal: appears        -> flag when an expected-404 page becomes HTTP 200 (the
+#                             authoring surface may have shipped).
+#
+# Read-only / issue-only: fetches public Microsoft Learn pages only — no Azure
+# auth, no tenant call, no deploy. Per mcp-tool-usage.instructions.md read-only
+# default and security principle #9, the loop only ever opens an issue. It NEVER
+# auto-closes a watch-list issue or ships a reconciler change: a flagged trigger
+# still requires a human re-verification (often interactive-tenant) per the ADR.
+#
+# References (Microsoft Learn + GitHub Docs):
+#   https://learn.microsoft.com/en-us/purview/whats-new
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+
+on:
+  schedule:
+    # Weekly Monday at 05:00 UTC, after surface-watch (03:00) and code-currency
+    # (04:00). Cron grammar:
+    # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      force_report:
+        description: 'Always open the review issue, even when nothing changed (operator-initiated review).'
+        type: boolean
+        default: false
+      simulate_drift:
+        description: 'Inject a synthetic finding so the issue-creation path can be tested end-to-end.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read            # Checkout + read the manifest; no writes.
+  issues: write             # gh issue create when a trigger materially changes.
+
+concurrency:
+  group: watch-list-review
+  cancel-in-progress: false
+
+jobs:
+  review-watch-list:
+    name: Review watch-list triggers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Fetch trigger pages and flag material changes
+        id: check
+        # Dispatch inputs flow through env (not interpolated into the script body)
+        # so substitution happens outside the shell-quoting boundary, per
+        # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+        env:
+          FORCE_REPORT: ${{ github.event.inputs.force_report }}
+          SIMULATE_DRIFT: ${{ github.event.inputs.simulate_drift }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module powershell-yaml -Force -Scope CurrentUser | Out-Null
+          Import-Module powershell-yaml
+
+          $manifestPath = 'docs/adr/watch-list.yml'
+          if (-not (Test-Path $manifestPath)) { throw "$manifestPath not found" }
+          $manifest = ConvertFrom-Yaml (Get-Content $manifestPath -Raw)
+          $entries = @($manifest.entries)
+          Write-Host "Loaded $($entries.Count) watch-list entries."
+
+          function Get-PageState([string]$url) {
+            # Follow redirects; return final status + `updated_at` (date portion).
+            $h = [System.Net.Http.HttpClientHandler]::new(); $h.AllowAutoRedirect = $true
+            $c = [System.Net.Http.HttpClient]::new($h); $c.Timeout = [TimeSpan]::FromSeconds(25)
+            $c.DefaultRequestHeaders.Add('User-Agent', 'Mozilla/5.0 (watch-list-review)')
+            try {
+              $resp = $c.GetAsync($url).GetAwaiter().GetResult()
+              $status = [int]$resp.StatusCode
+              $date = ''
+              if ($status -eq 200) {
+                $body = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                if ($body -match 'name="updated_at"\s+content="([^"]+)"') { $date = $matches[1] }
+                elseif ($body -match 'name="ms\.date"\s+content="([^"]+)"') { $date = $matches[1] }
+                if ($date) { $date = $date.Substring(0, [Math]::Min(10, $date.Length)) }
+              }
+              return [pscustomobject]@{ Status = $status; Date = $date }
+            }
+            catch {
+              return [pscustomobject]@{ Status = -1; Date = "error: $($_.Exception.Message)" }
+            }
+            finally { $c.Dispose(); $h.Dispose() }
+          }
+
+          $findings = @()
+          $rows = @()
+          foreach ($e in $entries) {
+            Write-Host "::group::$($e.id)"
+            $state = Get-PageState $e.url
+            $status = 'ok'; $flag = $null
+            switch ($e.signal) {
+              'updated-since' {
+                if ($state.Status -ne 200) {
+                  $status = "HTTP $($state.Status)"
+                  $flag = "**$($e.id)** ($($e.row), [ADR]($($e.adr)), #$($e.relatedIssue)): trigger page is no longer HTTP 200 (now $($state.Status)) — moved or retired. Re-verify: $($e.url)"
+                }
+                elseif ($state.Date -and $state.Date -ne [string]$e.baseline) {
+                  $status = "updated $($state.Date)"
+                  $flag = "**$($e.id)** ($($e.row), [ADR]($($e.adr)), #$($e.relatedIssue)): trigger page updated (baseline ``$($e.baseline)`` -> live ``$($state.Date)``). Re-verify the ADR's re-open triggers against $($e.url)"
+                }
+                else { $status = "current ($($state.Date))" }
+              }
+              'appears' {
+                if ($state.Status -eq 200) {
+                  $status = 'NOW 200'
+                  $flag = "**$($e.id)** ($($e.row), [ADR]($($e.adr)), #$($e.relatedIssue)): an expected-404 surface is now reachable (HTTP 200) — the authoring surface may have shipped. Re-verify: $($e.url)"
+                }
+                else { $status = "still $($state.Status)" }
+              }
+              default { $status = "unknown signal '$($e.signal)'" }
+            }
+            if ($flag) { $findings += $flag }
+            $rows += "| $($e.id) | $($e.signal) | $($e.baseline) | $status |"
+            Write-Host "  $status"
+            Write-Host "::endgroup::"
+          }
+
+          if ($env:SIMULATE_DRIFT -eq 'true') {
+            $findings += "SIMULATED DRIFT (workflow_dispatch simulate_drift=true): synthetic finding for pipeline testing only — no real watch-list change."
+          }
+          $force = ($env:FORCE_REPORT -eq 'true')
+          $fire = ($findings.Count -gt 0) -or $force
+          Write-Host "entries: $($entries.Count); findings: $($findings.Count); fire: $fire"
+
+          $sb = [System.Text.StringBuilder]::new()
+          [void]$sb.AppendLine("## Watch-list review — re-verification required")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("This scheduled loop (#725) watches the §8 watch-list re-open triggers in [``docs/adr/watch-list.yml``](../../docs/adr/watch-list.yml). One or more trigger pages changed materially since their recorded baseline. Routed to ``@idea-intake`` via labels.")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("> A flagged trigger is a **cue to re-verify**, not a confirmed unblock. Perform the manual (often interactive-tenant) verification in the cited ADR before shipping any reconciler change. This loop never auto-closes a watch-list issue.")
+          [void]$sb.AppendLine("")
+          if ($findings.Count -gt 0) {
+            [void]$sb.AppendLine("### Flagged")
+            [void]$sb.AppendLine("")
+            foreach ($f in $findings) { [void]$sb.AppendLine("- $f") }
+            [void]$sb.AppendLine("")
+          }
+          [void]$sb.AppendLine("### All watch-list entries")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("| Entry | Signal | Baseline | Status |")
+          [void]$sb.AppendLine("|---|---|---|---|")
+          foreach ($r in $rows) { [void]$sb.AppendLine($r) }
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("### Next steps")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("1. For each flagged entry, re-verify the ADR's re-open triggers against the live page.")
+          [void]$sb.AppendLine("2. If a trigger has genuinely fired, start the unblock item via ``@idea-intake`` and follow the ADR's re-open procedure.")
+          [void]$sb.AppendLine("3. If it was a non-material edit, update the entry's ``baseline`` / ``lastVerified`` in ``docs/adr/watch-list.yml`` so the loop re-baselines.")
+
+          Set-Content -Path watch-list-report.md -Value $sb.ToString()
+
+          if ($fire) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "fire=true"
+            Write-Host "::notice::Watch-list change(s) flagged or report forced. An issue will be opened (subject to dedupe)."
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "fire=false"
+            Write-Host "::notice::No watch-list trigger changed and report not forced. Staying silent."
+          }
+
+      - name: Ensure watch-list label exists
+        if: steps.check.outputs.fire == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          # gh label create exits non-zero if the label already exists; that is fine.
+          gh label create 'watch-list' `
+            --color '5319e7' `
+            --description 'Watch-list re-open-trigger review loop finding (#725)' `
+            --repo "${{ github.repository }}" `
+            2>$null
+          exit 0
+
+      - name: Check for existing watch-list issue
+        if: steps.check.outputs.fire == 'true'
+        id: dedupe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $open = gh issue list `
+            --label 'watch-list' `
+            --label 'squad:tester-validator' `
+            --state open `
+            --json number `
+            --jq 'length'
+
+          if ([int]$open -gt 0) {
+            Write-Host "::notice::$open existing open watch-list issue(s). Skipping duplicate."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "exists=true"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "exists=false"
+          }
+
+      - name: Create watch-list review issue
+        if: steps.check.outputs.fire == 'true' && steps.dedupe.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $body = Get-Content watch-list-report.md -Raw
+
+          gh issue create `
+            --title "Watch-list review — re-verify re-open triggers" `
+            --body $body `
+            --label "watch-list" `
+            --label "squad:tester-validator" `
+            --label "squad:automation-engineer" `
+            --label "needs-review"
+
+          Write-Host "::notice::watch-list review issue created."

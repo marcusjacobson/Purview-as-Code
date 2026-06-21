@@ -1,0 +1,564 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/dlp/policies.schema.json",
+    "title": "Microsoft Purview Data Loss Prevention policies",
+    "description": "Desired state for Microsoft Purview DLP policies consumed by scripts/Deploy-DLPPolicies.ps1. Reference: https://learn.microsoft.com/en-us/purview/dlp-learn-about-dlp",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "policies" ],
+    "properties": {
+        "policies": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/dlpPolicy" }
+        }
+    },
+    "definitions": {
+        "dlpPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "mode" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Unique policy identifier. Maps to the -Name parameter of New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Free-form policy description. Maps to -Comment on New-DlpCompliancePolicy."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": [ "TestWithoutNotifications", "TestWithNotifications", "Enable", "Disable" ],
+                    "description": "Policy enforcement mode. Simulation-first per project-plan guiding principle 3. Reference: https://learn.microsoft.com/en-us/purview/dlp-test-dlp-policies"
+                },
+                "priority": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional integer used to order policy match evaluation. Lower values win."
+                },
+                "locations": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "exchange":                      { "$ref": "#/definitions/locationBucket" },
+                        "sharePoint":                    { "$ref": "#/definitions/locationBucket" },
+                        "oneDrive":                      { "$ref": "#/definitions/locationBucket" },
+                        "teams":                         { "$ref": "#/definitions/locationBucket" },
+                        "endpoint":                      { "$ref": "#/definitions/locationBucket" },
+                        "powerBI":                       { "$ref": "#/definitions/locationBucket" },
+                        "exchangeOnPremises":            { "$ref": "#/definitions/locationBucket", "description": "Maps to -ExchangeOnPremisesLocation on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "oneDriveException":             { "$ref": "#/definitions/locationBucket", "description": "Maps to -OneDriveLocationException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "sharePointException":           { "$ref": "#/definitions/locationBucket", "description": "Maps to -SharePointLocationException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "sharePointOnPremisesException": { "$ref": "#/definitions/locationBucket", "description": "Maps to -SharePointOnPremisesLocationException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "sharePointServer":              { "$ref": "#/definitions/locationBucket", "description": "Maps to -SharePointServerLocation on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "teamsException":                { "$ref": "#/definitions/locationBucket", "description": "Maps to -TeamsLocationException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "endpointException":             { "$ref": "#/definitions/locationBucket", "description": "Maps to -EndpointDlpLocationException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "onPremisesScanner":             { "$ref": "#/definitions/locationBucket", "description": "Maps to -OnPremisesScannerDlpLocation on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "onPremisesScannerException":    { "$ref": "#/definitions/locationBucket", "description": "Maps to -OnPremisesScannerDlpLocationException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "powerBIException":              { "$ref": "#/definitions/locationBucket", "description": "Maps to -PowerBIDlpLocationException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "thirdPartyApp":                 { "$ref": "#/definitions/locationBucket", "description": "Maps to -ThirdPartyAppDlpLocation on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "thirdPartyAppException":        { "$ref": "#/definitions/locationBucket", "description": "Maps to -ThirdPartyAppDlpLocationException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" }
+                    },
+                    "description": "Per-workload location buckets. The first 6 fields (exchange, sharePoint, oneDrive, teams, endpoint, powerBI) map to the primary -ExchangeLocation / -SharePointLocation / -OneDriveLocation / -TeamsLocation / -EndpointDlpLocation / -PowerBIDlpLocation cmdlet parameters. The remaining 12 fields map to per-workload exception / on-premises / third-party variants on New-DlpCompliancePolicy (added by #519; not currently used by any lab-tenant policy). The generic -Locations parameter (used by the Microsoft-shipped Copilot policy with Workload=Applications, Location=Copilot.M365) is modeled separately under 'genericLocations'. See ADR 0032."
+                },
+                "genericLocations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/genericLocation" },
+                    "description": "Generic -Locations parameter entries (each carries Workload + Location + optional metadata + Inclusions/Exclusions). Modeled per ADR 0032 for workloads that Microsoft surfaces through the JSON -Locations parameter rather than per-workload location buckets (e.g. Microsoft 365 Copilot, Workload=Applications, Location=Copilot.M365). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy"
+                },
+                "enforcementPlanes": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Maps to -EnforcementPlanes on New-DlpCompliancePolicy / Set-DlpCompliancePolicy. The Microsoft-shipped Copilot policy uses 'CopilotExperiences'. Dropping this on round-trip would change the enforcement target on apply, so the schema models it explicitly. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy"
+                },
+                "policyTemplateInfo": {
+                    "$ref": "#/definitions/policyTemplateInfo",
+                    "description": "Microsoft policy-template identity. Defensive exporter-write / applier-skip per ADR 0032: the exporter writes this block so round-trips are stable, but Get-DlpPolicySplat NEVER emits it to New-/Set-DlpCompliancePolicy because mutating it could re-type the policy (e.g. flip a Microsoft-template policy to a user-authored one). Comparator also skips this field."
+                },
+                "adaptiveScopes": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "endpoint":             { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -EndpointDlpAdaptiveScopes on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "endpointException":    { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -EndpointDlpAdaptiveScopesException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "exchange":             { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -ExchangeAdaptiveScopes on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "exchangeException":    { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -ExchangeAdaptiveScopesException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "oneDrive":             { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -OneDriveAdaptiveScopes on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "oneDriveException":    { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -OneDriveAdaptiveScopesException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "sharePoint":           { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -SharePointAdaptiveScopes on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "sharePointException":  { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -SharePointAdaptiveScopesException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "teams":                { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -TeamsAdaptiveScopes on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" },
+                        "teamsException":       { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/adaptiveScopeRef" }, "description": "Maps to -TeamsAdaptiveScopesException on New-DlpCompliancePolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy" }
+                    },
+                    "description": "Per-workload Microsoft Purview adaptive policy scope references (#520). Distinct from the static `locations:` buckets: adaptive scopes are first-class Purview resources keyed by name/GUID and authored via New-AdaptiveScope. Each scope is referenced here by name (required) with an optional GUID for round-trip fidelity; the apply path resolves name->GUID via Get-AdaptiveScope at runtime and throws if a referenced scope does not exist in the tenant. Reference: https://learn.microsoft.com/en-us/purview/purview-adaptive-scopes"
+                },
+                "rules": {
+                    "type": "array",
+                    "items": { "$ref": "#/definitions/dlpRule" },
+                    "description": "Nested rule entries. Each rule maps to New-DlpComplianceRule. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Free-form pass-through marker. Used by the reconciler exporter to flag tenant-only state that is not yet modeled declaratively (e.g. generic Locations parameter for Microsoft 365 Copilot). The apply path skips Create/Update against the tenant when a policy or rule carries only structural fields plus 'notes'."
+                }
+            }
+        },
+        "locationBucket": {
+            "oneOf": [
+                { "type": "string", "enum": [ "All" ] },
+                {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true
+                }
+            ],
+            "description": "Either the literal string `All` or an array of workload-specific identifiers."
+        },
+        "dlpRule": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name" ],
+            "anyOf": [
+                { "required": [ "sensitiveInfoTypes" ] },
+                { "required": [ "sensitivityLabels" ] },
+                { "required": [ "advancedRule" ] },
+                { "required": [ "notes" ] }
+            ],
+            "not": {
+                "anyOf": [
+                    { "required": [ "advancedRule", "sensitiveInfoTypes" ] },
+                    { "required": [ "advancedRule", "sensitivityLabels" ] }
+                ]
+            },
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Unique rule identifier within the policy."
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Free-form pass-through marker. Used by the reconciler exporter to flag tenant-only state that is not yet modeled declaratively (e.g. Microsoft-shipped default-template rules whose predicate body is carried in 'AdvancedRule' as a JSON tree of grouped SITs / trainable classifiers). The apply path skips Create/Update against the tenant when a rule carries only structural fields plus 'notes'."
+                },
+                "priority": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional integer; lower wins within the policy."
+                },
+                "sensitiveInfoTypes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": { "$ref": "#/definitions/sitReference" },
+                    "description": "SIT references by GUID. GUIDs are sourced from data-plane/classifications/sit-catalog.yaml (issue #80)."
+                },
+                "sensitivityLabels": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": { "$ref": "#/definitions/labelReference" },
+                    "description": "Sensitivity-label references by display name. Resolved via Get-Label (Wave 1 labels, issue #65)."
+                },
+                "advancedRule": {
+                    "$ref": "#/definitions/advancedRule",
+                    "description": "Declarative representation of the Microsoft `AdvancedRule` JSON predicate (rules with IsAdvancedRule=True). Mutually exclusive with `sensitiveInfoTypes` and `sensitivityLabels`. See docs/adr/0031-dlp-advancedrule-yaml-shape.md for the wire-to-YAML transform and Microsoft-shipped wire wrappers reconstructed at apply time. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "blockAccess": {
+                    "type": "boolean",
+                    "description": "Block the protected action (download, share, etc.) for matched content."
+                },
+                "notifyUser": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "Policy-tip recipients. Tokens: SiteAdmin, LastModifier, Owner, <UPN>, <group UPN>."
+                },
+                "generateIncidentReport": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "Recipients for an incident report email per match."
+                },
+                "generateAlert": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "Recipients for the high-severity alert."
+                },
+                "enforcePortalAccess": {
+                    "type": "boolean",
+                    "description": "Maps to -EnforcePortalAccess on New-DlpComplianceRule. Microsoft default is True; controls whether the rule's protected actions apply to the Microsoft Purview portal browsing surface. Tracked per ADR 0033 Batch 1 (#521 slice B). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "notifyEmailExchangeIncludeAttachment": {
+                    "type": "boolean",
+                    "description": "Maps to -NotifyEmailExchangeIncludeAttachment on New-DlpComplianceRule. Controls whether notification emails for Exchange-detected matches include the offending attachment. Microsoft default is True. Tracked per ADR 0033 Batch 1 (#521 slice B). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "reportSeverityLevel": {
+                    "type": "string",
+                    "enum": [ "Low", "Medium", "High" ],
+                    "description": "Maps to -ReportSeverityLevel on New-DlpComplianceRule. Controls the severity stamped on incident reports / alerts generated by this rule. Microsoft default is 'Low'. Tracked per ADR 0033 Batch 1 (#521 slice B). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "comment": {
+                    "type": "string",
+                    "description": "Maps to -Comment on New-DlpComplianceRule. Free-form operator-set string describing the rule's intent; distinct from the policy-level 'description' (which maps to -Comment on the policy). 15/16 lab-tenant rules populated. Tracked per ADR 0033 Batch 2 (#521 slice C). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "accessScope": {
+                    "type": "string",
+                    "enum": [ "InOrganization", "NotInOrganization", "PerUser" ],
+                    "description": "Maps to -AccessScope on New-DlpComplianceRule. Restricts the rule predicate to content shared in-organization, out-of-organization, or per-user. Populated on rules that gate behavior by sharing direction (e.g. credit-card-shared-externally rules). The 'None' / absent case is represented by omitting the field. Tracked per ADR 0033 Batch 2 (#521 slice C). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "notifyEmailCustomText": {
+                    "type": "string",
+                    "description": "Maps to -NotifyEmailCustomText on New-DlpComplianceRule. Operator-authored body text injected into the policy-tip notification email when the rule matches. Empty string is treated as unset (field omitted on round-trip). Tracked per ADR 0033 Batch 3a (#521 slice D). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "notifyPolicyTipCustomText": {
+                    "type": "string",
+                    "description": "Maps to -NotifyPolicyTipCustomText on New-DlpComplianceRule. Operator-authored text shown in the in-product policy-tip surface (Office, OneDrive, SharePoint, Endpoint, Teams) when the rule matches. Distinct from -NotifyEmailCustomText (the policy-tip email body). Tracked per ADR 0033 Batch 3a (#521 slice D). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "notifyPolicyTipDisplayOption": {
+                    "type": "string",
+                    "enum": [ "Tip", "NotifyOnly", "NotificationOnly" ],
+                    "description": "Maps to -NotifyPolicyTipDisplayOption on New-DlpComplianceRule. Controls how the policy-tip surface displays the match (in-product tip, notification only, or notification-only). The 'None' / absent case is represented by omitting the field. Tracked per ADR 0033 Batch 3a (#521 slice D). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "notifyUserType": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Maps to -NotifyUserType on New-DlpComplianceRule. Controls which user role receives the policy-tip notification (e.g. 'NotSet' = Microsoft default, 'LastModifier', 'Owner', 'SiteAdmin'). Allowed values are validated server-side by the cmdlet at apply time; schema intentionally does not pin an enum because the allowlist is not currently published as a strongly-typed enum on the cmdlet's parameter metadata. The 'None' / absent case is represented by omitting the field. Tracked per ADR 0033 Batch 3b (#521 slice E). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "notifyOverrideRequirements": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Maps to -NotifyOverrideRequirements on New-DlpComplianceRule. Controls what an end user must supply to override the policy tip (e.g. 'None' = Microsoft default, 'WithJustification', 'WithFalsePositive'). Allowed values are validated server-side by the cmdlet at apply time; schema does not pin an enum (see notifyUserType description). The 'None' / absent case is represented by omitting the field. Tracked per ADR 0033 Batch 3b (#521 slice E). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "notifyEmailOnedriveRemediationActions": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Maps to -NotifyEmailOnedriveRemediationActions on New-DlpComplianceRule. Controls the OneDrive-specific remediation action that the notification email links to (e.g. 'NotSet' = Microsoft default). Allowed values are validated server-side by the cmdlet at apply time; schema does not pin an enum (see notifyUserType description). The 'None' / absent case is represented by omitting the field. Tracked per ADR 0033 Batch 3b (#521 slice E). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "notifyAllowOverride": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Maps to -NotifyAllowOverride on New-DlpComplianceRule. Controls whether end users may override the policy tip and, if so, what they must supply (e.g. 'WithJustification', 'WithFalsePositive', or a comma-joined combination when multi-value). The cmdlet parameter is declared System.Object[] but Get-DlpComplianceRule returns the value as a comma-joined System.String; the schema and reconciler honor the wire shape (string). Allowed values are validated server-side by the cmdlet at apply time; schema does not pin an enum (see notifyUserType description). The 'None' / absent case is represented by omitting the field. Tracked per ADR 0033 Batch 3c (#521 slice F). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "incidentReportContent": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Maps to -IncidentReportContent on New-DlpComplianceRule. Comma-joined field set that the incident-report payload includes (e.g. 'Title, DocumentAuthor, DocumentLastModifier, Service, MatchedItem, RulesMatched, Detections, Severity, RetentionLabel, SensitivityLabel'). The cmdlet parameter is declared System.Object[] but Get-DlpComplianceRule returns the value as a comma-joined System.String; the schema and reconciler honor the wire shape (string). Allowed values are validated server-side by the cmdlet at apply time; schema does not pin an enum (see notifyUserType description). The 'None' / absent case is represented by omitting the field. Tracked per ADR 0033 Batch 3c (#521 slice F). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "endpointDlpRestrictions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/endpointDlpRestriction" },
+                    "description": "Maps to -EndpointDlpRestrictions on New-DlpComplianceRule. Per-app enforcement matrix for endpoint policies; each item is a {setting, value, appgroup, defaultmessage} object that controls one enforcement vector (e.g. setting=CloudEgress with value=Audit / Block / BlockWithJustification, scoped to an appgroup or 'none' for all apps). The cmdlet parameter is declared System.Object[] and the tenant returns ArrayList[Hashtable]; the reconciler normalizes by sorting items by `setting` so reorder-only diffs are silent. Allowed values for `setting` and `value` are validated server-side by the cmdlet at apply time; schema does not pin enums (no published Learn-verified allowlist). Tracked per ADR 0033 Batch 4/1 (#521 slice G). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "alertProperties": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": { "type": "string" },
+                    "description": "Maps to -AlertProperties on New-DlpComplianceRule. Free-form bag of per-rule alert-aggregation settings (open shape -- Microsoft may add or drop keys). The lab tenant currently populates this on the Microsoft-shipped 'Default DLP policy - Protect sensitive M365 Copilot interactions' rule with a single key {AggregationType: 'None'}. All values must be strings; the reconciler honors whatever the tenant returns. The Copilot routing decision is modeled separately via the policy-level `enforcementPlanes: CopilotExperiences` field (PR #515 era); per ADR 0033 §2 trigger-list evaluation, this field's actual shape does not require a new ADR. Allowed key names and values are validated server-side by the cmdlet at apply time; schema does not pin enums (no published Learn-verified allowlist). Tracked per ADR 0033 Batch 4/2 (#521 slice H). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "restrictAccess": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/restrictAccessItem" },
+                    "description": "Maps to -RestrictAccess on New-DlpComplianceRule. Array of per-action access restrictions on Microsoft 365 Copilot rules; each item is a {setting, value} object (e.g. setting=UploadText, value=Block). The cmdlet parameter is declared System.Object[] and the tenant returns ArrayList[Hashtable]; the reconciler normalizes by sorting items by `setting` so reorder-only diffs are silent. The umbrella #521 originally framed this as string[] but the live wire shape is a structured array identical to endpointDlpRestrictions (Batch 4/1). Per ADR 0033 §2 trigger-list evaluation (Copilot-crossover question), this field's actual shape does not require a new ADR -- the Copilot routing decision is modeled separately via policy-level `enforcementPlanes: CopilotExperiences`; this field parameterizes per-action enforcement on a Copilot rule. Allowed values for `setting` and `value` are validated server-side by the cmdlet at apply time; schema does not pin enums (no published Learn-verified allowlist). Tracked per ADR 0033 Batch 4/3 (#521 slice I). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                }
+            }
+        },
+        "restrictAccessItem": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "setting" ],
+            "properties": {
+                "setting": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Per-action restriction identifier on a Copilot rule. Example value observed in the lab tenant: UploadText. Server-side cmdlet validation is source of truth at apply time. Maps to the `setting` key on each -RestrictAccess item."
+                },
+                "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Enforcement action for this restriction. Example value observed in the lab tenant: Block. Server-side cmdlet validation is source of truth at apply time. Maps to the `value` key on each -RestrictAccess item."
+                }
+            }
+        },
+        "endpointDlpRestriction": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "setting" ],
+            "properties": {
+                "setting": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Endpoint enforcement vector identifier. Example values observed in the lab tenant: CloudEgress, CopyPaste, RemovableMedia, NetworkShare, UnallowedApps, Print, UnallowedBluetoothTransferApps, RemoteDesktopServices. Server-side cmdlet validation is source of truth at apply time. Maps to the `setting` key on each -EndpointDlpRestrictions item."
+                },
+                "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Enforcement action for this {setting, appgroup} pair. Microsoft default is 'Audit'; other documented values include 'Block', 'BlockWithJustification', 'Allow'. Server-side cmdlet validation is source of truth at apply time. Maps to the `value` key on each -EndpointDlpRestrictions item."
+                },
+                "appgroup": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "App-group scope for the restriction. Microsoft default is the literal string 'none' (apply to all apps). Otherwise the human-readable name of an endpoint app-group authored under the Microsoft Purview portal. Maps to the `appgroup` key on each -EndpointDlpRestrictions item."
+                },
+                "defaultmessage": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Per-restriction policy-tip override. Microsoft default is the literal string 'none'. Maps to the `defaultmessage` key on each -EndpointDlpRestrictions item."
+                }
+            }
+        },
+        "sitReference": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "guid" ],
+            "properties": {
+                "guid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                    "description": "GUID of the sensitive info type. Sourced from sit-catalog.yaml."
+                },
+                "minCount": { "type": "integer", "minimum": 1, "description": "Minimum match count." },
+                "maxCount": { "type": "integer", "description": "Maximum match count. Microsoft's exported rules use -1 as the unbounded sentinel; absent or -1 means no upper bound." },
+                "confidenceLevel": {
+                    "type": "string",
+                    "enum": [ "Low", "Medium", "High" ],
+                    "description": "SIT match confidence level."
+                }
+            }
+        },
+        "labelReference": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "displayName" ],
+            "properties": {
+                "displayName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Sensitivity label DisplayName as declared in data-plane/information-protection/labels.yaml."
+                }
+            }
+        },
+        "advancedRule": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "outerOperator", "groups" ],
+            "properties": {
+                "outerOperator": {
+                    "type": "string",
+                    "enum": [ "And", "Or" ],
+                    "description": "Boolean operator joining the entries in `groups`. Maps to `Condition.SubConditions[0].Value[0].Operator` on the wire. See ADR 0031."
+                },
+                "groups": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/advancedRuleGroup" },
+                    "description": "Named SIT / trainable-classifier groups. Maps to `Condition.SubConditions[0].Value[0].Groups` on the wire."
+                }
+            }
+        },
+        "advancedRuleGroup": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "operator" ],
+            "anyOf": [
+                { "required": [ "sensitiveInfoTypes" ] },
+                { "required": [ "trainableClassifiers" ] }
+            ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Human-readable group label. Maps to `Groups[].Name` on the wire."
+                },
+                "operator": {
+                    "type": "string",
+                    "enum": [ "And", "Or" ],
+                    "description": "Boolean operator joining the entries in `sensitiveInfoTypes` and `trainableClassifiers`. Maps to `Groups[].Operator` on the wire."
+                },
+                "sensitiveInfoTypes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/advancedSitReference" },
+                    "description": "Built-in SIT entries. Each entry maps to one `Sensitivetypes[]` object on the wire (without `Classifiertype`)."
+                },
+                "trainableClassifiers": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/trainableClassifierReference" },
+                    "description": "Trainable-classifier entries. Each entry maps to one `Sensitivetypes[]` object on the wire with `Classifiertype: MLModel`. Reference: https://learn.microsoft.com/en-us/purview/trainable-classifiers-definitions"
+                }
+            }
+        },
+        "advancedSitReference": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "guid" ],
+            "properties": {
+                "guid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                    "description": "GUID of the sensitive info type. Maps to `Sensitivetypes[].Id` on the wire."
+                },
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional human-readable SIT name. Maps to `Sensitivetypes[].Name` on the wire; preserved for round-trip fidelity when Microsoft returns a non-GUID name."
+                },
+                "minCount": { "type": "integer", "minimum": 1, "description": "Minimum match count. Maps to `Mincount`." },
+                "maxCount": { "type": "integer", "description": "Maximum match count. Maps to `Maxcount`. Microsoft uses -1 as the unbounded sentinel." },
+                "confidenceLevel": {
+                    "type": "string",
+                    "enum": [ "Low", "Medium", "High" ],
+                    "description": "SIT match confidence level. Maps to `Confidencelevel`."
+                },
+                "minConfidence": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Minimum confidence percentage. Maps to `Minconfidence`." },
+                "maxConfidence": { "type": "integer", "minimum": 0, "maximum": 100, "description": "Maximum confidence percentage. Maps to `Maxconfidence`." }
+            }
+        },
+        "trainableClassifierReference": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "guid" ],
+            "properties": {
+                "guid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                    "description": "GUID of the trainable classifier. Maps to `Sensitivetypes[].Id` on the wire. Microsoft-shipped built-in classifiers are documented at https://learn.microsoft.com/en-us/purview/trainable-classifiers-definitions; customer-trained models are tenant-resolvable by GUID."
+                },
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional human-readable classifier name. Maps to `Sensitivetypes[].Name` on the wire; Microsoft typically returns the GUID as the name for trainable classifiers."
+                }
+            }
+        },
+        "genericLocation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "workload", "location" ],
+            "properties": {
+                "workload": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Microsoft workload identifier. The Copilot policy uses 'Applications'. Maps to `Locations[].Workload` on the wire."
+                },
+                "location": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Workload-specific location identifier. The Copilot policy uses 'Copilot.M365'. Maps to `Locations[].Location` on the wire."
+                },
+                "locationDisplayName": {
+                    "type": [ "string", "null" ],
+                    "description": "Optional human-readable location name returned by Microsoft. Round-tripped for fidelity; not required on apply. Maps to `Locations[].LocationDisplayName` on the wire."
+                },
+                "locationSource": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Microsoft-classified location source. Captured Copilot value is 'Unknown'. Round-tripped for fidelity. Maps to `Locations[].LocationSource` on the wire."
+                },
+                "locationType": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Microsoft-classified location type. Captured Copilot value is 'Unknown'. Round-tripped for fidelity. Maps to `Locations[].LocationType` on the wire."
+                },
+                "inclusions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/genericLocationInclusion" },
+                    "description": "Tenants / groups / users the policy applies to. The Copilot policy uses a single Type=Tenant, Identity=All inclusion. Maps to `Locations[].Inclusions` on the wire."
+                },
+                "exclusions": {
+                    "type": "array",
+                    "items": { "$ref": "#/definitions/genericLocationExclusion" },
+                    "description": "Tenants / groups / users excluded from the policy. Maps to `Locations[].Exclusions` on the wire."
+                }
+            }
+        },
+        "genericLocationInclusion": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "type", "identity" ],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Inclusion type, e.g. 'Tenant', 'Group', 'User'. Maps to `Inclusions[].Type` on the wire."
+                },
+                "identity": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Inclusion identity, e.g. 'All' for tenant-wide. Maps to `Inclusions[].Identity` on the wire."
+                },
+                "displayName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional human-readable name. Round-tripped for fidelity. Maps to `Inclusions[].DisplayName` on the wire."
+                },
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional Microsoft-internal name (typically equal to Identity for tenant-wide). Maps to `Inclusions[].Name` on the wire."
+                }
+            }
+        },
+        "genericLocationExclusion": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "type", "identity" ],
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Exclusion type, e.g. 'Tenant', 'Group', 'User'. Maps to `Exclusions[].Type` on the wire."
+                },
+                "identity": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Exclusion identity. Maps to `Exclusions[].Identity` on the wire."
+                },
+                "displayName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional human-readable name. Maps to `Exclusions[].DisplayName` on the wire."
+                },
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional Microsoft-internal name. Maps to `Exclusions[].Name` on the wire."
+                }
+            }
+        },
+        "policyTemplateInfo": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Microsoft policy-template identity returned by Get-DlpCompliancePolicy. Defensive exporter-write / applier-skip per ADR 0032: structure is preserved verbatim from the wire so round-trips are byte-equal, but the apply path never emits this to the cmdlet. `additionalProperties: true` because Microsoft may evolve this shape; this field is treated as opaque pass-through."
+        },
+        "adaptiveScopeRef": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Microsoft Purview adaptive policy scope name. Resolved via Get-AdaptiveScope at apply time; the cmdlet receives the scope name as the canonical input. Reference: https://learn.microsoft.com/en-us/purview/purview-adaptive-scopes"
+                },
+                "guid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                    "description": "Optional adaptive scope GUID. Round-tripped from Get-DlpCompliancePolicy for traceability; the apply path resolves by name and treats the GUID as informational. Useful for detecting an adaptive scope rename across exports."
+                }
+            }
+        }
+    }
+}

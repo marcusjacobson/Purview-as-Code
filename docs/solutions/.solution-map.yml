@@ -1,0 +1,146 @@
+# Solution-doc freshness map.
+#
+# Maps each governed Microsoft Purview solution to the reconciler / desired-state code paths that
+# implement it and the solution guide under docs/solutions/ that documents it. Consumed by
+# .github/workflows/docs-freshness.yml to emit an ADVISORY (non-blocking) warning when a pull
+# request changes a solution's code without touching its guide.
+#
+# Maintenance: when you add a reconciler or a data-plane solution folder, add a row here and a
+# matching page under docs/solutions/. The docs-maintenance skill
+# (.github/skills/docs-maintenance/SKILL.md) packages the page template and update checklist.
+#
+# code entries: an exact repo-relative file path, or a folder prefix ending in '/'.
+
+solutions:
+  - name: Sensitivity labels
+    doc: docs/solutions/information-protection/labels.md
+    code:
+      - scripts/Deploy-Labels.ps1
+      - data-plane/information-protection/labels.yaml
+
+  - name: Label policies
+    doc: docs/solutions/information-protection/label-policies.md
+    code:
+      - scripts/Deploy-LabelPolicies.ps1
+      - data-plane/information-protection/label-policies.yaml
+
+  - name: Auto-labeling policies
+    doc: docs/solutions/information-protection/auto-label-policies.md
+    code:
+      - scripts/Deploy-AutoLabelPolicies.ps1
+      - data-plane/information-protection/auto-label-policies.yaml
+
+  - name: Classifications / SIT catalog
+    doc: docs/solutions/compliance/classifications.md
+    code:
+      - scripts/Deploy-Classifications.ps1
+      - scripts/Sync-SITCatalog.ps1
+      - data-plane/classifications/classifications.yaml
+      - data-plane/classifications/sit-catalog.yaml
+
+  - name: Data Loss Prevention
+    doc: docs/solutions/compliance/dlp.md
+    code:
+      - scripts/Deploy-DLPPolicies.ps1
+      - data-plane/dlp/policies.yaml
+
+  - name: Communication compliance
+    doc: docs/solutions/compliance/communication-compliance.md
+    code:
+      - scripts/Deploy-CommunicationCompliance.ps1
+      - data-plane/communication-compliance/policies.yaml
+
+  - name: Adaptive scopes
+    doc: docs/solutions/compliance/adaptive-scopes.md
+    code:
+      - scripts/Deploy-AdaptiveScopes.ps1
+      - scripts/New-AdaptiveScope.ps1
+      - data-plane/adaptive-scopes/scopes.yaml
+
+  - name: Audit
+    doc: docs/solutions/governance-foundation/audit-retention.md
+    code:
+      - scripts/Set-AuditRetentionPolicy.ps1
+      - data-plane/audit/retention-policies.yaml
+
+  - name: Data Lifecycle Management
+    doc: docs/solutions/governance-foundation/data-lifecycle.md
+    code:
+      - scripts/Deploy-RetentionPolicies.ps1
+      - data-plane/data-lifecycle/retention-policies.yaml
+
+  - name: Records management
+    doc: docs/solutions/governance-foundation/records-management.md
+    code:
+      - scripts/Deploy-FilePlan.ps1
+      - data-plane/records/file-plan.yaml
+
+  - name: Insider Risk Management
+    doc: docs/solutions/governance-foundation/insider-risk-management.md
+    code:
+      - scripts/Deploy-IRMPolicies.ps1
+      - scripts/Deploy-IRMEntityLists.ps1
+      - data-plane/irm/policies.yaml
+      - data-plane/irm/entity-lists.yaml
+
+  - name: DSPM
+    doc: docs/solutions/governance-foundation/dspm.md
+    code:
+      - scripts/Test-DSPMPosture.ps1
+      - scripts/Export-ContentExplorerData.ps1
+      - data-plane/dspm/dspm-config.yaml
+
+  - name: DSPM for AI
+    doc: docs/solutions/governance-foundation/dspm-for-ai.md
+    code:
+      - scripts/Test-DSPMforAIPosture.ps1
+      - data-plane/dspm-ai/dspm-ai-config.yaml
+
+  - name: Data Map - collections
+    doc: docs/solutions/data-map/collections.md
+    code:
+      - scripts/Deploy-Collections.ps1
+      - data-plane/collections/collections.yaml
+
+  - name: Data Map - data sources
+    doc: docs/solutions/data-map/data-sources.md
+    code:
+      - scripts/Deploy-DataSources.ps1
+      - data-plane/data-sources/data-sources.yaml
+
+  - name: Data Map - scans
+    doc: docs/solutions/data-map/scans.md
+    code:
+      - scripts/Deploy-Scans.ps1
+      - data-plane/scans/scans.yaml
+
+  - name: Data Map - glossary
+    doc: docs/solutions/data-map/glossary.md
+    code:
+      - scripts/Deploy-Glossary.ps1
+      - data-plane/glossary/glossary.yaml
+
+  - name: Unified Catalog
+    doc: docs/solutions/unified-catalog/unified-catalog.md
+    code:
+      - scripts/Deploy-UnifiedCatalog.ps1
+      - data-plane/unified-catalog/
+
+  - name: Purview role groups
+    doc: docs/solutions/governance-foundation/purview-role-groups.md
+    code:
+      - scripts/Deploy-PurviewRoleGroups.ps1
+      - scripts/Deploy-RoleGroupBackingEntraGroups.ps1
+      - data-plane/purview-role-groups/role-groups.yaml
+
+  - name: Entra directory roles
+    doc: docs/solutions/governance-foundation/entra-directory-roles.md
+    code:
+      - scripts/Deploy-EntraDirectoryRoles.ps1
+      - data-plane/entra-directory-roles/role-assignments.yaml
+
+  - name: Administrative units
+    doc: docs/solutions/governance-foundation/administrative-units.md
+    code:
+      - scripts/Deploy-AdministrativeUnits.ps1
+      - data-plane/administrative-units/administrative-units.yaml

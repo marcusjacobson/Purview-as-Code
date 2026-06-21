@@ -1,0 +1,37 @@
+# Microsoft Purview as-Code — Administrative Units (Entra)
+#
+# Desired state for Microsoft Entra administrative units (AUs) in the
+# `contoso.onmicrosoft.com` tenant. AUs are an Entra construct that can be
+# referenced by AU-scoped Microsoft Purview role groups for delegated
+# admin of DLP, IRM, Communication Compliance, Data Lifecycle Management,
+# Records Management, and Sensitivity Labeling.
+#
+# Scope and posture decision: see docs/adr/0002-administrative-units.md
+# Default steady state is an empty list; a test AU is added ad-hoc when the
+# deploy pattern is being exercised and removed on teardown.
+#
+# Schema references (Microsoft Learn):
+#   https://learn.microsoft.com/en-us/graph/api/resources/administrativeunit
+#   https://learn.microsoft.com/en-us/graph/api/directory-post-administrativeunits
+#   https://learn.microsoft.com/en-us/graph/api/directory-list-administrativeunits
+#   https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/administrative-units
+#
+# Fields per entry:
+#   displayName  (required, string, unique within tenant)
+#   description  (optional, string)
+#   visibility   (optional, enum: "Public" | "HiddenMembership", default "Public")
+#   members      (optional, list of user/group objectIds — not yet implemented in the deploy script;
+#                  see docs/adr/0002-administrative-units.md decision #4 and the matching note in
+#                  scripts/Deploy-AdministrativeUnits.ps1)
+
+# Default steady state is an empty list. See ADR 0002 decision #2.
+# To exercise the deploy pattern ad-hoc, add one or more entries following the
+# shape below, run `./scripts/Deploy-AdministrativeUnits.ps1`, and revert to
+# an empty list with `-PruneMissing` on teardown.
+#
+# Example (commented-out; do not uncomment on main):
+#   - displayName: au-example
+#     description: Short description.
+#     visibility: Public    # or "HiddenMembership"
+#     members: []
+administrativeUnits: []

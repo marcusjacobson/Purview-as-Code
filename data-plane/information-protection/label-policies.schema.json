@@ -1,0 +1,78 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/label-policies.schema.json",
+    "title": "Microsoft Purview sensitivity label policies",
+    "description": "Desired state for sensitivity label policies consumed by scripts/Deploy-LabelPolicies.ps1. See docs/adr/0015-label-policy-shape.md. Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-labelpolicy",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "labelPolicies" ],
+    "properties": {
+        "labelPolicies": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/labelPolicy" }
+        }
+    },
+    "definitions": {
+        "labelPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "mode" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique policy identifier."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": [ "Enable", "Disable", "TestWithNotifications", "TestWithoutNotifications" ],
+                    "description": "Cmdlet-input modes accepted by New-LabelPolicy / Set-LabelPolicy. Per ADR 0015 §2 the lab uses only Enable + Disable; Test* values are reserved for future work. Runtime states such as 'Enforce' are normalized to 'Enable' by Deploy-LabelPolicies.ps1 (issue #192) and must NOT appear in YAML."
+                },
+                "exchangeLocation": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "description": "[All] or a list of mailbox SMTP addresses."
+                },
+                "exchangeLocationException": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "Mailbox SMTP / DN / GUID, or mail-enabled group identifier (DN or SMTP). Applied to the cmdlet -ExchangeLocationException parameter when exchangeLocation is [All]. Optional; omit when no exclusions are desired. Per ADR 0015 section Scope -- Option A updated for ADR 0030 row 3 (PR for #492). Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-labelpolicy"
+                },
+                "labels": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "pattern": "^[^/]+(/[^/]+)?$",
+                        "description": "Composite key: '<parent>/<displayName>' for sublabels, bare '<displayName>' for top-level."
+                    },
+                    "description": "Labels to publish. Matches the composite-key shape used by Deploy-Labels.ps1 (#131)."
+                },
+                "modernGroupLocation": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "Microsoft 365 group identifiers for the Sites & Groups wizard step. Each entry is a group display name resolved at deploy time per ADR 0023 Category 3, or a group object ID. Added by ADR 0030 row 4 (#471). Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-labelpolicy"
+                },
+                "includedAdministrativeUnits": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "Entra administrative unit display names that restrict this policy to users in those AUs. Each entry is a display name resolved at deploy time per ADR 0023 Category 3 (Get-AdministrativeUnitIdByDisplayName.ps1). Empty array = no AU restriction (policy applies to all users). Added by ADR 0042 (#471 row 6). Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-labelpolicy"
+                },
+                "powerBIComplianceInformation": {
+                    "type": "boolean",
+                    "description": "When true, this policy extends sensitivity-label enforcement into Microsoft Power BI and Microsoft Fabric workspaces. Maps to Set-LabelPolicy -PowerBIComplianceInformation. Added by ADR 0041 (#471 row 7). Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-labelpolicy"
+                },
+                "advancedSettings": {
+                    "type": "object",
+                    "description": "Allowlist per ADR 0015 §3 (extended by ADR 0030 row 1 for OutlookDefaultLabel; row 2 for teamworkdefaultlabelid; row 5 / ADR 0040 for DefaultLabel). Reference: https://learn.microsoft.com/en-us/purview/sensitivity-labels-office-apps#configure-advanced-settings ; https://learn.microsoft.com/en-us/purview/sensitivity-labels-aip#outlook-specific-options-for-default-label-and-mandatory-labeling ; https://learn.microsoft.com/en-us/purview/sensitivity-labels-meetings",
+                    "propertyNames": {
+                        "pattern": "^(?:RequireDowngradeJustification|requiredowngradejustification|MandatoryLabelling|mandatorylabelling|HideBarByDefault|hidebarbydefault|OutlookDefaultLabel|outlookdefaultlabel|teamworkdefaultlabelid|TeamworkDefaultLabelId|DefaultLabel|defaultlabel)$"
+                    },
+                    "additionalProperties": {
+                        "type": [ "string", "boolean" ]
+                    }
+                }
+            }
+        }
+    }
+}

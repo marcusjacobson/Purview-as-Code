@@ -1,0 +1,93 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/auto-label-policies.schema.json",
+    "title": "Microsoft Purview auto-labeling policies",
+    "description": "Desired state for auto-labeling policies + rules consumed by scripts/Deploy-AutoLabelPolicies.ps1. See docs/adr/0016-auto-label-policy-shape.md. Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-autosensitivitylabelpolicy and https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-autosensitivitylabelrule",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "policies": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/autoLabelPolicy" }
+        },
+        "rules": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/autoLabelRule" }
+        }
+    },
+    "definitions": {
+        "autoLabelPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "mode", "applyLabel" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique policy identifier."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": [ "Enable", "TestWithNotifications", "TestWithoutNotifications", "Disable" ],
+                    "description": "ADR 0016 §10. PendingDeletion is a server-side tombstone and must NOT appear in YAML."
+                },
+                "applyLabel": {
+                    "type": "string",
+                    "pattern": "^[^/]+(/[^/]+)?$",
+                    "description": "Composite key: '<parent>/<displayName>' for sublabels, bare '<displayName>' for top-level."
+                },
+                "exchangeLocation": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "description": "[All] or a list of mailbox SMTP addresses."
+                },
+                "advancedSettings": {
+                    "type": "object",
+                    "maxProperties": 0,
+                    "description": "Must be empty per ADR 0016 §5. Adding the first key requires a follow-up ADR + Learn citation."
+                }
+            }
+        },
+        "autoLabelRule": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "policy", "contentContainsSensitiveInformation" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique rule identifier."
+                },
+                "policy": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Foreign key: must match a policies[].name in the same file."
+                },
+                "workload": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Required by New-AutoSensitivityLabelRule. Write-only; the tenant returns the full workload set on read. Reconciler does not track for drift (ADR 0016 §11)."
+                },
+                "contentContainsSensitiveInformation": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [ "sitId" ],
+                        "properties": {
+                            "sitId": {
+                                "type": "string",
+                                "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                                "description": "GUID from data-plane/classifications/sit-catalog.yaml."
+                            },
+                            "minCount":      { "type": "integer", "minimum": 1, "default": 1 },
+                            "minConfidence": { "type": "integer", "minimum": 0, "maximum": 100, "default": 75 }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

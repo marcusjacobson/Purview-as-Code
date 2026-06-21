@@ -1,0 +1,282 @@
+name: docs-regen
+
+# Automated documentation regeneration loop. Scans the repo's ADR set
+# (docs/adr/) and reconciler scripts (scripts/) to regenerate the ADR
+# index (docs/adr/README.md) and the script reference
+# (docs/scripts-reference.md). Opens a docs-only PR when either artifact
+# is stale. Implements Slice 9 of the agentic-process-modernization-plan.
+#
+# This workflow is read-only against the tenant and the live Purview
+# account — it performs only git and filesystem operations. No Azure auth,
+# no data-plane calls, no deployments. The PR is reviewed by the lab
+# owner; merging it restores docs currency.
+#
+# Docs-only PRs stay docs-only per .github/copilot-instructions.md. The
+# workflow never edits control-plane (infra/**), data-plane (data-plane/**),
+# scripts (scripts/**), or CI (.github/workflows/**) in the same branch.
+#
+# References (Microsoft Learn, GitHub Docs, action upstream):
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+#   https://github.com/peter-evans/create-pull-request
+#   https://code.visualstudio.com/docs/copilot/customization/overview (Customize AI in VS Code — skills)
+
+on:
+  schedule:
+    # Weekly on Monday at 06:00 UTC. Cron grammar:
+    # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: docs-regen
+  cancel-in-progress: false
+
+jobs:
+  regenerate:
+    name: Regenerate documentation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # peter-evans/create-pull-request pushes the auto/docs-regen branch.
+      pull-requests: write  # peter-evans/create-pull-request opens / updates the PR.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Regenerate ADR index
+        shell: pwsh
+        run: |
+          # Regenerate the "Current ADRs" table in docs/adr/README.md by
+          # scanning the docs/adr/ directory for *.md files (excluding
+          # README.md and 0000-template.md), parsing frontmatter for title
+          # and status, and emitting the canonical four-column markdown table.
+          
+          $adrDir = 'docs/adr'
+          $readmePath = Join-Path $adrDir 'README.md'
+          
+          # Find all ADR files (exclude README.md and template)
+          $adrFiles = Get-ChildItem -Path $adrDir -Filter '*.md' |
+              Where-Object { $_.Name -ne 'README.md' -and $_.Name -ne '0000-template.md' } |
+              Sort-Object Name
+          
+          # Parse each ADR for number, title, status, gates
+          $adrEntries = foreach ($file in $adrFiles) {
+              $content = Get-Content -Path $file.FullName -Raw
+              
+              # Extract number from filename (e.g., "0001" from "0001-title.md")
+              if ($file.Name -match '^(\d{4})-(.+)\.md$') {
+                  $number = $Matches[1]
+                  $slug = $Matches[2]
+              } else {
+                  Write-Warning "Skipping $($file.Name) — does not match NNNN-slug.md pattern"
+                  continue
+              }
+              
+              # Parse title (first h1 after potential frontmatter)
+              $titleMatch = [regex]::Match($content, '^#\s+(.+)$', 'Multiline')
+              $title = if ($titleMatch.Success) {
+                  $titleMatch.Groups[1].Value.Trim() -replace '^\d{4}\s+—\s+', ''
+              } else {
+                  $slug -replace '-', ' '
+              }
+              
+              # Parse status (look for Status: line)
+              $statusMatch = [regex]::Match($content, '(?:^|\*\*)\s*Status:\*\*\s+(.+?)(?:\s|<!--)', 'Multiline')
+              $status = if ($statusMatch.Success) {
+                  $statusMatch.Groups[1].Value.Trim()
+              } else {
+                  'Proposed'
+              }
+              
+              # Parse gates (look for Gates: line)
+              $gatesMatch = [regex]::Match($content, '(?:^|\*\*)\s*Gates:\*\*\s+(.+?)(?:\r?\n|<!--)', 'Multiline,Singleline')
+              $gates = if ($gatesMatch.Success) {
+                  $gatesMatch.Groups[1].Value.Trim() -replace '<!--.*?-->', '' -replace '\s+', ' '
+              } else {
+                  '—'
+              }
+              
+              [PSCustomObject]@{
+                  Number = $number
+                  Slug   = $slug
+                  Title  = $title
+                  Status = $status
+                  Gates  = $gates
+              }
+          }
+          
+          # Build the markdown table
+          $tableLines = @(
+              '| # | Title | Status | Gates |'
+              '|---|---|---|---|'
+          )
+          
+          foreach ($entry in $adrEntries) {
+              $titleLink = "[$($entry.Title)]($($entry.Number)-$($entry.Slug).md)"
+              $tableLines += "| [$($entry.Number)]($($entry.Number)-$($entry.Slug).md) | $titleLink | $($entry.Status) | $($entry.Gates) |"
+          }
+          
+          $newTable = $tableLines -join "`n"
+          
+          # Read current README
+          $readme = Get-Content -Path $readmePath -Raw
+          
+          # Replace the table between "## Current ADRs" and the next "##" or end
+          $pattern = '(?s)(## Current ADRs\r?\n\r?\n)(.*?)(\r?\n\r?\n(?:>|##))'
+          $replacement = "`$1$newTable`$3"
+          
+          if ($readme -match $pattern) {
+              $newReadme = $readme -replace $pattern, $replacement
+              Set-Content -Path $readmePath -Value $newReadme -NoNewline
+              Write-Host "✓ ADR index regenerated ($($adrEntries.Count) ADRs)"
+          } else {
+              Write-Warning "Could not find '## Current ADRs' section marker in $readmePath"
+              exit 1
+          }
+
+      - name: Regenerate script reference
+        shell: pwsh
+        run: |
+          # Regenerate docs/scripts-reference.md by scanning scripts/ for
+          # *.ps1 files, extracting their .SYNOPSIS from comment-based help,
+          # and emitting a canonical markdown table.
+          
+          $scriptsDir = 'scripts'
+          $referencePath = 'docs/scripts-reference.md'
+          
+          # Find all script files (exclude modules/)
+          $scriptFiles = Get-ChildItem -Path $scriptsDir -Filter '*.ps1' -File |
+              Where-Object { $_.DirectoryName -notlike '*\modules\*' } |
+              Sort-Object Name
+          
+          # Parse each script for synopsis
+          $scriptEntries = foreach ($file in $scriptFiles) {
+              $content = Get-Content -Path $file.FullName -Raw
+              
+              # Extract .SYNOPSIS from comment-based help
+              $synopsisMatch = [regex]::Match($content, '\.SYNOPSIS\s*\r?\n\s*(.+?)(?:\r?\n\s*\r?\n|\.)', 'Singleline')
+              $synopsis = if ($synopsisMatch.Success) {
+                  $synopsisMatch.Groups[1].Value.Trim() -replace '\r?\n\s+', ' '
+              } else {
+                  '—'
+              }
+              
+              [PSCustomObject]@{
+                  Name     = $file.Name
+                  Synopsis = $synopsis
+              }
+          }
+          
+          # Build the reference document
+          $lines = @(
+              '# Script reference'
+              ''
+              'Auto-generated index of PowerShell scripts under [`scripts/`](../scripts/). Regenerated by [`.github/workflows/docs-regen.yml`](../.github/workflows/docs-regen.yml).'
+              ''
+              '> [!NOTE]'
+              '> This file is auto-generated. Do not edit manually. To update, trigger the `docs-regen` workflow or wait for the next scheduled run.'
+              ''
+              '## Reconcilers (Deploy-*.ps1)'
+              ''
+              'Reconcilers materialize desired-state YAML under `data-plane/` against the live Microsoft Purview tenant. Every reconciler implements the full-circle contract: `-WhatIf`, `-PruneMissing`, `-Force`, `-ExportCurrentState`, per [`.github/instructions/powershell.instructions.md`](../.github/instructions/powershell.instructions.md).'
+              ''
+              '| Script | Synopsis |'
+              '|---|---|'
+          )
+          
+          $reconcilers = $scriptEntries | Where-Object { $_.Name -like 'Deploy-*.ps1' }
+          foreach ($entry in $reconcilers) {
+              $lines += "| [$($entry.Name)](../scripts/$($entry.Name)) | $($entry.Synopsis) |"
+          }
+          
+          $lines += @(
+              ''
+              '## Helpers and utilities'
+              ''
+              'Support scripts, smoke-test wrappers, and infrastructure primitives.'
+              ''
+              '| Script | Synopsis |'
+              '|---|---|'
+          )
+          
+          $helpers = $scriptEntries | Where-Object { $_.Name -notlike 'Deploy-*.ps1' }
+          foreach ($entry in $helpers) {
+              $lines += "| [$($entry.Name)](../scripts/$($entry.Name)) | $($entry.Synopsis) |"
+          }
+          
+          $lines += @(
+              ''
+              '## References'
+              ''
+              '- **[PowerShell comment-based help](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_comment_based_help)** — `.SYNOPSIS`, `.DESCRIPTION`, `.EXAMPLE` syntax.'
+              '- **[Reconciler contract](../.github/instructions/powershell.instructions.md#required-switches-on-every-deploy-ps1)** — `-WhatIf`, `-PruneMissing`, `-Force`, `-ExportCurrentState` requirements.'
+              '- **[Direction-policy contract (ADR 0029)](adr/0029-source-of-truth-direction-policy.md)** — `-DirectionPolicy`, `-SkipNames` for source-of-truth handling.'
+              ''
+              '---'
+              ''
+              "_Last regenerated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC by [docs-regen.yml](../.github/workflows/docs-regen.yml)_"
+          )
+          
+          Set-Content -Path $referencePath -Value ($lines -join "`n") -NoNewline
+          Write-Host "✓ Script reference regenerated ($($scriptEntries.Count) scripts)"
+
+      - name: Check for changes
+        id: check
+        shell: pwsh
+        run: |
+          $diff = git diff --name-only docs/
+          if ($diff) {
+              Write-Host "Changes detected:"
+              Write-Host $diff
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "has_changes=true"
+          } else {
+              Write-Host "No changes — docs are current"
+              Add-Content -Path $env:GITHUB_OUTPUT -Value "has_changes=false"
+          }
+
+      - name: Create pull request
+        if: steps.check.outputs.has_changes == 'true'
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'docs(adr): regenerate ADR index and script reference'
+          branch: auto/docs-regen
+          delete-branch: true
+          title: 'docs(adr): regenerate ADR index and script reference'
+          body: |
+            ## Summary
+            Auto-regenerated by the `docs-regen` workflow. Syncs the ADR index ([`docs/adr/README.md`](docs/adr/README.md)) with the current ADR set under `docs/adr/` and regenerates the script reference ([`docs/scripts-reference.md`](docs/scripts-reference.md)) from `scripts/`.
+
+            ## Plane and scope
+            - [x] `docs/**` only (docs-only PR)
+
+            ## Change detail
+            - Regenerated [`docs/adr/README.md`](docs/adr/README.md) by scanning `docs/adr/*.md` for ADR files, parsing frontmatter for title/status/gates, and rebuilding the "Current ADRs" table.
+            - Regenerated [`docs/scripts-reference.md`](docs/scripts-reference.md) by scanning `scripts/*.ps1` for scripts, extracting `.SYNOPSIS` from comment-based help, and emitting two tables (reconcilers + helpers).
+            - Source: [`.github/workflows/docs-regen.yml`](https://github.com/contoso/Purview-as-Code-Generic/blob/main/.github/workflows/docs-regen.yml) — scheduled weekly + `workflow_dispatch`.
+
+            ## Validation evidence
+            ```
+            # Docs-only change — no lint/build/test/smoke required.
+            # Markdown structure verified by workflow PowerShell parsing.
+            ```
+
+            ## Security review
+            - No secrets in diff (docs-only regeneration).
+            - No Azure auth, no Key Vault, no data-plane calls — filesystem operations only.
+            - Workflow uses least-privilege `permissions:` (contents + pull-requests write).
+
+            ## Rollback plan
+            Revert this PR and re-run `docs-regen` workflow.
+
+            ## Breaking / destructive flag
+            Not applicable — docs-only change.
+
+            ---
+
+            **This PR requires `owner-approved` before merge** per [`.github/instructions/pull-request.instructions.md`](https://github.com/contoso/Purview-as-Code-Generic/blob/main/.github/instructions/pull-request.instructions.md).
+          labels: |
+            needs-review
+            squad:scribe

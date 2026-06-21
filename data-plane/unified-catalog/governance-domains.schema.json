@@ -1,0 +1,49 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/governance-domains.schema.json",
+    "title": "Microsoft Purview Unified Catalog — governance domains",
+    "description": "Desired state for Unified Catalog governance domains consumed by scripts/Deploy-UnifiedCatalog.ps1 (tracked in #340). Reference: https://learn.microsoft.com/en-us/purview/unified-catalog. Per ADR 0024, Microsoft Learn does not yet document the Unified Catalog REST data-plane surface; the field shape below reflects the concept-page model and will be tightened when the authoring-surface ADR lands.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "items" ],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/governanceDomain" },
+            "description": "List of governance domains. Default state is the empty list."
+        }
+    },
+    "definitions": {
+        "governanceDomain": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Display name. Unique across the file."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short prose describing the domain."
+                },
+                "type": {
+                    "type": "string",
+                    "enum": [ "Regulatory", "BusinessUnit", "DataDomain", "Functional", "ProjectName" ],
+                    "description": "Domain category. Enum reflects the Unified Catalog UI options as of 2026-05-24."
+                },
+                "owners": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "Entra group display names. Resolved at deploy time per ADR 0023."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [ "Draft", "Published", "Expired" ],
+                    "description": "Lifecycle status. Default Draft."
+                }
+            }
+        }
+    }
+}

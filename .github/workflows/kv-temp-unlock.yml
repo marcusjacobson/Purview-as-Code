@@ -1,0 +1,299 @@
+name: kv-temp-unlock
+
+# Owner-gated, time-bounded temporary unlock of kv-contoso-lab-01.
+#
+# The steady-state firewall posture is publicNetworkAccess=Disabled
+# defaultAction=Deny (Wave 0 #5a). This workflow opens the vault to public
+# network access for a bounded window so an operator on a hosted GitHub
+# runner -- or, transitively, a local pwsh session triggered alongside --
+# can perform a one-off task such as reading a data-plane cert or
+# rotating a secret. The vault is guaranteed to be re-locked when the
+# window ends, when the job fails, and when the job is cancelled.
+#
+# Defense-in-depth layers:
+#   1. Dispatch: limited to identities with Actions:write on the repo
+#      (currently the owner only).
+#   2. Approval: GitHub Environment `kv-unlock` is configured to limit
+#      deployments to the `main` branch. On GitHub Pro / Team /
+#      Enterprise (or if the repo is public) it additionally carries a
+#      required-reviewer rule pinning approval to the lab owner
+#      (contoso). On GitHub Free with a private repo, deployment
+#      protection rules (Required reviewers, Wait timer) are not
+#      available and the environment acts as a branch-restricted no-op
+#      approval. The `environment: kv-unlock` declaration remains in
+#      place so the gate activates automatically on plan upgrade or
+#      repo-visibility change with no workflow edit.
+#      Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#deployment-protection-rules
+#      Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#required-reviewers
+#   3. Identity: the unlock executes under a purpose-specific Entra
+#      app (`gh-oidc-purview-kv-unlock`) via OIDC federated credential
+#      with subject
+#      `repo:contoso/Purview-as-Code-Generic:environment:kv-unlock`,
+#      per ADR 0010. No stored client secrets.
+#      Reference: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+#   4. Authorization: the kv-unlock SP holds the custom role
+#      `Purview-Lab-KV-Firewall-Toggler` (read + `Microsoft.KeyVault/vaults/write`)
+#      at the `kv-contoso-lab-01` vault scope only. It cannot touch any
+#      other resource in the subscription -- not the resource group, not
+#      another Key Vault, not the Purview account.
+#      Reference: https://learn.microsoft.com/en-us/azure/role-based-access-control/custom-roles
+#   5. Time bound: the `duration_minutes` input is hard-capped at 30 in
+#      step logic below.
+#   6. Re-lock guarantee: the cleanup job runs `if: always()` and
+#      asserts the final firewall state matches the locked posture.
+#   7. Audit: GitHub Actions log + Azure Activity Log + (when KV
+#      diagnostics are wired up) Log Analytics.
+#   8. Workflow tamper resistance: this file is owned by @contoso
+#      via CODEOWNERS, and `main` requires PR review.
+#
+# Why two jobs (approval -> unlock):
+#   The two-job split keeps the approval surface (job 1, no Azure
+#   credentials) physically separated from the Azure-acting surface
+#   (job 2, OIDC token minted). Both jobs run under
+#   `environment: kv-unlock` so the kv-unlock app's federated credential
+#   subject
+#   (`repo:contoso/Purview-as-Code-Generic:environment:kv-unlock`)
+#   matches at OIDC exchange time. The approval gate still fires on
+#   job 1 (deployment protection rules are evaluated per job, per the
+#   GitHub Environments reference below), and job 2 only starts after
+#   job 1 completes.
+#   Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#deployment-protection-rules
+#
+# Why no local-certificate variant:
+#   A local cert would create an unlock path that bypasses GitHub-side
+#   audit. Out of scope here. See PR description in #244 for the full
+#   rationale.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why this unlock is needed (recorded in the run summary and Activity Log).'
+        required: true
+        type: string
+      duration_minutes:
+        description: 'How long to hold the vault open, in minutes (1-30).'
+        required: true
+        # Accepted as a string and validated by the `Validate duration and
+        # compute hold seconds` step below (regex `^[0-9]+$` plus [1, 30]
+        # range check).
+        type: string
+        default: '10'
+
+permissions: {}
+
+# Shared concurrency group across every workflow that toggles the lab Key
+# Vault firewall (`kv-contoso-lab-01`). Currently shared with
+# `.github/workflows/validate-oidc-auth.yml`. Two firewall-toggling runs
+# must never overlap, otherwise one run's re-lock can clobber another
+# run's open window or vice versa. `cancel-in-progress: false` so an
+# in-flight unlock always reaches its `if: always()` re-lock step.
+# Reference: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs
+concurrency:
+  group: kv-firewall-lab
+  cancel-in-progress: false
+
+jobs:
+  approval:
+    name: Lab-owner approval gate
+    runs-on: ubuntu-latest
+    # `kv-unlock` Environment has @contoso as the sole required
+    # reviewer. The job sits in `Waiting` until approved.
+    # Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#required-reviewers
+    environment: kv-unlock
+    outputs:
+      reason: ${{ steps.echo.outputs.reason }}
+      duration_minutes: ${{ steps.echo.outputs.duration_minutes }}
+    steps:
+      - name: Record approved request
+        id: echo
+        env:
+          INPUT_REASON: ${{ inputs.reason }}
+          INPUT_DURATION: ${{ inputs.duration_minutes }}
+        run: |
+          # Reference: https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+          # Both inputs are passed through env: rather than direct
+          # expression expansion so any shell-special characters in
+          # `reason` cannot be interpreted as commands.
+          echo "reason=$INPUT_REASON" >> "$GITHUB_OUTPUT"
+          echo "duration_minutes=$INPUT_DURATION" >> "$GITHUB_OUTPUT"
+          {
+            echo "## kv-temp-unlock approval"
+            echo ""
+            echo "- Invoked by: \`${{ github.actor }}\`"
+            echo "- Approved by: see Environment approval entry in the run log."
+            echo "- Reason: $INPUT_REASON"
+            echo "- Requested duration (minutes): $INPUT_DURATION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  unlock:
+    name: Open, hold, re-lock Key Vault firewall
+    needs: approval
+    runs-on: ubuntu-latest
+    # `environment: kv-unlock` matches the kv-unlock Entra app's
+    # federated credential subject
+    # (`repo:<owner>/<repo>:environment:kv-unlock`), so OIDC token
+    # exchange succeeds. The same environment is used by the `approval`
+    # job above so the deployment protection rules (when present on a
+    # paid plan) gate this job too.
+    # Reference: https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust
+    environment: kv-unlock
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      RESOURCE_GROUP: rg-purview-lab
+      KEY_VAULT_NAME: kv-contoso-lab-01
+      REASON: ${{ needs.approval.outputs.reason }}
+      REQUESTED_DURATION: ${{ needs.approval.outputs.duration_minutes }}
+    steps:
+      - name: Validate duration and compute hold seconds
+        id: bounds
+        env:
+          MAX_MINUTES: 30
+        run: |
+          # Hard cap defense-in-depth layer #5. The input type is `number`
+          # but workflow_dispatch numbers arrive as strings, so cast and
+          # clamp explicitly.
+          set -euo pipefail
+          if ! [[ "$REQUESTED_DURATION" =~ ^[0-9]+$ ]]; then
+            echo "duration_minutes must be a positive integer, got '$REQUESTED_DURATION'" >&2
+            exit 1
+          fi
+          if [ "$REQUESTED_DURATION" -lt 1 ]; then
+            echo "duration_minutes must be at least 1" >&2
+            exit 1
+          fi
+          if [ "$REQUESTED_DURATION" -gt "$MAX_MINUTES" ]; then
+            echo "duration_minutes ($REQUESTED_DURATION) exceeds the hard cap of $MAX_MINUTES" >&2
+            exit 1
+          fi
+          HOLD_SECONDS=$(( REQUESTED_DURATION * 60 ))
+          echo "hold_seconds=$HOLD_SECONDS" >> "$GITHUB_OUTPUT"
+          echo "duration_minutes=$REQUESTED_DURATION" >> "$GITHUB_OUTPUT"
+
+      # Reference: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+      - name: Azure login (kv-unlock app)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID_KV_UNLOCK }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Pre-unlock state guard
+        id: pre
+        # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-show
+        # Fails the job if the vault is not already in steady-state
+        # locked posture (publicNetworkAccess=Disabled, defaultAction=Deny).
+        # Protects against drift from a prior failed run, a manual
+        # portal change, or a concurrent firewall-toggling workflow.
+        run: |
+          set -euo pipefail
+          STATE=$(az keyvault show \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}" \
+            -o tsv)
+          PNA=$(echo "$STATE" | cut -f1)
+          DA=$(echo "$STATE" | cut -f2)
+          echo "Pre-unlock state: publicNetworkAccess=$PNA, defaultAction=$DA"
+          if [ "$PNA" != "Disabled" ] || [ "$DA" != "Deny" ]; then
+            echo "Vault is NOT in steady-state locked posture (publicNetworkAccess=$PNA, defaultAction=$DA). Expected Disabled/Deny. Aborting before any change." >&2
+            exit 1
+          fi
+          echo "Steady-state posture confirmed. Proceeding to open."
+
+      - name: Open Key Vault firewall
+        id: open
+        # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
+        # Reference: https://learn.microsoft.com/en-us/azure/key-vault/general/network-security
+        # Mirrors the in-line unlock pattern in validate-oidc-auth.yml.
+        # That workflow intentionally retains its own inline toggle so it
+        # remains self-contained for the OIDC validation contract; it
+        # does not call this workflow.
+        run: |
+          az keyvault update \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --public-network-access Enabled \
+            --default-action Allow \
+            --only-show-errors \
+            --query "{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}" \
+            -o json
+          # Brief settle window for the firewall change to propagate.
+          sleep 10
+
+      - name: Hold the vault open for the approved duration
+        id: hold
+        env:
+          HOLD_SECONDS: ${{ steps.bounds.outputs.hold_seconds }}
+        run: |
+          echo "Holding vault open for $HOLD_SECONDS seconds..."
+          sleep "$HOLD_SECONDS"
+          echo "Hold window elapsed."
+
+      # ------------------------------------------------------------------
+      # Re-lock -- always runs once the vault has been opened.
+      # ------------------------------------------------------------------
+      - name: Re-lock Key Vault firewall
+        id: relock
+        if: always() && steps.open.outcome == 'success'
+        # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
+        run: |
+          az keyvault update \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --public-network-access Disabled \
+            --default-action Deny \
+            --only-show-errors \
+            --query "{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}" \
+            -o json
+
+      - name: Assert final vault state is locked
+        id: assert
+        if: always() && steps.open.outcome == 'success'
+        # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-show
+        run: |
+          set -euo pipefail
+          STATE=$(az keyvault show \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}" \
+            -o tsv)
+          echo "Final state (pna<TAB>da): $STATE"
+          PNA=$(echo "$STATE" | cut -f1)
+          DA=$(echo "$STATE" | cut -f2)
+          if [ "$PNA" != "Disabled" ] || [ "$DA" != "Deny" ]; then
+            echo "Vault is NOT in locked steady state (pna=$PNA, da=$DA). Re-lock failed." >&2
+            exit 1
+          fi
+          echo "Vault is locked: publicNetworkAccess=Disabled, defaultAction=Deny."
+
+      - name: Job summary
+        if: always()
+        env:
+          BOUNDS_OUTCOME: ${{ steps.bounds.outcome }}
+          PRE_OUTCOME: ${{ steps.pre.outcome }}
+          OPEN_OUTCOME: ${{ steps.open.outcome }}
+          HOLD_OUTCOME: ${{ steps.hold.outcome }}
+          RELOCK_OUTCOME: ${{ steps.relock.outcome }}
+          ASSERT_OUTCOME: ${{ steps.assert.outcome }}
+        run: |
+          {
+            echo "## kv-temp-unlock result"
+            echo ""
+            echo "- Invoked by: \`${{ github.actor }}\`"
+            echo "- Reason: $REASON"
+            echo "- Duration (minutes): ${{ steps.bounds.outputs.duration_minutes }}"
+            echo ""
+            echo "| Step | Outcome |"
+            echo "|------|---------|"
+            echo "| Validate bounds | $BOUNDS_OUTCOME |"
+            echo "| Pre-unlock state guard | $PRE_OUTCOME |"
+            echo "| Open vault firewall | $OPEN_OUTCOME |"
+            echo "| Hold window | $HOLD_OUTCOME |"
+            echo "| Re-lock vault firewall | $RELOCK_OUTCOME |"
+            echo "| Assert final locked state | $ASSERT_OUTCOME |"
+          } >> "$GITHUB_STEP_SUMMARY"

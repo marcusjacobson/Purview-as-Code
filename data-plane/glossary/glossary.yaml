@@ -1,0 +1,27 @@
+# Desired-state business glossary terms.
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary
+#
+# Each term is namespaced by glossary. The default glossary is auto-created by Purview.
+
+glossary: Glossary
+
+terms:
+  - name: Customer
+    shortDescription: A person or organization that purchases goods or services.
+    longDescription: |
+      Any external party with an active or prior commercial relationship with the
+      organization. Customers are uniquely identified by CustomerId.
+    status: Approved
+    expert: []
+    steward: []
+
+  - name: PII
+    shortDescription: Personally Identifiable Information.
+    longDescription: |
+      Any data that can be used to identify a specific individual, including but not
+      limited to names, email addresses, phone numbers, and government identifiers.
+    status: Approved
+
+  - name: RevenueRecognition
+    shortDescription: Policy governing when revenue is recorded.
+    status: Draft

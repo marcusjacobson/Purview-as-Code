@@ -1,0 +1,179 @@
+name: validate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bicep:
+    name: Lint & build Bicep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Bicep CLI
+        run: az bicep install
+      - name: Lint
+        run: az bicep lint --file infra/main.bicep
+      - name: Build
+        run: az bicep build --file infra/main.bicep --outfile infra/main.json
+
+  yaml:
+    name: Validate data-plane YAML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install yamllint
+      - name: Run yamllint
+        run: |
+          yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable}}' data-plane/
+
+  powershell:
+    name: Analyze PowerShell
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning -EnableExit
+
+  pester:
+    name: Pester unit tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Reference: https://pester.dev/docs/quick-start
+      - name: Run Pester suite
+        shell: pwsh
+        run: |
+          ./tests/Run-Pester.ps1
+      - name: Upload Pester results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-results
+          path: tests/results/pester.xml
+          if-no-files-found: warn
+
+  dspm-posture:
+    name: DSPM signal-source posture (local-only)
+    runs-on: ubuntu-latest
+    # Read-only verifier for data-plane/dspm/dspm-config.yaml. Validates
+    # the schema, confirms upstream label/SIT source YAMLs resolve, and
+    # confirms the exporter artifact directory is gitignored per
+    # ADR 0021 Decision 5. Makes no tenant calls (no -ConnectTenant).
+    # Wired in under the v2 §5.4 drift closure (issue #366) to mirror
+    # the per-domain lint pattern other reconcilers carry under
+    # .github/instructions/powershell.instructions.md.
+    # Reference: docs/adr/0021-dspm-content-explorer-cadence.md
+    # Reference: https://learn.microsoft.com/en-us/purview/dspm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install powershell-yaml
+        shell: pwsh
+        run: Install-Module powershell-yaml -Force -Scope CurrentUser
+      - name: Test-DSPMPosture
+        shell: pwsh
+        run: |
+          $rows = ./scripts/Test-DSPMPosture.ps1
+          $rows | Format-Table -AutoSize | Out-String | Write-Host
+          if ($rows | Where-Object Status -EQ 'Fail') {
+            Write-Host '::error::Test-DSPMPosture reported one or more Fail rows.'
+            exit 1
+          }
+
+  dspm-ai-posture:
+    name: DSPM for AI posture (local-only)
+    runs-on: ubuntu-latest
+    # Read-only verifier for data-plane/dspm-ai/dspm-ai-config.yaml. Validates
+    # the schema, confirms upstream label source YAMLs resolve, and reports
+    # the declared workloads + AI role groups. Makes no tenant calls
+    # (no -ConnectTenant). Wired in under the v2 §5.4 DSPM-for-AI watch-list
+    # re-verification (issue #368), mirroring the sibling dspm-posture job
+    # shipped under issue #366 / PR #609.
+    # Reference: docs/adr/0022-dspm-for-ai-authoring-surface.md
+    # Reference: https://learn.microsoft.com/en-us/purview/dspm-for-ai
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install powershell-yaml
+        shell: pwsh
+        run: Install-Module powershell-yaml -Force -Scope CurrentUser
+      - name: Test-DSPMforAIPosture
+        shell: pwsh
+        run: |
+          $rows = ./scripts/Test-DSPMforAIPosture.ps1
+          $rows | Format-Table -AutoSize | Out-String | Write-Host
+          if ($rows | Where-Object Status -EQ 'Fail') {
+            Write-Host '::error::Test-DSPMforAIPosture reported one or more Fail rows.'
+            exit 1
+          }
+
+  full-circle-contract-guard:
+    name: Full-circle reconciler contract guard (Deploy-*.ps1)
+    runs-on: ubuntu-latest
+    # Enforces the full-circle reconciler contract from issue #164 on every new
+    # or modified scripts/Deploy-*.ps1 file. See issue #292 for scope, the
+    # closed epic #172 for the gap matrix this guard mitigates regrowth of,
+    # and .github/instructions/powershell.instructions.md for the contract
+    # definition. Reference:
+    # https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_functions_cmdletbindingattribute
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check contract tokens
+        shell: pwsh
+        run: |
+          # Exempt list: the scripts that are not yet full-circle. Each
+          # will be removed from this list when its owning wave's
+          # apply-path-hardening follow-up issue (see project-plan.md
+          # §5 cadence) retrofits SSP + PruneMissing + ExportCurrentState
+          # against the live tenant. Do not add new entries — opening a new
+          # exemption requires a project-plan-level decision and an ADR.
+          $exempt = @(
+            'Deploy-AdministrativeUnits.ps1',
+            'Deploy-Classifications.ps1',
+            'Deploy-Collections.ps1',
+            'Deploy-CommunicationCompliance.ps1',
+            'Deploy-DataSources.ps1',
+            'Deploy-Glossary.ps1',
+            'Deploy-IRMPolicies.ps1',
+            'Deploy-IRMEntityLists.ps1'
+          )
+          $required = @('SupportsShouldProcess', 'PruneMissing', 'ExportCurrentState')
+          $failures = @()
+          Get-ChildItem -Path scripts -Filter 'Deploy-*.ps1' -File | ForEach-Object {
+            if ($exempt -contains $_.Name) {
+              Write-Host "SKIP  $($_.Name) (exempt — tracked by per-wave hardening follow-up)"
+              return
+            }
+            $content = Get-Content -Raw -LiteralPath $_.FullName
+            $missing = @()
+            foreach ($token in $required) {
+              if ($content -notmatch [regex]::Escape($token)) {
+                $missing += $token
+              }
+            }
+            if ($missing.Count -gt 0) {
+              $failures += [pscustomobject]@{ File = $_.Name; Missing = ($missing -join ', ') }
+              Write-Host "FAIL  $($_.Name) — missing: $($missing -join ', ')"
+            }
+            else {
+              Write-Host "PASS  $($_.Name)"
+            }
+          }
+          if ($failures.Count -gt 0) {
+            Write-Host ''
+            Write-Host '::error::Full-circle reconciler contract guard failed. Add the missing token(s) to each script (see issue #292 and .github/instructions/powershell.instructions.md), or open a project-plan-level decision before adding to the exempt list in .github/workflows/validate.yml.'
+            $failures | Format-Table -AutoSize | Out-String | Write-Host
+            exit 1
+          }
+          Write-Host ''
+          Write-Host 'All non-exempt Deploy-*.ps1 scripts satisfy the full-circle reconciler contract.'

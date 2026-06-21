@@ -1,0 +1,78 @@
+# Microsoft Purview as-Code -- Adaptive policy scopes (desired state)
+#
+# Desired state for the ADAPTIVE POLICY SCOPES that retention, DLP, IRM,
+# and sensitivity-label policies bind to dynamically resolved sets of
+# users, groups, or sites. The lab's existing DLP reconciler
+# (scripts/Deploy-DLPPolicies.ps1) already consumes scope references by
+# NAME via Get-AdaptiveScope at apply time; this file is the source of
+# truth for the scopes those references point at. See ADR 0034
+# (docs/adr/0034-adaptive-scope-schema.md) for the YAML / cmdlet boundary
+# decisions.
+#
+# The reconciler scripts/Deploy-AdaptiveScopes.ps1 consumes this file,
+# compares each desired scope against the live tenant via
+# Get-AdaptiveScope, and performs Create / Update / NoChange operations.
+# Orphan scopes (live in tenant, missing from YAML) are reported and
+# skipped unless -PruneMissing is specified.
+#
+# Shape (ADR 0034):
+#
+#   scopes[]:
+#     name             : (string, required, unique) scope identifier.
+#                          Must start with lab-as- per issue #548
+#                          (lab provenance marker in the tenant-wide
+#                          M365 admin surface). Pattern enforced by
+#                          scopes.schema.json.
+#     locationType     : (string, required) one of User | Group | Site.
+#                          Immutable per Microsoft Learn; changing it
+#                          requires delete + recreate.
+#     filterConditions : (string, required) JSON document passed
+#                          unchanged to New-AdaptiveScope -FilterConditions
+#                          / Set-AdaptiveScope -FilterConditions. Per
+#                          ADR 0034 Decision 1, the cmdlet rejects
+#                          hashtable input; only JSON string works.
+#                          Outer wrapper: { "Conjunction": "And",
+#                          "Conditions": [ ... ] }. Each leaf:
+#                          { "Name": "<attr>", "Value": "<v>",
+#                          "Operator": "Equals" }. User-scope Name
+#                          allowlist (probed 2026-06-05 against
+#                          contoso.onmicrosoft.com): Alias | Department |
+#                          Title | Office | City. Reconciler validates
+#                          well-formed JSON via Test-Json; the cmdlet
+#                          enforces attribute-name and value rules.
+#     comment          : (string, optional) human-readable note. Not
+#                          tracked for drift -- the cmdlet has no
+#                          -Comment parameter; this field is YAML-only
+#                          documentation.
+#
+# Live-tenant note (ADR 0034 Decision 4):
+#
+#   First apply against this lab tenant currently fails server-side with
+#   "Object reference not set to an instance of an object" after the
+#   cmdlet schema check passes. Probable cause: SKU prerequisite,
+#   Exchange recipient cache, or one-time enable step (uninvestigated).
+#   This file ships its example entry under the assumption the NRE will
+#   be resolved separately; the reconciler's -WhatIf and
+#   -ExportCurrentState paths work against the zero-scope tenant today.
+#
+# Schema: data-plane/adaptive-scopes/scopes.schema.json (Draft-07).
+
+scopes:
+
+  # Example entry mirroring the synthetic shape probed during PR #549.
+  # Comment-out, edit, or replace before the first live-tenant apply.
+  # All identifiers in this example are synthetic per sample-data.instructions.md
+  # (Microsoft fictitious-company example values, RFC 2606 example.com domain).
+  - name: lab-as-mailbox-example
+    locationType: User
+    # The Value field carries a synthetic user@example.com per RFC 2606.
+    # Replace with a real lab-tenant UPN before applying. The Name leaf
+    # key must come from the ADR 0034 Decision 2 allowlist
+    # (Alias | Department | Title | Office | City for User scopes);
+    # UserPrincipalName / Mail are NOT accepted by the cmdlet even though
+    # Microsoft Learn examples show them.
+    filterConditions: '{"Conjunction":"And","Conditions":[{"Name":"Alias","Value":"example","Operator":"Equals"}]}'
+    comment: |
+      Synthetic example scope. Replace the filterConditions Value before applying.
+      See ADR 0034 for why filterConditions is a JSON string and which
+      Name attributes the cmdlet accepts.

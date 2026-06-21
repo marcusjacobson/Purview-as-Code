@@ -1,0 +1,181 @@
+# Lab environment parameters — source of truth for every value that varies
+# by environment, subscription, region, or lab identity. Consumed by every
+# orchestrator in `scripts/New-*.ps1` (and future `scripts/Deploy-*.ps1`)
+# via the `-ParametersFile` switch.
+#
+# Decision: docs/adr/0012-environment-parameters-file.md
+#   - Folder is `infra/parameters/` per Microsoft Learn's Bicep parameter-files
+#     vocabulary (https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/parameter-files).
+#   - File is `<env>.yaml`; this is the `lab` environment.
+#
+# What lives here:
+#   - Resource group name, region, tags.
+#   - Resource names for every Azure resource managed from `infra/modules/*.bicep`.
+#   - Purview account name (consumed by future data-plane orchestrators).
+#
+# What does NOT live here (enforced in ADR 0012):
+#   - Subscription ID and tenant ID. Those flow via `az account set` locally
+#     and GitHub Environment secrets in CI per ADR 0010.
+#   - Secrets, keys, tokens, certificate thumbprints, connection strings.
+#     Those live in Key Vault or GitHub Secrets per
+#     .github/instructions/security.instructions.md principle #1.
+#   - ADR-mandated invariants (ADR 0011 §2: 90-day soft-delete,
+#     purge-protection, 2048-bit cert, 12-month validity). Those stay hardwired
+#     in the Bicep module or the orchestrator; changing them changes the ADR.
+
+# =============================================================================
+# TEMPLATE — replace the placeholder values below for your tenant.
+# This file is the single source of truth for every value that varies by
+# tenant/environment. Run the tenant-intake agent (`@operator-tenant`) after
+# cloning, or edit by hand. Placeholder values use Microsoft's documented
+# fictitious identifiers (contoso / *.onmicrosoft.com) and will NOT match a
+# real tenant until you replace them.
+#
+# Values to replace:               Placeholder shipped here
+#   environment                    lab
+#   location                       eastus
+#   resourceGroupName              rg-purview-lab
+#   tags.owner                     contoso-lab
+#   purviewAccountName             purview-contoso-lab
+#   resources.logAnalytics.name    log-contoso-lab
+#   resources.keyVault.name        kv-contoso-lab-01
+#   automation.githubOrg / Repo    contoso / Purview-as-Code-Generic
+#   automation.tenantDomain        contoso.onmicrosoft.com
+#   automation.apps.*.displayName  gh-oidc-purview-*
+#   roleGroupMembership.*          00000000-... (zero-GUID = unset)
+#
+# Subscription ID and tenant ID never live here — they flow via `az account
+# set` locally and GitHub Environment secrets in CI (ADR 0010).
+# =============================================================================
+
+# Human-readable identifier for this environment; used in log messages and
+# deterministic deployment names.
+environment: lab
+
+# Azure region for every resource the orchestrators deploy. Single-region
+# scope per the repo's design.
+location: eastus
+
+# Resource group that owns every control-plane resource. Replace with your
+# tenant's resource group name (the deploy identity is Contributor-scoped to
+# it per ADR 0010, so it must already exist before the first deploy).
+resourceGroupName: rg-purview-lab
+
+# Tags applied to every resource deployed from `infra/modules/*.bicep` and
+# propagated via parameter overrides. Modules default these to their own
+# `{ environment: 'lab', owner: 'contoso-lab', workload: 'purview-as-code' }`
+# today; once every module accepts `tags` as a parameter this file becomes
+# the only place to edit them.
+tags:
+  environment: lab
+  owner: contoso-lab
+  workload: purview-as-code
+
+# Purview account that Wave 1+ data-plane reconcilers will target. Not yet
+# consumed by any control-plane orchestrator; listed here so that 5b, 5c,
+# and the data-plane reconcilers pick it up without a schema change.
+purviewAccountName: purview-contoso-lab
+
+# Resources managed from `infra/modules/*.bicep`. Each entry holds only the
+# values that vary by environment; ADR-mandated invariants (SKU, retention
+# policies, feature flags that are security-critical) stay in the Bicep
+# module per ADR 0012 Decision §3.
+resources:
+
+  # Wave 0 #5.0 — Log Analytics workspace.
+  # Module: infra/modules/law.bicep
+  # Script: scripts/New-LogAnalyticsWorkspace.ps1
+  logAnalytics:
+    name: log-contoso-lab
+    # Retention is environment-variable (cost tuning); 30 days is the
+    # interactive-free band and the lab floor.
+    retentionInDays: 30
+    # SKU is environment-variable for workspaces; `PerGB2018` is the modern
+    # default. `CapacityReservation` and `LACluster` remain reachable by
+    # override.
+    skuName: PerGB2018
+
+  # Wave 0 #5a — automation Key Vault.
+  # Module: infra/modules/keyvault.bicep
+  # Script: scripts/New-AutomationKeyVault.ps1
+  keyVault:
+    name: kv-contoso-lab-01
+    # `publicNetworkAccess` is environment-variable; lab default is `Enabled`
+    # because GitHub-hosted runners need to reach the vault. Prod future
+    # environment would flip this to `Disabled` and wire a private endpoint.
+    publicNetworkAccess: Enabled
+
+# Automation identity model per ADR 0010. Two Entra apps — one per workflow
+# file — each bound to the GitHub `lab` Environment via the federated
+# credential subject `repo:<org>/<repo>:environment:<env>`. Subject shape,
+# app display names, and the GitHub environment name all vary by
+# environment, so they live here per ADR 0012. The ADR 0010 single-subject
+# invariant (no additional credentials, no secret fallback) is enforced
+# in the orchestrator and is not configurable from this file.
+automation:
+  githubOrg: contoso
+  githubRepo: Purview-as-Code-Generic
+  # GitHub Environment name that gates the workflow jobs. Must match the
+  # `environment:` key in the deploy workflow jobs and the subject claim on
+  # the federated credential.
+  githubEnvironment: lab
+  # Tenant primary domain. Consumed by any script that calls
+  # `Connect-IPPSSession -Organization` for Security & Compliance
+  # PowerShell (Wave 0 #4 and onward). Environment-variable because each
+  # environment (lab/prod) may live in a different Entra tenant. Reference:
+  # https://learn.microsoft.com/en-us/powershell/module/exchange/connect-ippssession
+  tenantDomain: contoso.onmicrosoft.com
+  apps:
+    # Wave 0 #5b — control-plane Entra app. Bound to deploy-infra.yml.
+    controlPlane:
+      displayName: gh-oidc-purview-control-plane
+    # Wave 0 #5b — data-plane Entra app. Bound to deploy-data-plane.yml.
+    # Wave 0 #5c adds the certificate credential + Key Vault RBAC to this
+    # app; the control-plane app intentionally stays cert-free per
+    # ADR 0011 decision #5.
+    dataPlane:
+      displayName: gh-oidc-purview-data-plane
+      # Wave 0 #5c — name of the certificate object in the lab Key Vault
+      # that backs this app's Connect-IPPSSession auth. The cert shape
+      # (2048-bit RSA, SHA-256, 12-month validity, non-exportable private
+      # key, subject CN=<displayName>) is fixed by ADR 0011 decision §1
+      # and stays hardwired in `scripts/New-AutomationCertificate.ps1`.
+      # Only the cert's Key Vault object name varies by environment.
+      certificateName: gh-oidc-purview-data-plane
+      # Wave 3a Phase 2 / Issue #74 — Entra security groups that wrap the
+      # data-plane SP for assignment to portal role groups via the
+      # `scripts/Deploy-PurviewRoleGroups.ps1` reconciler. The reconciler
+      # only accepts Entra security-group OIDs (ADR 0009 §3); a service
+      # principal cannot be added to a portal role group directly, so each
+      # role group the SP needs is fronted by a singleton group whose only
+      # member is the SP. Environment-variable because the wrapper-group
+      # OIDs differ per Entra tenant.
+      # Reference: docs/adr/0021-dspm-content-explorer-cadence.md (Decision 4)
+      # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/add-rolegroupmember
+      roleGroupMembership:
+        # Singleton wrapper group "Content Explorer List Viewer (Lab)" whose
+        # only member is `gh-oidc-purview-data-plane`. Mapped to the
+        # ContentExplorerListViewer portal role group so the workflow
+        # `export-content-explorer.yml` can call `Get-ContentExplorerData`.
+        # PLACEHOLDER (zero-GUID = unset). Replace with your tenant's wrapper-group
+        # object ID. This is a per-tenant value: the tenant-intake agent populates
+        # it, or resolve it from a stable displayName at deploy time per ADR 0023.
+        contentExplorerListViewer: 00000000-0000-0000-0000-000000000000
+    # PR D1a / Issue #256 — kv-temp-unlock workflow Entra app. Distinct
+    # identity from `controlPlane` so the kv-temp-unlock workflow holds
+    # only the custom `Purview-Lab-KV-Firewall-Toggler` role at the vault
+    # scope, never Contributor on the RG. Not consumed by any current
+    # orchestrator: PR D1b's `scripts/New-KvUnlockEntraApp.ps1` will read
+    # this block to create the app + federated credential; PR D2 (#255)
+    # will wire the resulting client ID into `kv-temp-unlock.yml`. The
+    # federated credential's subject is
+    # `repo:<githubOrg>/<githubRepo>:environment:<kvUnlock.githubEnvironment>`,
+    # bound to a *separate* GitHub Environment from `automation.githubEnvironment`
+    # so the `kv-unlock` environment's protection rules (required reviewers,
+    # wait timers) gate this workflow independently.
+    kvUnlock:
+      displayName: gh-oidc-purview-kv-unlock
+      # GitHub Environment name that gates the kv-temp-unlock workflow
+      # jobs. Distinct from `automation.githubEnvironment` (`lab`) so the
+      # kv-unlock approval gate is separately configurable.
+      githubEnvironment: kv-unlock

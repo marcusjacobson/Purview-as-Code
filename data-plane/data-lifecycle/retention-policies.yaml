@@ -1,0 +1,101 @@
+# Microsoft Purview as-Code -- Data Lifecycle Management retention policies (desired state)
+#
+# Desired-state declaration for Microsoft Purview Data Lifecycle
+# Management retention policies, consumed by
+# `scripts/Deploy-RetentionPolicies.ps1` (Wave 2c.i, issue #71).
+# The script compares each desired policy + its rules against the
+# live tenant via `Get-RetentionCompliancePolicy` and
+# `Get-RetentionComplianceRule`, then performs Create / Update /
+# NoChange operations. Orphan policies and rules (live in tenant,
+# absent from this YAML) are reported and skipped unless
+# `-PruneMissing` is specified.
+#
+# Schema: ./retention-policies.schema.json (Draft-07).
+#
+# Default state: empty `policies:` list. The Wave 2c.i scaffolding
+# ships without any tenant-scoped retention policies. The first
+# policy entry lands in a subsequent issue.
+#
+# Each policy entry maps to the parameter set of
+# `New-RetentionCompliancePolicy`. Rules nest under `rules:` and map
+# to `New-RetentionComplianceRule`, bound to the parent via `-Policy
+# <policy.name>`.
+#
+# Policy fields:
+#
+#   name              -- Unique policy identifier (string, required).
+#                         Becomes the `-Name` argument.
+#   description       -- Free-form description (string, optional).
+#                         Maps to -Comment.
+#   enabled           -- Optional boolean. Default true. `false` maps
+#                         to `-Enabled $false` for staged rollouts
+#                         (simulation-first per project-plan principle 3).
+#   restrictiveRetention
+#                     -- Optional boolean. Enables Preservation Lock
+#                         (irreversible). Default false. Treat as
+#                         destructive on first apply -- requires the
+#                         `destructive` PR label per pre-commit rules.
+#   locations         -- One or more workload-location buckets. Each
+#                         bucket is either the literal string `All` or
+#                         a list of identifiers. Supported buckets:
+#                           exchange            -> -ExchangeLocation
+#                           sharePoint          -> -SharePointLocation
+#                           oneDrive            -> -OneDriveLocation
+#                           modernGroup         -> -ModernGroupLocation
+#                           skype               -> -SkypeLocation
+#                           teamsChannel        -> -TeamsChannelLocation
+#                           teamsChat           -> -TeamsChatLocation
+#                           teamsPrivateChannel -> -TeamsPrivateChannelLocation
+#                           publicFolder        -> -PublicFolderLocation
+#                         At least one bucket required.
+#   rules             -- One or more nested rule entries. Each rule
+#                         maps to `New-RetentionComplianceRule` and
+#                         binds to the parent policy via
+#                         `-Policy <policy.name>`.
+#
+# Rule fields:
+#
+#   name                -- Unique rule identifier within the policy.
+#   retentionDuration   -- Required. Either the literal string
+#                         `Unlimited` or a positive integer number
+#                         of days.
+#   retentionAction     -- Required. One of `Keep`, `Delete`,
+#                         `KeepAndDelete`. Maps to
+#                         -RetentionComplianceAction.
+#   expirationDateOption
+#                       -- Optional. Anchors the retention duration
+#                         to one of `CreationAgeInDays`,
+#                         `ModificationAgeInDays`, `TaggedAgeInDays`.
+#                         Required when retentionDuration is an integer
+#                         and retentionAction is `Delete` or
+#                         `KeepAndDelete`.
+#   contentMatchQuery   -- Optional. KQL query restricting which
+#                         content the rule applies to. Reference:
+#                         https://learn.microsoft.com/en-us/purview/ediscovery-keyword-queries-and-search-conditions
+#   description         -- Optional rule description. Maps to -Comment.
+#
+# References:
+#   Microsoft Purview Data Lifecycle Management overview:
+#     https://learn.microsoft.com/en-us/purview/data-lifecycle-management
+#   Learn about retention policies:
+#     https://learn.microsoft.com/en-us/purview/retention
+#   Get-RetentionCompliancePolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-retentioncompliancepolicy
+#   New-RetentionCompliancePolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/new-retentioncompliancepolicy
+#   Set-RetentionCompliancePolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/set-retentioncompliancepolicy
+#   Remove-RetentionCompliancePolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/remove-retentioncompliancepolicy
+#   Get-RetentionComplianceRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-retentioncompliancerule
+#   New-RetentionComplianceRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/new-retentioncompliancerule
+#   Set-RetentionComplianceRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/set-retentioncompliancerule
+#   Remove-RetentionComplianceRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/remove-retentioncompliancerule
+#   Preservation Lock for retention policies:
+#     https://learn.microsoft.com/en-us/purview/retention-preservation-lock
+
+policies: []

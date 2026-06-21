@@ -1,0 +1,41 @@
+# Microsoft Purview Unified Catalog — Objectives & Key Results (desired state)
+#
+# OKRs declare measurable goals tied to a governance domain. Each
+# objective contains one or more key results with a target value and
+# due date. OKRs surface in the Unified Catalog UI alongside the
+# domain's data products and critical data elements.
+#
+# Default steady state is `items: []` — no-op safe on first run.
+# Live content onboarding is tracked separately and depends on #340.
+#
+# Decision context:
+#   docs/adr/0024-unified-catalog-folder-placement.md
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/unified-catalog
+#
+# Field shape (validated against okrs.schema.json):
+#   name         (required, string)   Objective display name. Unique across file.
+#   description  (optional, string)   Short prose describing the objective.
+#   domain       (required, string)   Parent governance domain name.
+#   targetDate   (optional, string)   ISO-8601 date (YYYY-MM-DD).
+#   owners       (optional, string[]) Entra group display names.
+#   status       (optional, string)   One of: Draft, Published, Expired.
+#   keyResults   (optional, object[]) Each entry:
+#                  name         (required, string)
+#                  target       (optional, string)
+#                  currentValue (optional, string)
+#
+# Example (commented-out; do not uncomment on main):
+#   - name: Reduce data-quality incidents
+#     description: Lower P1 DQ incident count quarter-over-quarter.
+#     domain: Finance
+#     targetDate: "2026-12-31"
+#     owners:
+#       - sg-purview-finance-domain-owners
+#     status: Draft
+#     keyResults:
+#       - name: P1 incident count
+#         target: "<= 2 per quarter"
+
+items: []

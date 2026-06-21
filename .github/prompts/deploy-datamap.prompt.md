@@ -1,0 +1,62 @@
+---
+description: "Walk through a data-plane Purview deployment for this repo: per-domain -WhatIf → confirm → apply, in dependency order."
+mode: agent
+---
+
+# Deploy data map (data plane)
+
+Follow these steps in order. Each domain has its own `-WhatIf` → confirm → apply cycle. Do not batch the confirmations.
+
+## Preconditions
+
+1. Confirm the user is logged in: `az account show`.
+2. Confirm the target Purview account: `purview-contoso-lab`. Echo the value but do not echo full resource IDs.
+3. Confirm the active branch is a feature branch (not `main`).
+4. Acquire a data-plane token once via `./scripts/Connect-Purview.ps1 -AccountName purview-contoso-lab` and keep it in memory. Do not write the token to disk. Do not echo it.
+
+## Domain order
+
+The domains must run in this order — each depends on the previous:
+
+1. `Collections` — creates the collection tree referenced by later domains.
+2. `Glossary` — terms are attached to collections.
+3. `Classifications` — custom rules referenced by scan rulesets.
+4. `DataSources` — data sources are placed in collections; they must exist before scans.
+5. `Scans` — scans target data sources and use classification rulesets.
+
+## Per-domain cycle
+
+For each of the five domains, run:
+
+```pwsh
+./scripts/Deploy-<Domain>.ps1 -AccountName purview-contoso-lab -WhatIf
+```
+
+Then:
+
+- Paste the drift report (`Create`, `Update`, `NoChange`, `Orphan`, `Conflict` counts) into the chat.
+- If `Orphan` count is non-zero, stop. Do not propose `-PruneMissing`. Remind the user that pruning requires a `destructive`-labeled PR and a typed `confirm delete` reply.
+- If `Conflict` count is non-zero, stop. Portal-edited content is in the way; ask the user whether to merge the change manually or overwrite with `-Force` (destructive).
+- If only `Create` / `Update` / `NoChange` are non-zero, ask for a typed `apply <domain>` confirmation.
+
+Only after confirmation, run the apply:
+
+```pwsh
+./scripts/Deploy-<Domain>.ps1 -AccountName purview-contoso-lab
+```
+
+Capture `provisioningState` / HTTP status per object and report the summary in the chat. Do not proceed to the next domain until the previous domain reports zero failures.
+
+## Record evidence
+
+- After all five domains apply, paste every drift report and apply summary into the PR description per the pre-commit checklist in [`copilot-instructions.md`](../copilot-instructions.md).
+- Remind the user that no `-PruneMissing` or `-Force` switches appear in any workflow file unless the PR is labeled `destructive`.
+
+## Rules for the agent
+
+- Do not run apply for domain N+1 if domain N reported any failure.
+- Do not invoke `-PruneMissing` or `-Force` without a typed destructive confirmation in the current turn.
+- Do not echo the bearer token, `Authorization` header, or response bodies that contain credentials.
+- Do not invent script parameter names. If a script rejects a parameter, stop and surface the error.
+
+Reference: [Microsoft Purview Data Map REST APIs](https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/), [Authenticate for Purview APIs](https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane), [Everything about ShouldProcess](https://learn.microsoft.com/en-us/powershell/scripting/learn/deep-dives/everything-about-shouldprocess).

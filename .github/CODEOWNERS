@@ -1,0 +1,39 @@
+# CODEOWNERS for Purview-as-Code (contoso-lab)
+#
+# GitHub enforces CODEOWNERS as required reviewers on matching paths when branch
+# protection has "Require review from Code Owners" enabled. See:
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-security/customizing-your-repository/about-code-owners
+#
+# Format: <path glob>    <@owner1> [@owner2 ...]
+# Later entries override earlier ones. Keep the catch-all first, then narrow.
+
+# Catch-all — every PR needs at least one review from the repo owner.
+*                                       @OWNER-PLACEHOLDER
+
+# Control plane (Azure) — any Bicep change needs infra review.
+/infra/                                 @OWNER-PLACEHOLDER
+
+# Data plane (Purview catalog + M365 compliance YAML) — destructive diffs gate here.
+/data-plane/                            @OWNER-PLACEHOLDER
+
+# Automation scripts — REST API helpers and deploy logic.
+/scripts/                               @OWNER-PLACEHOLDER
+
+# CI/CD — workflow changes affect every plane.
+/.github/workflows/                     @OWNER-PLACEHOLDER
+
+# Owner-gated runtime workflows — explicit pin so a future broad change to
+# CODEOWNERS cannot accidentally widen the reviewer set. The kv-temp-unlock
+# workflow temporarily opens the lab Key Vault; only the lab owner may
+# modify its dispatch surface or unlock logic.
+/.github/workflows/kv-temp-unlock.yml   @OWNER-PLACEHOLDER
+
+# Copilot / agent customization surface — changes here govern every future PR.
+/.github/copilot-instructions.md        @OWNER-PLACEHOLDER
+/.github/instructions/                  @OWNER-PLACEHOLDER
+/.github/prompts/                       @OWNER-PLACEHOLDER
+/.github/agents/                        @OWNER-PLACEHOLDER
+/AGENTS.md                              @OWNER-PLACEHOLDER
+
+# Architecture Decision Records — deliberate extra scrutiny.
+/docs/adr/                              @OWNER-PLACEHOLDER

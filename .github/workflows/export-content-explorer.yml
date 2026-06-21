@@ -1,0 +1,73 @@
+name: export-content-explorer
+
+# Wave 3a Phase 2 / Issue #74 — weekly Microsoft Purview Content Explorer
+# export workflow. Read-only: invokes Get-ContentExplorerData across the
+# (label x SIT) x workload scope declared in data-plane/dspm/dspm-config.yaml
+# and uploads the per-pair JSON + manifest as a GitHub Actions artifact.
+# Cadence + retention + scope are governed by ADR 0021.
+#
+# Reference: docs/adr/0021-dspm-content-explorer-cadence.md
+# Reference: https://learn.microsoft.com/en-us/purview/data-classification-content-explorer
+# Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/get-contentexplorerdata
+# Reference: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+
+on:
+  # ADR 0021 Decision 1 — weekly Monday 07:00 UTC. workflow_dispatch is
+  # retained for ad-hoc evidence runs during incident response and for
+  # smoke tests after upstream label / SIT changes.
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    environment: lab
+    # Slightly larger than the deploy-data-plane defaults because the
+    # exporter paginates per (item, workload) pair with a 1-second
+    # throttle between calls (ADR 0021 Decision 7).
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reference: https://github.com/Azure/login
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install powershell-yaml
+        shell: pwsh
+        run: Install-Module powershell-yaml -Force -Scope CurrentUser
+
+      # Connect-IPPSSession is shipped in ExchangeOnlineManagement; the
+      # exporter calls it with -AccessToken (PS256 JWT from
+      # Get-PurviewIPPSAccessToken.ps1) so a stored secret is never needed.
+      # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/connect-ippssession
+      - name: Install ExchangeOnlineManagement
+        shell: pwsh
+        run: Install-Module ExchangeOnlineManagement -Force -Scope CurrentUser
+
+      - name: Export Content Explorer
+        shell: pwsh
+        run: ./scripts/Export-ContentExplorerData.ps1
+
+      # ADR 0021 Decision 5 — 90-day artifact retention. The exporter
+      # writes a timestamped subdirectory under verify-dspm-export-output/;
+      # upload the whole tree so reviewers see every (item, workload) pair
+      # plus the manifest.json index.
+      # Reference: https://github.com/actions/upload-artifact
+      - name: Upload export
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: content-explorer-${{ github.run_id }}
+          path: verify-dspm-export-output/**
+          retention-days: 90
+          if-no-files-found: error

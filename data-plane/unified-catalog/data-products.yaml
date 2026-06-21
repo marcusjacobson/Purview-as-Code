@@ -1,0 +1,41 @@
+# Microsoft Purview Unified Catalog — Data products (desired state)
+#
+# A data product is a packaged, governed dataset (or set of datasets)
+# exposed for downstream consumption — analytics, ML, reporting,
+# operational use. Each data product belongs to exactly one governance
+# domain and may reference critical data elements, glossary terms, and
+# health controls.
+#
+# Default steady state is `items: []` — no-op safe on first run.
+# Live content onboarding is tracked separately and depends on #340.
+#
+# Decision context:
+#   docs/adr/0024-unified-catalog-folder-placement.md
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/unified-catalog
+#
+# Field shape (validated against data-products.schema.json):
+#   name         (required, string)  Display name. Unique across the file.
+#   description  (optional, string)  Short prose describing the product.
+#   domain       (required, string)  Name of the parent governance domain.
+#                                    Must match an entry in governance-domains.yaml.
+#   type         (optional, string)  One of: Dataset, Dashboard, MLModel,
+#                                    Operational, MasterData, Reference,
+#                                    Other.
+#   businessUse  (optional, string)  Short prose explaining intended use.
+#   owners       (optional, string[]) Entra group display names. Resolved
+#                                    at deploy time per ADR 0023.
+#   status       (optional, string)  One of: Draft, Published, Expired.
+#
+# Example (commented-out; do not uncomment on main):
+#   - name: Customer 360
+#     description: Unified customer profile assembled from CRM and billing.
+#     domain: Sales
+#     type: Dataset
+#     businessUse: Powers retention scoring and churn dashboards.
+#     owners:
+#       - sg-purview-customer360-owners
+#     status: Draft
+
+items: []

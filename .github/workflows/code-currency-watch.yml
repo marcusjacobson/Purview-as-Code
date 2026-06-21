@@ -1,0 +1,321 @@
+name: code-currency-watch
+
+# Scheduled code-currency watch loop for the Purview-as-Code lab. Slice 12 of the
+# agentic-process-modernization plan, decided by ADR 0044
+# (docs/adr/0044-currency-watch-loops.md); availability-aware per #718;
+# severity-tiered per #722.
+#
+# It inventories the pinned REST `api-version` values in scripts/** and the Bicep
+# resource api-versions in infra/**, then classifies each pin into a severity tier
+# and opens a single deduplicated GitHub issue routed to @idea-intake when a tier
+# at or above `min_severity` (default `actionable`) is present.
+#
+# Severity tiers (highest first):
+#   retiring      - the pinned version is deprecated / has a published retirement
+#                   date. RESERVED: see the research note below — Microsoft exposes
+#                   no machine-readable per-api-version retirement feed, so this
+#                   tier is currently never populated. It exists so the loop fires
+#                   immediately the day such a feed appears.
+#   actionable    - a `-preview` pin for which a GA api-version at least as new is
+#                   available. Migrate off preview to GA. Deterministic; this just
+#                   automates the existing bicep.instructions.md / powershell.
+#                   instructions.md "avoid preview unless required / GA-over-preview"
+#                   rule.
+#   informational - a GA pin for which a newer GA exists (low-value "newer exists"
+#                   churn, e.g. issue #720), or a preview that is still the newest
+#                   available. Reported but does NOT fire by default.
+#
+# Research note (#722, confirms ADR 0044's open question — Microsoft is silent):
+#   There is no machine-readable, per-api-version retirement/deprecation feed.
+#   - ARM provider metadata (GET /providers/<ns>) exposes only `apiVersions` and
+#     `defaultApiVersion` — no deprecation/retirement field on any resource type.
+#   - The Purview REST `?view=` surface returns the current version only, with no
+#     retirement metadata.
+#   The `retiring` tier is therefore structural-only until Microsoft publishes such
+#   a feed; the loop does not invent one (per ADR 0044's "Learn is silent" rule).
+#
+# Detection sources:
+#   - Bicep: authoritative tenant-level ARM provider metadata
+#     (GET https://management.azure.com/providers/<ns>?api-version=2021-04-01) over
+#     OIDC. Read-only metadata; NO subscription role, no resource access.
+#   - REST: offline Microsoft Learn `?view=` redirect (no auth).
+#
+# Read-only / issue-only: the loop performs no resource read, no write, no deploy,
+# and only ever opens an issue (the "loops produce issues only" invariant). The
+# `code-currency` marker label makes the issue discoverable in the review queue
+# documented in docs/governance/agentic-process-modernization-plan.md
+# §"Reviewing loop output".
+#
+# References (Microsoft Learn + GitHub Docs):
+#   https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+#   https://learn.microsoft.com/en-us/rest/api/resources/providers/get
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+
+on:
+  schedule:
+    # Weekly Monday at 04:00 UTC, 1 hour after surface-watch (03:00) and 2 after
+    # drift-detection (02:00). Cron grammar:
+    # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+    inputs:
+      min_severity:
+        description: 'Lowest severity that opens an issue: retiring | actionable | informational.'
+        type: choice
+        options: [retiring, actionable, informational]
+        default: actionable
+      force_report:
+        description: 'Always open the currency-report issue, regardless of severity (operator-initiated review).'
+        type: boolean
+        default: false
+      simulate_drift:
+        description: 'Inject a synthetic actionable finding so the issue-creation path can be tested end-to-end.'
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write           # OIDC token for azure/login@v2 (tenant-level ARM metadata read only).
+  contents: read            # Checkout only; no writes.
+  issues: write             # gh issue create when a finding at/above min_severity fires.
+
+concurrency:
+  group: code-currency-watch
+  cancel-in-progress: false
+
+jobs:
+  check-currency:
+    name: Check code currency
+    runs-on: ubuntu-latest
+    environment: lab          # Matches the OIDC federated-credential subject (ADR 0010).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Classify pins by severity tier
+        id: check
+        # Dispatch inputs flow through env (not interpolated into the script body)
+        # so substitution happens outside the shell-quoting boundary, per
+        # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+        env:
+          MIN_SEVERITY: ${{ github.event.inputs.min_severity }}
+          FORCE_REPORT: ${{ github.event.inputs.force_report }}
+          SIMULATE_DRIFT: ${{ github.event.inputs.simulate_drift }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = (Get-Location).Path
+          function Get-RelPath([string]$full) { $full.Substring($root.Length).TrimStart('\', '/').Replace('\', '/') }
+          function Test-IsPreview([string]$v) { $v -match '-preview$' }
+          function Get-VerDate([string]$v) { [datetime]::ParseExact($v.Substring(0, 10), 'yyyy-MM-dd', $null) }
+          function Get-RedirectLocation([string]$url) {
+            $h = [System.Net.Http.HttpClientHandler]::new(); $h.AllowAutoRedirect = $false
+            $c = [System.Net.Http.HttpClient]::new($h); $c.Timeout = [TimeSpan]::FromSeconds(20)
+            try { $r = $c.GetAsync($url).GetAwaiter().GetResult(); if ($r.Headers.Location) { return $r.Headers.Location.ToString() } else { return $null } }
+            finally { $c.Dispose(); $h.Dispose() }
+          }
+
+          # Severity ranking. 'current' (0) is not a finding.
+          $rank = @{ current = 0; informational = 1; actionable = 2; retiring = 3 }
+          $verRx = '([0-9]{4}-[0-9]{2}-[0-9]{2}(?:-preview)?)'
+
+          # Each record: Kind, Target, Pin, Newest, Severity, Note, Files.
+          $records = @()
+
+          # --- Bicep: authoritative via tenant-level ARM provider metadata. ---
+          $bicepPins = [ordered]@{}
+          if (Test-Path 'infra') {
+            Get-ChildItem -Path 'infra' -Recurse -Filter *.bicep | ForEach-Object {
+              $rel = Get-RelPath $_.FullName
+              foreach ($m in [regex]::Matches((Get-Content $_.FullName -Raw), "'([A-Za-z0-9.]+/[A-Za-z0-9/]+)@$verRx'")) {
+                $rt = $m.Groups[1].Value; $ver = $m.Groups[2].Value
+                if (-not $bicepPins.Contains($rt)) { $bicepPins[$rt] = [ordered]@{} }
+                if (-not $bicepPins[$rt].Contains($ver)) { $bicepPins[$rt][$ver] = [System.Collections.Generic.SortedSet[string]]::new() }
+                [void]$bicepPins[$rt][$ver].Add($rel)
+              }
+            }
+          }
+          foreach ($rt in $bicepPins.Keys) {
+            $ns = $rt.Split('/')[0]; $type = $rt.Substring($ns.Length + 1)
+            $gaList = @(); $anyList = @()
+            try {
+              $resp = az rest --method get --url "https://management.azure.com/providers/$ns`?api-version=2021-04-01" 2>$null | ConvertFrom-Json
+              $rtObj = $resp.resourceTypes | Where-Object { $_.resourceType -eq $type } | Select-Object -First 1
+              $anyList = @($rtObj.apiVersions)
+              $gaList = @($anyList | Where-Object { -not (Test-IsPreview $_) })
+            } catch { Write-Host "::warning::Provider query failed for $rt : $($_.Exception.Message)" }
+
+            $newestGA = if ($gaList.Count) { @($gaList | Sort-Object { Get-VerDate $_ } -Descending)[0] } else { $null }
+            $newestAny = if ($anyList.Count) { @($anyList | Sort-Object { Get-VerDate $_ } -Descending)[0] } else { $null }
+
+            foreach ($pin in $bicepPins[$rt].Keys) {
+              $files = ($bicepPins[$rt][$pin]) -join ', '
+              $sev = 'current'; $note = ''
+              if (-not $newestAny) {
+                $sev = 'informational'; $note = 'could not read provider api-versions; verify manually'
+              }
+              elseif ((Test-IsPreview $pin) -and $newestGA -and ((Get-VerDate $newestGA) -ge (Get-VerDate $pin))) {
+                $sev = 'actionable'; $note = "preview pin; GA ``$newestGA`` (>= pinned date) is available — migrate to GA"
+              }
+              elseif (-not (Test-IsPreview $pin) -and $newestGA -and ((Get-VerDate $newestGA) -gt (Get-VerDate $pin))) {
+                $sev = 'informational'; $note = "newer GA ``$newestGA`` available (low-priority; no retirement signal)"
+              }
+              $records += [pscustomobject]@{ Kind = 'Bicep'; Target = $rt; Pin = $pin; Newest = ($newestGA ?? $newestAny ?? 'n/a'); Severity = $sev; Note = $note; Files = $files }
+            }
+          }
+
+          # --- REST: offline Learn ?view= redirect probe. Declarative group map. ---
+          $restPins = [ordered]@{}
+          if (Test-Path 'scripts') {
+            Get-ChildItem -Path 'scripts' -Recurse -Filter *.ps1 | ForEach-Object {
+              $rel = Get-RelPath $_.FullName
+              $text = Get-Content $_.FullName -Raw
+              foreach ($pat in @("api-version=$verRx", "[Aa]pi[Vv]ersion\s*=\s*['""]$verRx['""]")) {
+                foreach ($m in [regex]::Matches($text, $pat)) {
+                  $v = $m.Groups[1].Value
+                  if (-not $restPins.Contains($v)) { $restPins[$v] = [System.Collections.Generic.SortedSet[string]]::new() }
+                  [void]$restPins[$v].Add($rel)
+                }
+              }
+            }
+          }
+          $restProbe = @{
+            '2023-09-01'         = 'https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary'
+            '2019-11-01-preview' = 'https://learn.microsoft.com/en-us/rest/api/purview/accountdataplane/collections/list-collections'
+            '2021-07-01'         = 'https://learn.microsoft.com/en-us/rest/api/purview/metadatapolicydataplane/metadata-policy'
+          }
+          foreach ($pin in $restPins.Keys) {
+            $files = ($restPins[$pin]) -join ', '
+            $sev = 'current'; $note = ''; $current = 'n/a'
+            if (-not $restProbe.ContainsKey($pin)) {
+              $sev = 'informational'; $note = 'unmapped operation group — add to the REST probe map and verify'
+            } else {
+              try {
+                $loc = Get-RedirectLocation $restProbe[$pin]
+                if ($loc -and $loc -match 'view=rest-purview-[a-z]+-([0-9]{4}-[0-9]{2}-[0-9]{2}(?:-preview)?)') {
+                  $current = $matches[1]
+                  if ((Test-IsPreview $pin) -and (-not (Test-IsPreview $current)) -and ((Get-VerDate $current) -ge (Get-VerDate $pin))) {
+                    $sev = 'actionable'; $note = "preview pin; GA ``$current`` (>= pinned date) is documented — migrate to GA"
+                  }
+                  elseif ((Get-VerDate $current) -gt (Get-VerDate $pin)) {
+                    $sev = 'informational'; $note = "Learn documents a newer version ``$current`` (low-priority; no retirement signal)"
+                  }
+                } else {
+                  $sev = 'informational'; $note = 'could not resolve the current documented version; verify manually'
+                }
+              } catch { $sev = 'informational'; $note = "probe failed ($($_.Exception.Message)); verify manually" }
+            }
+            $records += [pscustomobject]@{ Kind = 'REST'; Target = '(scripts)'; Pin = $pin; Newest = $current; Severity = $sev; Note = $note; Files = $files }
+          }
+
+          # --- Operator dispatch inputs (empty on the schedule trigger). ---
+          if ($env:SIMULATE_DRIFT -eq 'true') {
+            $records += [pscustomobject]@{ Kind = 'SIMULATED'; Target = '(test)'; Pin = '0000-00-00'; Newest = 'n/a'; Severity = 'actionable'; Note = 'SIMULATED DRIFT (workflow_dispatch simulate_drift=true) — synthetic finding for pipeline testing only'; Files = 'n/a' }
+          }
+
+          # --- Decide firing against min_severity. ---
+          $minName = if ($env:MIN_SEVERITY) { $env:MIN_SEVERITY } else { 'actionable' }
+          if (-not $rank.ContainsKey($minName)) { $minName = 'actionable' }
+          $minRank = $rank[$minName]
+          $findings = @($records | Where-Object { $rank[$_.Severity] -ge $minRank })
+          $force = ($env:FORCE_REPORT -eq 'true')
+          $fire = ($findings.Count -gt 0) -or $force
+          Write-Host "records: $($records.Count); at/above '$minName': $($findings.Count); fire: $fire"
+
+          # --- Build the issue body. ---
+          function Format-Row($r) { "| ``$($r.Pin)`` | $($r.Severity) | $($r.Newest) | $($r.Note) | $($r.Files) |" }
+          $sb = [System.Text.StringBuilder]::new()
+          [void]$sb.AppendLine("## Code-currency watch — review required")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("This scheduled loop (Slice 12, decided by [ADR 0044](../../docs/adr/0044-currency-watch-loops.md); availability-aware per #718; severity-tiered per #722) classifies each pinned api-version and fires only on a tier at or above ``min_severity`` (``$minName``). Routed to ``@idea-intake`` via labels.")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("> **Retirement signal:** Microsoft exposes no machine-readable per-api-version retirement feed (ARM provider metadata and the Purview REST ``?view=`` surface both omit a deprecation/retirement date). The ``retiring`` tier is therefore reserved and currently never populated; this loop does not invent a retirement date (ADR 0044 Learn-is-silent rule).")
+          [void]$sb.AppendLine("")
+          foreach ($tier in @('retiring', 'actionable', 'informational')) {
+            $rows = @($records | Where-Object { $_.Severity -eq $tier })
+            [void]$sb.AppendLine("### Tier: $tier")
+            [void]$sb.AppendLine("")
+            if ($rows.Count -eq 0) {
+              [void]$sb.AppendLine("_None._")
+            } else {
+              [void]$sb.AppendLine("| api-version | Severity | Newest | Note | Used in |")
+              [void]$sb.AppendLine("|---|---|---|---|---|")
+              foreach ($r in $rows) { [void]$sb.AppendLine((Format-Row $r)) }
+            }
+            [void]$sb.AppendLine("")
+          }
+          [void]$sb.AppendLine("### Reviewer checklist")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("- [ ] **actionable**: migrate each preview pin to the named GA api-version per the ``bicep`` / ``powershell`` *avoid-preview / GA-over-preview* rule (validate with ``what-if`` / ``-WhatIf``).")
+          [void]$sb.AppendLine("- [ ] **informational**: newer-GA-available rows are low priority — adopt opportunistically, not urgently. No retirement risk is implied.")
+          [void]$sb.AppendLine("- [ ] For any ``unmapped`` REST pin, add its operation group to the REST probe map in the workflow.")
+
+          Set-Content -Path currency-report.md -Value $sb.ToString()
+
+          if ($fire) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "fire=true"
+            Write-Host "::notice::Finding(s) at/above '$minName' present or report forced. An issue will be opened (subject to dedupe)."
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "fire=false"
+            Write-Host "::notice::No finding at/above '$minName' and report not forced. Staying silent."
+          }
+
+      - name: Ensure code-currency label exists
+        if: steps.check.outputs.fire == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          # gh label create exits non-zero if the label already exists; that is fine.
+          gh label create 'code-currency' `
+            --color '1d76db' `
+            --description 'Code-currency watch loop finding (Slice 12)' `
+            --repo "${{ github.repository }}" `
+            2>$null
+          exit 0
+
+      - name: Check for existing code-currency issue
+        if: steps.check.outputs.fire == 'true'
+        id: dedupe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $open = gh issue list `
+            --label 'code-currency' `
+            --label 'squad:automation-engineer' `
+            --state open `
+            --json number `
+            --jq 'length'
+
+          if ([int]$open -gt 0) {
+            Write-Host "::notice::$open existing open code-currency issue(s). Skipping duplicate."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "exists=true"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "exists=false"
+          }
+
+      - name: Create code-currency issue
+        if: steps.check.outputs.fire == 'true' && steps.dedupe.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $body = Get-Content currency-report.md -Raw
+
+          gh issue create `
+            --title "Code-currency watch — review pinned api-versions" `
+            --body $body `
+            --label "code-currency" `
+            --label "squad:automation-engineer" `
+            --label "squad:security-specialist" `
+            --label "needs-review"
+
+          Write-Host "::notice::code-currency issue created."

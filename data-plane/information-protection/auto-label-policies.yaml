@@ -1,0 +1,154 @@
+# Microsoft Purview as-Code — Auto-labeling policies (desired state)
+#
+# Desired state for the AUTO-LABELING policies that automatically apply
+# sensitivity labels from `data-plane/information-protection/labels.yaml`
+# (#65) to mailbox content whose body matches a Sensitive Information
+# Type (SIT) from `data-plane/classifications/sit-catalog.yaml` (#80).
+# Auto-labeling is a SEPARATE construct from sensitivity-label PUBLISHING
+# policies in `label-policies.yaml` (#66) -- different cmdlets, different
+# mode vocabulary, different blast radius. See
+# `docs/adr/0016-auto-label-policy-shape.md` for the shape rationale.
+#
+# The reconciler `scripts/Deploy-AutoLabelPolicies.ps1` consumes this
+# file, compares each desired policy + rule against the live tenant via
+# `Get-AutoSensitivityLabelPolicy` + `Get-AutoSensitivityLabelRule`, and
+# performs Create / Update / NoChange operations. Orphan policies /
+# rules (live in tenant, missing from YAML) are reported and skipped
+# unless `-PruneMissing` is specified.
+#
+# Shape (ADR 0016):
+#
+#   policies[]:
+#     name                : (string, required, unique) policy identifier.
+#     mode                : (string, required) one of
+#                             Enable | TestWithNotifications |
+#                             TestWithoutNotifications | Disable.
+#                             ALSO controls simulation lifecycle --
+#                             there is no separate `-StartSimulation`
+#                             switch on the reconciler. Promotion:
+#                             TestWithoutNotifications ->
+#                             TestWithNotifications -> Enable. Demotion
+#                             is the reverse; promotion to Enable and
+#                             demotion from Enable require the
+#                             `destructive` PR label.
+#     applyLabel          : (string, required) composite key
+#                             (`<parent>/<displayName>` for sublabels,
+#                             bare `<displayName>` for top-level). The
+#                             reconciler resolves to a label GUID via
+#                             Get-Label at Apply time.
+#     exchangeLocation    : (list of strings, required) `[All]` or a
+#                             list of mailbox SMTP addresses.
+#     advancedSettings    : (map, optional) MUST be empty per ADR 0016
+#                             section 5; the allowlist is `@()`. Adding
+#                             the first key requires a follow-up issue
+#                             with a Microsoft Learn citation.
+#
+#   rules[]:
+#     name                                 : (string, required, unique)
+#                                              rule identifier.
+#     policy                               : (string, required, foreign
+#                                              key to `policies[].name`).
+#     workload                             : (string, required) the
+#                                              workload the rule applies
+#                                              to. Required by
+#                                              `New-AutoSensitivityLabelRule`.
+#                                              First-PR value: `Exchange`
+#                                              (matches the policy's
+#                                              `exchangeLocation:`).
+#                                              Write-only at create
+#                                              time -- the tenant
+#                                              always returns the full
+#                                              expanded workload set
+#                                              regardless of input, so
+#                                              the reconciler does not
+#                                              track this field for
+#                                              drift. To change it,
+#                                              use `-PruneMissing` +
+#                                              recreate.
+#     contentContainsSensitiveInformation  : (list, required, non-empty)
+#                                              one entry per SIT:
+#         sitId         : (string, required) GUID from sit-catalog.yaml.
+#         minCount      : (int, optional, default 1).
+#         minConfidence : (int, optional, default 75).
+#     Note: `groupingOperator` is intentionally absent. The auto-label
+#     rule cmdlet family does not expose `-GroupingOperator`; grouping
+#     is expressed inside `contentContainsSensitiveInformation` itself
+#     when multi-SIT topologies arrive in a follow-up issue.
+#
+# First-run bootstrap against an existing tenant (REQUIRED):
+#   Before the first reconciler `-Apply` run against this file, run:
+#       ./scripts/Deploy-AutoLabelPolicies.ps1 -ExportCurrentState
+#   That switch populates `policies:` and `rules:` with whatever the
+#   live tenant already has. Review the resulting diff in a pull
+#   request, then merge. Only after that PR lands is it safe to run
+#   `-Apply` (or `-Apply -PruneMissing`). Otherwise the reconciler
+#   would treat any existing portal-configured auto-label policy as
+#   drift. Mandatory first-run contract per
+#   `.github/instructions/powershell.instructions.md` ("First-run-
+#   against-an-existing-tenant contract") and ADR 0016 section 8.
+#
+# Out of scope for this file (per ADR 0016):
+#   - SharePointLocation, OneDriveLocation, Teams*Location -- additive
+#     follow-up issues; the schema must accept them without reshape.
+#   - Multi-policy / multi-rule-per-policy topologies -- additive.
+#   - `advancedSettings` keys -- empty allowlist; additions require a
+#     new ADR follow-up issue with a Learn citation.
+#   - Rule conditions other than `contentContainsSensitiveInformation`
+#     (`AccessScope`, `DocumentIsPasswordProtected`,
+#     `HeaderMatchesPatterns`, etc.) -- additive.
+#   - `mode: Enable` and demotion paths -- destructive-change ADR.
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/apply-sensitivity-label-automatically
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-autosensitivitylabelpolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-autosensitivitylabelpolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-autosensitivitylabelpolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/remove-autosensitivitylabelpolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-autosensitivitylabelrule
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-autosensitivitylabelrule
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-autosensitivitylabelrule
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/remove-autosensitivitylabelrule
+#
+# Sample-data rule (`.github/instructions/sample-data.instructions.md`):
+#   - The Credit Card Number SIT GUID below
+#     (50842eb7-edc8-4019-85dd-5a5c1f2bb085) is a Microsoft built-in
+#     detector documented under
+#     https://learn.microsoft.com/en-us/purview/sit-defn-credit-card-number
+#     and is treated as a schema/reference GUID -- NOT a tenant-real
+#     identifier subject to zero-GUID redaction (same handling as the
+#     other Microsoft built-in SIT GUIDs in sit-catalog.yaml). Test
+#     payloads, if added in a future PR, must use brand-published test
+#     PAN values only (e.g. Visa 4111 1111 1111 1111) per the sample-
+#     data rule -- never a real PAN.
+
+policies:
+  - name: Lab-AutoLabel-CreditCards
+    mode: TestWithoutNotifications
+    applyLabel: Confidential/Partner
+    exchangeLocation:
+      - All
+    advancedSettings: {}
+  - name: Lab-AutoLabel-SSN
+    mode: Enable
+    applyLabel: Confidential/Partner
+    exchangeLocation:
+      - All
+    advancedSettings: {}
+
+rules:
+  - name: Lab-AutoLabel-CreditCards-Rule
+    policy: Lab-AutoLabel-CreditCards
+    workload: Exchange
+    contentContainsSensitiveInformation:
+      - sitId: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+        minCount: 1
+        minConfidence: 75
+  - name: Lab-AutoLabel-SSN-Rule
+    policy: Lab-AutoLabel-SSN
+    workload: Exchange
+    contentContainsSensitiveInformation:
+      # U.S. Social Security Number (SSN); Microsoft built-in SIT.
+      # Reference: https://learn.microsoft.com/en-us/purview/sit-defn-us-social-security-number
+      - sitId: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+        minCount: 1
+        minConfidence: 75

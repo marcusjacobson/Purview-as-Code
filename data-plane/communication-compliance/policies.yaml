@@ -1,0 +1,145 @@
+# Microsoft Purview as-Code -- Communication Compliance policies (desired state)
+#
+# Desired-state declaration for Microsoft Purview Communication
+# Compliance policies, consumed by
+# `scripts/Deploy-CommunicationCompliance.ps1` (Wave 2e, issue #72).
+#
+# Standing state: `policies: []`. This is the ratified steady state
+# per ADR 0019 (Accepted 2026-05-16; watch-list re-verified
+# 2026-06-07 via issue #367 and the ADR's
+# `## 2026-06-07 watch-list re-verification` appendix). It is NOT a
+# temporary scaffold awaiting a first declarative entry. Microsoft
+# does not document a programmatic authoring surface for the modern
+# Communication Compliance product; the
+# `Create and manage Communication Compliance policies` page
+# (Microsoft Learn, Last updated 2026-05-28) now states the rule
+# explicitly:
+#
+#   "PowerShell isn't supported for creating and managing
+#    Communication Compliance policies. To create and manage these
+#    policies, use the policy management controls in the
+#    Communication Compliance solution."
+#
+#   Reference:
+#     https://learn.microsoft.com/en-us/purview/communication-compliance-policies
+#
+# The four ADR 0019 §5 re-open triggers (Graph resource, Learn
+# programmatic-authoring section, deprecation notice with a named
+# successor on `New-SupervisoryReviewPolicyV2`, or a Microsoft-
+# published reference-repo sample) were all re-verified cold on
+# 2026-06-07. See the ADR appendix for evidence.
+#
+# Role of the reconciler: DRIFT DETECTION ONLY. The companion
+# script `scripts/Deploy-CommunicationCompliance.ps1` retains its
+# `Get-SupervisoryReviewPolicyV2` / `Get-SupervisoryReviewRule`
+# read paths to surface operator-authored portal policies in
+# `-WhatIf` reports as `Orphan` rows. The Create / Update / Remove
+# branches stay in place (guarded by `policies: []`) so the
+# surface can re-enable the day a documented authoring API ships,
+# but they are dead code paths in practice today. Operators
+# authoring real CC policies must do so in the Microsoft Purview
+# portal; see ADR 0019 for the membership / role-group story
+# (managed by `scripts/Deploy-PurviewRoleGroups.ps1`).
+#
+# Sibling of `data-plane/irm/policies.yaml` (Wave 2d) -- same author
+# pattern, same drift vocabulary.
+#
+# Schema: ./policies.schema.json (Draft-07).
+#
+# The notes below document the policy / rule shape the reconciler
+# would consume if `policies: []` were ever populated. They are
+# preserved verbatim from the scaffold landing (PR #269) so the
+# surface is ready to author the day ADR 0019's re-open triggers
+# fire; they do NOT imply that any policy should land today.
+#
+# Reviewer identities are kept out of source. The `reviewers` field
+# supports `${env:NAME}` placeholders that the script expands at
+# load time via `Expand-EnvPlaceholder` -- the lab owner will set
+# `$env:LAB_OWNER_UPN` locally (and as a GitHub Actions secret /
+# environment variable for CI) once the Graph pivot lands and a
+# declarative policy can actually be created on this tenant.
+# Unresolved placeholders fail fast with a clear error.
+#
+# Scaffold scope (PR #269 + issue #271 Phase 1):
+#   * Read-only enumeration of tenant policies via
+#     `Get-SupervisoryReviewPolicyV2`.
+#   * Schema validation of desired-state entries (policies + rules).
+#   * Plan categorization (Create / Update / NoChange / Orphan) for
+#     policies, plus RuleCreate / RuleUpdate / RuleNoChange /
+#     RuleOrphan rows for nested rules.
+#   * `-WhatIf` prints the plan and exits cleanly.
+#   * Cmdlet parameter shapes for `*-SupervisoryReviewPolicyV2` and
+#     `*-SupervisoryReviewRule` are verified against Microsoft Learn
+#     (2026-05-16) and pinned at the call sites in
+#     `Deploy-CommunicationCompliance.ps1`.
+#
+# Deferred to Phase 2 (issue #271):
+#   * Live-tenant exercise of New / Set / Remove on real policies
+#     and rules (no policy declared yet).
+#   * Confirmation of `Get-SupervisoryReviewPolicyV2` / `-Rule`
+#     property names against a current tenant; the tenant-hash
+#     helpers fall back defensively today (zero policies were
+#     present at the 2026-05-16 probe -- see runbook above for the
+#     path-(b) deferral).
+#   * Round-trip Apply -> Get -> Apply with non-empty state.
+#
+# Important gap (Microsoft Learn + live IPPS probe, both 2026-05-16):
+#   `Remove-SupervisoryReviewRule` DOES NOT EXIST on the V2 surface.
+#   Microsoft Learn returns 404 and `Get-Command` against the live
+#   `ExchangeOnlineManagement` 3.9.0 IPPS session returns no result.
+#   The script's rule sub-reconciler therefore implements Create +
+#   Update only. Orphan rules (in tenant, not in YAML) are reported
+#   as `RuleOrphan` but not deleted. To remove a rule, remove its
+#   parent policy (rules cascade with the policy). Full cmdlet
+#   inventory, reproduction recipe, and removal workaround:
+#     docs/runbooks/communication-compliance-cmdlet-surface.md
+#
+# Each policy entry maps to the conservative subset of
+# `New-SupervisoryReviewPolicyV2` parameters that are stable across
+# PowerShell module versions; nested rules map to
+# `New-SupervisoryReviewRule`:
+#
+#   name        -- Unique policy identifier (string, required).
+#                   Becomes the `-Name` argument.
+#   description -- Free-form policy description (string, optional).
+#                   Maps to `-Comment` on
+#                   `New-SupervisoryReviewPolicyV2`.
+#   reviewers   -- List of reviewer UPNs or mail-enabled security
+#                   group SMTP addresses (array of strings,
+#                   required). Maps to `-Reviewers`.
+#   enabled     -- Optional boolean. When omitted, the cmdlet
+#                   default applies (typically the policy is
+#                   created in a disabled / staging state).
+#   rules       -- Optional array of supervisory-review rules
+#                   attached to this policy. Each rule entry
+#                   accepts:
+#                     name           (string, required) -- `-Name`
+#                     condition      (string, optional) -- `-Condition`
+#                     samplingRate   (int 1-100, opt.)  -- `-SamplingRate`
+#                     contentSources (string[], opt.)   -- `-ContentSources`
+#                     ocr            (bool, optional)   -- `-Ocr`
+#                   When `rules` is omitted or empty, the script
+#                   manages the policy header only and leaves
+#                   existing rules untouched.
+#
+# References (Microsoft Learn -- verified 2026-05-16):
+#   Microsoft Purview Communication Compliance overview:
+#     https://learn.microsoft.com/en-us/purview/communication-compliance
+#   Get started with Communication Compliance:
+#     https://learn.microsoft.com/en-us/purview/communication-compliance-configure
+#   Get-SupervisoryReviewPolicyV2:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-supervisoryreviewpolicyv2
+#   New-SupervisoryReviewPolicyV2:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/new-supervisoryreviewpolicyv2
+#   Set-SupervisoryReviewPolicyV2:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/set-supervisoryreviewpolicyv2
+#   Remove-SupervisoryReviewPolicyV2:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/remove-supervisoryreviewpolicyv2
+#   Get-SupervisoryReviewRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-supervisoryreviewrule
+#   New-SupervisoryReviewRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/new-supervisoryreviewrule
+#   Set-SupervisoryReviewRule:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/set-supervisoryreviewrule
+
+policies: []

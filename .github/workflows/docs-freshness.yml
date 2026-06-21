@@ -1,0 +1,112 @@
+name: docs-freshness
+
+# Advisory (non-blocking) solution-doc freshness check.
+#
+# On every pull request, compares the changed file set against docs/solutions/.solution-map.yml.
+# When a pull request changes a Microsoft Purview solution's reconciler / desired-state code
+# without touching the matching guide under docs/solutions/, the job emits a ::warning::
+# annotation and a job-summary note — then always exits 0. It NEVER blocks the merge.
+#
+# This complements, and does not duplicate, docs-regen.yml: docs-regen regenerates the mechanical
+# indexes (ADR index, script reference) on a weekly schedule and opens a PR; docs-freshness gives a
+# per-PR nudge for the human-authored solution guides. Both only ever propose — neither gates the
+# lifecycle. See docs/governance/agentic-process-modernization-plan.md (Slice 10).
+#
+# Read-only: git + filesystem only. No Azure auth, no data-plane calls, no secrets.
+#
+# References:
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#setting-a-warning-message
+#   https://github.com/cloudbase/powershell-yaml
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: docs-freshness-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check solution-doc freshness
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      BASE_REF: ${{ github.base_ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare changed code against solution guides
+        shell: pwsh
+        run: |
+          $manifestPath = 'docs/solutions/.solution-map.yml'
+          if (-not (Test-Path $manifestPath)) {
+              Write-Output "::warning::Solution map $manifestPath not found — skipping docs-freshness check."
+              exit 0
+          }
+
+          # Resolve the PR's changed file set against the merge base.
+          git fetch --quiet origin $env:BASE_REF
+          $changedRaw = git diff --name-only "origin/$($env:BASE_REF)...HEAD"
+          $changed = [System.Collections.Generic.HashSet[string]]::new()
+          foreach ($c in $changedRaw) {
+              if (-not [string]::IsNullOrWhiteSpace($c)) { [void]$changed.Add($c.Replace('\', '/')) }
+          }
+          Write-Output "Changed files in this pull request: $($changed.Count)"
+
+          Install-Module powershell-yaml -Force -Scope CurrentUser -ErrorAction Stop | Out-Null
+          Import-Module powershell-yaml -ErrorAction Stop
+          $map = ConvertFrom-Yaml (Get-Content -Raw $manifestPath)
+
+          function Test-CodeMatch {
+              param([System.Collections.Generic.HashSet[string]] $Files, [string] $Entry)
+              $e = $Entry.Replace('\', '/')
+              foreach ($f in $Files) {
+                  if ($e.EndsWith('/')) { if ($f.StartsWith($e)) { return $true } }
+                  else { if ($f -eq $e) { return $true } }
+              }
+              return $false
+          }
+
+          $stale = @()
+          foreach ($s in $map.solutions) {
+              $codeChanged = $false
+              foreach ($cp in $s.code) { if (Test-CodeMatch $changed $cp) { $codeChanged = $true; break } }
+              $docChanged = $changed.Contains(($s.doc).Replace('\', '/'))
+              if ($codeChanged -and -not $docChanged) {
+                  $stale += [PSCustomObject]@{ Name = $s.name; Doc = $s.doc }
+              }
+          }
+
+          $summary = @()
+          if ($stale.Count -eq 0) {
+              Write-Output "All touched solutions have an accompanying guide update (or no solution code changed)."
+              $summary += '### docs-freshness: no drift'
+              $summary += ''
+              $summary += 'Every Microsoft Purview solution whose code changed in this pull request also has a guide update, or no governed solution code changed.'
+          } else {
+              $summary += '### docs-freshness: guide update suggested (advisory)'
+              $summary += ''
+              $summary += 'The following solutions changed code without a matching update to their guide under `docs/solutions/`. This is a non-blocking reminder — update the guide in this PR, or confirm no doc change is needed.'
+              $summary += ''
+              $summary += '| Solution | Guide to review |'
+              $summary += '|---|---|'
+              foreach ($item in $stale) {
+                  Write-Output "::warning file=$($item.Doc)::Solution '$($item.Name)' changed code but its guide '$($item.Doc)' was not updated. Update it or confirm no change is needed (advisory; does not block merge)."
+                  $summary += "| $($item.Name) | ``$($item.Doc)`` |"
+              }
+              $summary += ''
+              $summary += 'See the `docs-maintenance` skill (`.github/skills/docs-maintenance/SKILL.md`) for the page template and update checklist.'
+          }
+
+          if ($env:GITHUB_STEP_SUMMARY) { $summary -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append }
+
+          # Advisory only — never fail the check.
+          exit 0

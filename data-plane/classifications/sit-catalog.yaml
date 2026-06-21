@@ -1,0 +1,1682 @@
+# Sensitive Information Type (SIT) catalog for Microsoft Purview / Microsoft 365.
+#
+# Populated by `scripts/Sync-SITCatalog.ps1 -ExportCurrentState` against the lab
+# tenant. The YAML is the desired-state projection of every SIT visible to the
+# connected admin -- both Microsoft built-ins (read-only, listed for reference and
+# downstream label / DLP / auto-label policies to refer to by name or GUID) and
+# tenant-published custom SITs (read-write through this reconciler in a follow-up
+# PR).
+#
+# References (Microsoft Learn):
+#   Sensitive information type entity definitions:
+#     https://learn.microsoft.com/en-us/purview/sit-sensitive-information-type-entity-definitions
+#   Get-DlpSensitiveInformationType:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-dlpsensitiveinformationtype
+#   Sensitive information types overview:
+#     https://learn.microsoft.com/en-us/purview/sit-learn-about-sensitive-information-types
+#
+# Schema notes:
+#   - `name`       Canonical display name from `Get-DlpSensitiveInformationType.Name`.
+#   - `id`         Stable GUID from `.Identity` (also `.Id`). DLP / auto-label
+#                  / sensitivity-label cmdlets accept either name or GUID; GUID
+#                  is preferred for cross-tenant portability of YAML references.
+#   - `publisher`  `Microsoft Corporation` for built-ins, the publishing org name
+#                  for tenant-custom. Tenant-real publisher GUIDs (when the API
+#                  returns one) are redacted to the zero GUID per
+#                  `.github/copilot-instructions.md` "Environment and identifier
+#                  boundaries" -- ID lookup is by name, the GUID column is not.
+#   - `type`       `Default` (built-in), `Custom` (tenant-published), or
+#                  `Functional` (Microsoft-managed compound/credential pattern).
+#   - `rulePackId` Optional GUID of the rule package that owns this SIT.
+#
+# GUID classification (per `.github/copilot-instructions.md` augment #8):
+#   - `id` and `rulePackId` values for Microsoft built-in SITs are public,
+#     universal Microsoft catalog identifiers (identical across every tenant)
+#     documented under https://learn.microsoft.com/en-us/purview/sit-defn-* .
+#     They are treated as schema/reference GUIDs (same category as Microsoft
+#     role-definition GUIDs) and are NOT subject to zero-GUID redaction.
+#   - Tenant-real identifiers (publisher org GUIDs for custom SITs, tenant IDs,
+#     subscription IDs, object IDs) ARE redacted to the zero GUID.
+
+# Exported from tenant on 2026-05-08. 327 SIT(s).
+# Re-verified against live tenant on 2026-05-28 (#360): 327 SITs, byte-identical
+# to this file. GUIDs spot-checked against Microsoft Learn `<Entity id>` for
+# ABA / Credit Card / U.S. SSN / IP Address / SWIFT — all match. Net-new SITs
+# from Microsoft Learn since 2026-05-08: 0 (name diffs between Learn docs and
+# in-product cmdlet output are stylistic; GUID join key is stable).
+sits:
+  - name: ABA Routing Number
+    id: cb353f78-2b72-4c3c-8827-92ebe4f69fdf
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: All Credential Types
+    id: ba147552-2ed1-4a8f-a441-981e94ab1895
+    publisher: Microsoft Corporation
+    type: BundledCredential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: All Full Names
+    id: 50b8b56b-4ef8-44c2-a924-03374f5831ce
+    publisher: Microsoft Corporation
+    type: BundledEntity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: All Medical Terms And Conditions
+    id: 065bdd91-ef07-40d3-b8a4-0aea722eaa49
+    publisher: Microsoft Corporation
+    type: BundledEntity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: All Physical Addresses
+    id: 8548332d-6d71-41f8-97db-cc3b5fa544e6
+    publisher: Microsoft Corporation
+    type: BundledEntity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Amazon S3 Client Secret Access Key
+    id: 881b8266-702b-4ebc-9c27-ea38c3765ab5
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Argentina National Identity (DNI) Number
+    id: eefbb00e-8282-433c-8620-8f1da3bffdb2
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Argentina Unique Tax Identification Key (CUIT/CUIL)
+    id: 98da3da1-9199-4571-b7c4-b6522980b507
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: ASP.NET Machine Key
+    id: 55e47f22-402c-486f-9779-f82430d2eee4
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Australia Bank Account Number
+    id: 74a54de9-2a30-4aa0-a8aa-3d9327fc07c7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Australia Driver's License Number
+    id: 1cbbc8f5-9216-4392-9eb5-5ac2298d1356
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Australia Medical Account Number
+    id: 104a99a0-3d3b-4542-a40d-ab0b9e1efe63
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Australia Passport Number
+    id: 29869db6-602d-4853-ab93-3484f905df50
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Australia Physical Addresses
+    id: d1d18c85-1203-46f5-b32f-2d6309de4e5b
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Australia Tax File Number
+    id: e29bc95f-ff70-4a37-aa01-04d17360a4c5
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Australian Business Number
+    id: 76e83b3b-01ee-4530-aced-e667a6609f49
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Australian Company Number
+    id: b1fba4f7-7b3e-4bb9-8f9a-9366df604dbb
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Austria Driver's License Number
+    id: 682f18ce-44eb-482b-8198-2bcb96a0761e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Austria Identity Card
+    id: 5ec06c3b-007e-4820-8343-7ff73b889735
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Austria Passport Number
+    id: 1c96ae4e-303b-447d-86c7-77113ac266bf
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Austria Physical Addresses
+    id: 286d9b20-eb7a-4ad8-a7fa-b7eccc0eade5
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Austria Social Security Number
+    id: 6896a906-86c9-4d19-a2da-6e43ccd19b7b
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Austria Tax Identification Number
+    id: 4fd58d22-af28-4451-b18a-6f722430a56d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Austria Value Added Tax (VAT) Number
+    id: b6a3eda2-c56c-4b69-a5f7-dca34db00f48
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure App Service Deployment Password
+    id: ad0a2311-d91f-468c-bd00-925f8991d3e1
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Batch Shared Access Key
+    id: 933284b2-12cf-4bd1-86df-c5300681ab79
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Bot Framework Secret Key
+    id: 37e2bc99-1346-4a68-bd16-267e784711d1
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Bot Service App Secret
+    id: 03ffa580-cd25-4df2-9a3e-fb9622cdeac1
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Cognitive Search API Key
+    id: 954d61cd-e0d0-4466-9bfe-f54b4e9714df
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Cognitive Service Key
+    id: 91704742-2d51-4c3e-928b-f0600b55edb6
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Container Registry Access Key
+    id: c5dcd46a-068f-4e19-a093-c91b4e19055a
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure COSMOS DB Account Access Key
+    id: aa9b9abb-0c21-4e27-8393-cc1a8c9c407f
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Databricks Personal Access Token
+    id: b70cb1d1-3c98-436f-b63e-f61f3503e407
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure DevOps App Secret
+    id: 2d9471ab-72e3-4512-99ee-652482362107
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure DevOps Personal Access Token
+    id: 04749030-d045-4a81-905a-dd4e48f880a2
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure DocumentDB Auth Key
+    id: 0f587d92-eb28-44a9-bd1c-90f2892b47aa
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure EventGrid Access Key
+    id: ccb6a7c2-1693-487b-8912-90788d74b906
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Function Master / API Key
+    id: f03131f9-b7f2-4ec7-856d-39e814614334
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure IAAS Database Connection String and Azure SQL Connection String
+    id: ce1a126d-186f-4700-8c0c-486157b953fd
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure IoT Connection String
+    id: 0b34bec3-d5d6-4974-b7b0-dcdb5c90c29d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure IoT Shared Access Key
+    id: a24bd725-5c89-4705-a406-6c3cf7535e45
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Logic App Shared Access Signature
+    id: 04a87f1b-b1fe-4f2f-8898-4d32d968372a
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Machine Learning Web Service API Key
+    id: 209902e2-e787-4c1f-9fd3-41943cb02e95
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Maps Subscription Key
+    id: 93e77273-df14-4d35-ab29-77c606b6589f
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Publish Setting Password
+    id: 75f4cc8a-a68e-49e5-89ce-fa8f03d286a5
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure Redis Cache Connection String
+    id: 095a7e6c-efd8-46d5-af7b-5298d53a49fc
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure Redis Cache Connection String Password
+    id: b96e960c-b899-4fbf-9a38-5b8e91c1179a
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure SAS
+    id: 4d235014-e564-47f4-a6fb-6ebb4a826834
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure Service Bus Connection String
+    id: b9a6578f-a83f-4fcd-bf44-2130bae49a6f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure Service Bus Shared Access Signature
+    id: f4ac21a7-a3d9-4291-9094-f54eb94bff5c
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Shared Access Key / Web Hook Token
+    id: 287cbe68-26fb-42cf-993a-78890b46a1fa
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure SignalR Access Key
+    id: 158bc166-89fe-44ff-bb4c-0704f8b3f2dd
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure SQL Connection String
+    id: 52974858-9b9c-47bb-99d0-67fa1968c3c5
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Storage Account Access Key
+    id: 5500fb81-47f7-471d-9de3-2b781487342d
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Storage Account Key
+    id: c7bc98e8-551a-4c35-a92d-d2c8cda714a7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure Storage Account Key (Generic)
+    id: 7ff41bd0-5419-4523-91d6-383b3a37f084
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Azure Storage Account Shared Access Signature
+    id: 7a47fadd-6969-4e19-af75-33e6d584d1be
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Storage Account Shared Access Signature for High Risk Resources
+    id: f522138f-ba06-4c00-8db0-dea5c22f6f58
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Azure Subscription Management Certificate
+    id: 9b9c114b-1ee1-4ce2-a712-d0117d57dbeb
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Belgium Driver's License Number
+    id: d89fd329-9324-433c-b687-2c37bd5166f3
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Belgium National Number
+    id: fb969c9e-0fd1-4b18-8091-a2123c5e6a54
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Belgium Passport Number
+    id: d7b1315b-21ca-4774-a32a-596010ff78fd
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Belgium Physical Addresses
+    id: 08e0fc0e-def1-49c3-bc4f-f432650d9138
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Belgium Value Added Tax Number
+    id: 85b5b3c3-f2de-4ae8-ac46-fd3cb38bf9ed
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Blood Test Terms
+    id: fc564df4-201b-4405-b6da-54a2501c198f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Brand Medication Names
+    id: 321c43ef-82f4-4b68-be93-179f54b42dab
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Brazil CPF Number
+    id: 78e09124-f2c3-4656-b32a-c1a132cd2711
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Brazil Legal Entity Number (CNPJ)
+    id: 9b58b5cd-5e90-4df6-b34f-1ebcc88ceae4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Brazil National ID Card (RG)
+    id: 486de900-db70-41b3-a886-abdf25af119c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Brazil Physical Addresses
+    id: b37568b5-499c-416b-8785-f72b791fcc5a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Bulgaria Driver's License Number
+    id: 66d39258-94c2-43b2-804b-aa312258e54b
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Bulgaria Passport Number
+    id: f7172b82-c588-4216-845e-4e54e397f29a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Bulgaria Physical Addresses
+    id: a6fc6e44-c29b-49cf-814f-75178ef9ac30
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Bulgaria Uniform Civil Number
+    id: 100d58b1-0a35-4fb1-aa89-e4a86fb53fcc
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Canada Bank Account Number
+    id: 552e814c-cb50-4d94-bbaa-bb1d1ffb34de
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Canada Driver's License Number
+    id: 37186abb-8e48-4800-ad3c-e3d1610b3db0
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Canada Health Service Number
+    id: 59c0bf39-7fab-482c-af25-00faa4384c94
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Canada Passport Number
+    id: 14d0db8b-498a-43ed-9fca-f6097ae687eb
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Canada Personal Health Identification Number (PHIN)
+    id: 722e12ac-c89a-4ec8-a1b7-fea3469f89db
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Canada Physical Addresses
+    id: 4de48f8f-afc8-438d-9e7f-787188178d8c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Canada Social Insurance Number
+    id: a2f29c85-ecb8-4514-a610-364790c0773e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Chile Identity Card Number
+    id: 4e979794-49a0-407e-a0b9-2c536937b925
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: China Physical Addresses
+    id: c37d5e84-bc2e-458a-be24-6a69b23562f7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: China Resident Identity Card (PRC) Number
+    id: c92daa86-2d16-4871-901f-816b3f554fc1
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Client Secret / Api Key
+    id: 64ab8b8c-cb50-4e2c-97e5-2a1699a850e2
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Colombia National ID
+    id: 060c591a-0fd7-4598-a715-8a94b283dfcf
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Colombia Tax Identification Number
+    id: df275e7b-40d0-4519-b668-59cee178df65
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Credit Card Number
+    id: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Croatia Driver's License Number
+    id: 005b3ef1-47dd-4e68-bb02-c6db484d00f2
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Croatia Identity Card Number
+    id: ff12f884-c20a-4189-b185-34c8e7258d47
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Croatia Passport Number
+    id: 7d7a729d-32d8-4204-8d01-d5e6a6c25581
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Croatia Personal Identification (OIB) Number
+    id: 31983b6d-db95-4eb2-a630-b44bd091968d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Croatia Physical Addresses
+    id: 34cf4670-97df-4752-97bc-f6a7b144f774
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Cyprus Driver's License Number
+    id: 356fa104-f9ac-4aff-a0e4-2e6e65ea06c4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Cyprus Identity Card
+    id: 3ba8afe5-7a6c-4929-8247-0001b6878438
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Cyprus Passport Number
+    id: 9193e2e8-7f8c-43c1-a274-ac40d651936f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Cyprus Physical Addresses
+    id: 1e87347d-47f8-40e7-9d9c-d54097d2f598
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Cyprus Tax Identification Number
+    id: 40e64bd9-55f3-4a09-9bd6-1db18dced9dd
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Czech Driver's License Number
+    id: 86b40d3b-d8ea-4c36-aab0-ef9416a6769c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Czech Personal Identity Number
+    id: 60c0725a-4eb6-455b-9dda-05d8a7396497
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Czech Republic Passport Number
+    id: 7bcd8ce8-5e92-4bbe-bc92-fa669f0369fa
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Czech Republic Physical Addresses
+    id: 75571732-c941-4cf3-8edc-db5a7bbc5e03
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Denmark Driver's License Number
+    id: 98a95812-6203-451a-a220-d39870ebef0e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Denmark Passport Number
+    id: 25e8c47e-e6fe-4884-a211-74898f8c0196
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Denmark Personal Identification Number
+    id: 6c4f2fef-56e1-4c00-8093-88d7a01cf460
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Denmark Physical Addresses
+    id: 06f4c2d4-77c2-415f-8495-75127051a61c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Diseases
+    id: 17066377-466d-43ff-997f-c9240414021c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Drug Enforcement Agency (DEA) Number
+    id: 9a5445ad-406e-43eb-8bd7-cac17ab6d0e4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Ecuador Unique Identification Number
+    id: bc99c8a0-95ea-410e-9b7c-05e51b02e469
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Estonia Driver's License Number
+    id: 51da8171-da70-4cc1-9d65-055a59ca4f83
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Estonia Passport Number
+    id: 61f7073a-509e-425b-a754-bc01bb5d5b8c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Estonia Personal Identification Code
+    id: bfb26de6-dad5-4d48-ab72-4789cdd0654c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Estonia Physical Addresses
+    id: 026cadfb-df9c-4633-8949-6dd9f9f4eb01
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: EU Debit Card Number
+    id: 0e9b3178-9678-47dd-a509-37222ca96b42
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: EU Driver's License Number
+    id: b8fe86d1-c056-453b-bfaa-9fe698699ecc
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: EU National Identification Number
+    id: 419f449f-6d9d-4be1-a154-b531f7a91b41
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: EU Passport Number
+    id: 21883626-6245-4f3d-9b61-5cbb43e625ee
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: EU Social Security Number (SSN) or Equivalent ID
+    id: d24e32a4-c0bb-4ba8-899d-6303b95742d9
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: EU Tax Identification Number (TIN)
+    id: e09c07d3-66e5-4783-989d-49ac62748f5f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Finland Driver's License Number
+    id: bb3b27a3-79bd-4ac4-81a7-f9fca3c7d1a7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Finland European Health Insurance Number
+    id: 60f75aed-81bf-4625-89b0-0846b9248ee7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Finland National ID
+    id: 338FD995-4CB5-4F87-AD35-79BD1DD926C1
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Finland Passport Number
+    id: d1685ac3-1d3a-40f8-8198-32ef5669c7a5
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Finland Physical Addresses
+    id: a7417d1f-eee9-4f88-8f43-e94e35677ff8
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: France Driver's License Number
+    id: 18e55a36-a01b-4b0f-943d-dc10282a1824
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: France Health Insurance Number
+    id: 9bc2069e-76df-4ff9-ac02-2f519469e236
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: France National ID Card (CNI)
+    id: f741ac74-1bc0-4665-b69b-f0c7f927c0c4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: France Passport Number
+    id: 3008b884-8c8c-4cd8-a289-99f34fc7ff5d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: France Physical Addresses
+    id: 674c3b99-2a5f-4698-ab29-81828328da9b
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: France Social Security Number (INSEE)
+    id: 71f62b97-efe0-4aa1-aa49-e14de253619d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: France Tax Identification Number (numéro SPI.)
+    id: ed59e77e-171d-442c-9ec1-88e2ebcb5b0a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: France Value Added Tax Number
+    id: 949121e6-ad9f-4379-8731-710342baea78
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: General Password
+    id: 24a90d49-519b-4689-aa13-f35c47cc40c3
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: General Symmetric Key
+    id: 664cfcd3-afdb-4fe2-b417-c2040ddd960d
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Generic Medication Names
+    id: d82f1c56-8eb9-4cf2-b279-43872774c7f6
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: German Driver's License Number
+    id: 91da9335-1edb-45b7-a95f-5fe41a16c63c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: German Passport Number
+    id: 2e3da144-d42b-47ed-b123-fbf78604e52c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Germany Identity Card Number
+    id: e577372f-c42e-47a0-9d85-bebed1c237d4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Germany Physical Addresses
+    id: d703beef-45ec-497f-bdcb-74e220e764b7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Germany Tax Identification Number
+    id: 43316a89-9880-40cf-b980-04bc7eefcec5
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Germany Value Added Tax Number
+    id: db177eb2-8811-4842-bffc-128c14aa219f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: GitHub Personal Access Token
+    id: 927cd1e7-8377-4df3-9bc3-fabdaef94787
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Google API key
+    id: 9bea20ec-764d-4987-88a1-093bbbacadd2
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Greece Driver's License Number
+    id: 7a2200b5-aacf-4e3c-ab36-136d3e68b7da
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Greece National ID Card
+    id: 82568215-1da1-46d3-874a-d2294d81b5ac
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Greece Passport Number
+    id: 7e65eb47-cdf9-4f52-8f90-2a27d5ee67e3
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Greece Physical Addresses
+    id: ec2e5fea-da77-4fb5-bc6f-75cd7642bac3
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Greece Social Security Number (AMKA)
+    id: e39b03f4-50ea-41ae-af7a-a4b9539596ad
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Greek Tax identification Number
+    id: 15a54a5a-53d4-4080-ad43-a2a4fe1d3bf7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Greenland Physical Addresses
+    id: 9135827f-a27c-4d6d-ba8c-69e166414b87
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Hong Kong Identity Card (HKID) Number
+    id: e63c28a7-ad29-4c17-a41a-3d2a0b70fd9c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Http Authorization Header
+    id: 193c16a6-58cb-4d8a-adf0-7cbad55e0734
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Hungarian Social Security Number (TAJ)
+    id: 0de78315-9537-47f5-95ab-b3e77eba3993
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Hungarian Value Added Tax Number
+    id: 976349a0-683b-477a-90f8-ff0a220d5592
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Hungary Driver's License Number
+    id: 9d31c46b-6e6b-444c-aeb1-6dd7e604bb24
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Hungary Passport Number
+    id: 5b483910-9aa7-4c99-9917-f4001464bda7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Hungary Personal Identification Number
+    id: 7b5cc218-7046-47d9-80c9-f325b50896ca
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Hungary Physical Addresses
+    id: 4dcc3216-d23f-40a0-a1ee-80ff322f599e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Hungary Tax identification Number
+    id: ede42eb4-59d9-49eb-9603-d7853fbda91d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Iceland Physical Addresses
+    id: dfb6646c-d21b-4318-8def-e55af142d881
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Impairments Listed In The U.S. Disability Evaluation Under Social Security
+    id: 88fd9212-9d63-451d-9c74-05a13ac6732a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: India Driver's License Number
+    id: 680788a3-53b6-455a-b891-c38cd76dc917
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: India GST Number
+    id: 9f5a721c-2fd2-446a-a27e-0c02fbe4630c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: India Permanent Account Number (PAN)
+    id: 2602bfee-9bb0-47a5-a7a6-2bf3053e2804
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: India Unique Identification (Aadhaar) Number
+    id: 1ca46b29-76f5-4f46-9383-cfa15e91048f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: India Voter Id Card
+    id: 646d643f-5228-4408-acc8-f2e81a6df897
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Indonesia Drivers License Number
+    id: 67d902ee-c3ce-44a2-81ac-e9746e7d60a1
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Indonesia Identity Card (KTP) Number
+    id: da68fdb0-f383-4981-8c86-82689d3b7d55
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Indonesia Passport Number
+    id: d0001c83-e72f-4360-98d3-f5a41dc5a380
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: International Banking Account Number (IBAN)
+    id: e7dc4711-11b7-4cb0-b88b-2c394a771f0e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: International Classification of Diseases (ICD-10-CM)
+    id: 3356946c-6bb7-449b-b253-6ffa419c0ce7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: International Classification of Diseases (ICD-9-CM)
+    id: fa3f9c74-ee07-4c52-b5f2-085d6b2c0ec4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: IP Address
+    id: 1daa4ad5-e2dd-4ca4-a788-54722c09efb2
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: IP Address v4
+    id: a7dd5e5f-e7f9-4626-a2c6-86a8cb6830d2
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: IP Address v6
+    id: 3f691089-7413-4926-ab3b-3c5ea8a1c17e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Ireland Driver's License Number
+    id: e01bccd9-eb4d-414f-ace1-e9b6a4c4a2ca
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Ireland Passport Number
+    id: a2130f27-9ee2-4103-84f9-a6b1ee7d0cbf
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Ireland Personal Public Service (PPS) Number
+    id: 1cdb674d-c19a-4fcf-9f4b-7f56cc87345a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Ireland Physical Addresses
+    id: 651646de-f4dd-4e7c-91ad-8679d8049bfa
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Israel Bank Account Number
+    id: 7d08b2ff-a0b9-437f-957c-aeddbf9b2b25
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Israel National ID
+    id: e05881f5-1db1-418c-89aa-a3ac5c5277ee
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Italy Driver's License Number
+    id: 97d6244f-9157-41bd-8e0c-9d669a5c4d71
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Italy Fiscal Code
+    id: 4cd79172-8da9-4ff5-9188-98b1e7e2eca6
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Italy Passport Number
+    id: 39811019-4750-445f-b26d-4c0e6c431544
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Italy Physical Addresses
+    id: 3270dbe0-d63b-4dde-8aa4-bc6f19f8a802
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Italy Value Added Tax Number
+    id: 26a8cc07-2283-4a2a-ab1d-4ab643c4c67f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Japan Bank Account Number
+    id: d354f95b-96ee-4b80-80bc-4377312b55bc
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Japan Driver's License Number
+    id: c6011143-d087-451c-8313-7f6d4aed2270
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Japan Passport Number
+    id: 75177310-1a09-4613-bf6d-833aae3743f8
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Japan Physical Addresses
+    id: 19289d79-b636-40b3-a92b-817ec7133531
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Japan Resident Registration Number
+    id: 01c1209b-6389-4faf-a5f8-3f7e13899652
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Japan Social Insurance Number (SIN)
+    id: c840e719-0896-45bb-84fd-1ed5c95e45ff
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Japanese My Number Corporate
+    id: 9e0eaf79-ff20-4ffb-b3e4-e7368d5db6ff
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Japanese My Number Personal
+    id: 98da8e66-7299-4ebd-9f82-c871ab37d3ef
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Japanese Residence Card Number
+    id: ac36fef2-a289-4e2c-bb48-b02366e89fc0
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Korea Physical Addresses
+    id: 56967ee6-421b-412a-8076-653d97164620
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Lab Test Terms
+    id: ee05bb9c-7b87-42e1-9987-446b243245d5
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Latvia Driver's License Number
+    id: ec996de0-30f2-46b1-b192-4d2ff8805fa7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Latvia Passport Number
+    id: 23ae25ec-cc28-421b-b77a-3054eadf1ede
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Latvia Personal Code
+    id: 03fcf763-27c2-49ed-9422-2641c6c895c9
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Latvia Physical Addresses
+    id: 92a71ddd-1acc-4aca-ac8e-94db01841e1c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Liechtenstein Physical Addresses
+    id: 83127ddf-b7c7-4938-8c81-8b08d65bbb5f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Lifestyles That Relate To Medical Conditions
+    id: 7740d4dd-4f07-452b-b039-6c8dab0ba5bc
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Lithuania Driver's License Number
+    id: 86f7628b-e0f4-4dc3-9fbc-e4300e4c7d78
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Lithuania Passport Number
+    id: 1b79900f-047b-4c3f-846f-7d73b5534bce
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Lithuania Personal Code
+    id: cd6d3786-8ec3-4524-a2cf-1e0095379171
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Lithuania Physical Addresses
+    id: cdde1960-c72b-4705-b56f-606570fc33bc
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Luxembourg Driver's License Number
+    id: 89daf717-1544-4860-9a2e-fc9166dd8852
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Luxembourg National Identification Number (Natural persons)
+    id: aaf661ed-29ec-426d-8bf9-880cad298ebb
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Luxembourg National Identification Number (Non-natural persons)
+    id: 84bffa3a-d805-4788-a613-b1e4df3804cf
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Luxembourg Passport Number
+    id: 81d5c027-bed9-4421-91a0-3b2e55b3eb85
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Luxembourg Physical Addresses
+    id: 1626e616-84a4-401b-b062-d12f6ad470a6
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Malaysia Identity Card Number
+    id: 7f0e921c-9677-435b-aba2-bb8f1013c749
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Malaysia Passport Number
+    id: 62ea2a27-798e-4de3-a31f-a54c5d02ff37
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Malta Driver's License Number
+    id: a3bdaa4a-8371-4735-8fa5-56ee0fb4afc4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Malta Identity Card Number
+    id: 854b36b3-a388-4ac8-a4ec-677c2b5e4356
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Malta Passport Number
+    id: b2b21198-48f9-4d13-b2a5-03969bff0fb8
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Malta Physical Addresses
+    id: e18f8702-ef56-4db5-be2b-98c205dc2e3e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Malta Tax ID Number
+    id: ec830c63-65f4-45d0-9d8c-910dc8334b20
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Medical Specialties
+    id: a430ac76-0141-4378-b5fd-293e65890d48
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Medicare Beneficiary Identifier (MBI) card
+    id: f753a286-f5cc-47e6-a592-4be25fd02591
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Mexico Unique Population Registry Code (CURP)
+    id: e905ad4d-5a74-406d-bf36-b1efca798af4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Microsoft Bing Maps Key
+    id: c1ce0e56-014f-40c0-a268-e702117a60e3
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Microsoft Entra Client Access Token
+    id: f61444f3-b87e-4c16-b835-b588033db6b7
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Microsoft Entra Client Secret
+    id: d820a2f1-46ef-4220-957e-6eb9abc1aadb
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Microsoft Entra User Credentials
+    id: b7d05856-6d0a-4488-b4a8-1b5c48bab75a
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Netherlands Citizen's Service (BSN) Number
+    id: c5f54253-ef7e-44f6-a578-440ed67e946d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Netherlands Driver's License Number
+    id: 6247fbea-ab80-4be5-8233-308b7c031401
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Netherlands Passport Number
+    id: 61786727-bafd-45f6-94d9-888d815e228e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Netherlands Physical Addresses
+    id: b3650e47-f2dc-4d29-a4fc-1b9154005c07
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Netherlands Tax Identification Number
+    id: 01f42a64-eba7-4892-a67b-398237e4ade2
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Netherlands Value Added Tax Number
+    id: 4f320d9b-4972-41ae-b337-88d499bb1ade
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: New Zealand bank account number
+    id: 1a97fc2b-dd2f-48f1-bc4e-2ddf25813956
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: New Zealand Driver License Number
+    id: 1924b377-d287-49c9-a737-cfe7a8a2615a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: New Zealand Inland Revenue number
+    id: dd0fe2bc-7bcf-455f-bac1-83b1e3eb25fd
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: New Zealand Ministry of Health Number
+    id: 2b71c1c8-d14e-4430-82dc-fd1ed6bf05c7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: New Zealand Physical Addresses
+    id: 0fe7f6b1-b287-421c-9286-3a5fb7bc208c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: New Zealand Social Welfare Number
+    id: 20f3c48d-4ac1-4cd2-86bd-34ecc1826e9d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Norway Identity Number
+    id: d4c8a798-e9f2-4bd3-9652-500d24080fc3
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Norway Physical Addresses
+    id: 8751dcac-e02a-490a-bdf2-aff90ce09f84
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Philippines National ID
+    id: 3257da62-3d98-44ca-a923-6f8b0cd94b7f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Philippines Passport Number
+    id: 6fa57f91-314a-4561-8248-7ab921957448
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Philippines Unified Multi-Purpose ID Number
+    id: 019b39dd-8c25-4765-91a3-d9c6baf3c3b3
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Poland Driver's License Number
+    id: 24d51f99-ee9e-4060-a077-cae58cab1ee4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Poland Identity Card
+    id: 25E64989-ED5D-40CA-A939-6C14183BB7BF
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Poland National ID (PESEL)
+    id: E3AAF206-4297-412F-9E06-BA8487E22456
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Poland Passport
+    id: 03937FB5-D2B6-4487-B61F-0F8BFF7C3517
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Poland Physical Addresses
+    id: ed728544-c58d-470d-9bde-ee6ec901f38d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Poland Tax Identification Number
+    id: 1ff28b4d-40f2-49e9-b677-9606a88e2bca
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Polish REGON Number
+    id: fc87b421-f437-4f8b-b739-29a735ead0d9
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Portugal Citizen Card Number
+    id: 91a7ece2-add4-4986-9a15-c84544d81ecd
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Portugal Driver's License Number
+    id: 977f1e5a-2c33-4bcc-b516-95bb275cff23
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Portugal Passport Number
+    id: 080a52fd-a7bc-431e-b54d-51f08f59db11
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Portugal Tax Identification Number
+    id: 65372402-3131-4f1e-9983-4439841d1f15
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Portuguese Physical Addresses
+    id: eda085a4-1f9b-46ca-8f1f-885ef394a476
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Qatari ID Card Number
+    id: 52b1b60e-a4be-4b5a-a67b-6f9bbb7811da
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Romania Driver's License Number
+    id: b5511ace-2fd8-4ae4-b6fc-c7c6e4689e3c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Romania Passport Number
+    id: 5d31b90c-7fe2-4a76-a14b-767b8fd19d6c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Romania Personal Numerical Code (CNP)
+    id: eb5fa399-fe28-4c67-8188-d63a616ed89c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Romania Physical Addresses
+    id: e3a1f6fc-92f9-4b1c-b3fb-94b182cdc3ed
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Russia Physical Addresses
+    id: 515c522b-ce04-4a40-816b-8226f26c65e7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Russian Passport Number (Domestic)
+    id: 76ec2f5d-cedb-48e1-8070-1998794af445
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Russian Passport Number (International)
+    id: ac5f4878-75e4-4b82-af2d-02e13ea9f411
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Russian Taxpayer Identification Number
+    id: 81145f47-868a-464c-956a-eed7696fdcdf
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Saudi Arabia National ID
+    id: 8c5a0ba8-404a-41a3-8871-746aa21ee6c0
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Singapore Driving License Number
+    id: beaa54d7-ec6a-4160-a37b-f3916b68934b
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Singapore National Registration Identity Card (NRIC) Number
+    id: cead390a-dd83-4856-9751-fb6dc98c34da
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Singapore Passport Number
+    id: 4081ae73-c4ec-405d-932c-8b36ae35b20c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Singapore Physical Addresses
+    id: 6dee3dcd-0946-48a8-b49e-e3596b671fc5
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Slack Access Token
+    id: 1ac53bfc-5956-49ae-b4b6-7087bf0cfc88
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: Slovakia Driver's License Number
+    id: 14240c22-b6de-4ce5-a90b-137f74252513
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Slovakia Passport Number
+    id: 238e1f08-d80e-4793-af33-9b57918335b7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Slovakia Personal Number
+    id: 951c26b7-3b35-4f73-924b-15dd599cb9ab
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Slovakia Physical Addresses
+    id: 1b342635-f7dc-4e15-a288-3f7e02c93169
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Slovenia Driver's License Number
+    id: d5bc089a-f2ee-433d-a6b1-5c253051d6f2
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Slovenia Passport Number
+    id: 235b7976-7bbe-4df5-bb40-08678e749d1a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Slovenia Physical Addresses
+    id: 0b76dc4d-cf09-4174-b334-fc72e1b38bb9
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Slovenia Tax Identification Number
+    id: e47b071e-c352-4d70-8241-8c215ad65505
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Slovenia Unique Master Citizen Number
+    id: 68948b27-803d-41e4-adf1-13e05eb541bb
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: South Africa Identification Number
+    id: e2adf7cb-8ea6-4048-a2ed-d89eb65f2780
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: South Africa Physical Addresses
+    id: 0311f67f-d239-4f57-bde7-bd76253576eb
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: South Korea Driver's License Number
+    id: 3da0b024-4c08-406b-9f9e-de96accd0209
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: South Korea Passport Number
+    id: cb725748-0f69-4282-8a03-e9b222a10a18
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: South Korea Resident Registration Number
+    id: 5b802e18-ba80-44c4-bc83-bf2ad36ae36a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Spain DNI
+    id: 8e6251b9-47b4-40e8-a42b-0f80876be192
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Spain Driver's License Number
+    id: d5a82922-b501-4f40-8868-341321146aa2
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Spain Passport Number
+    id: d17a57de-9fa5-4e9f-85d3-85c26d89686e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Spain Physical Addresses
+    id: 36c81f62-73f6-4f62-8350-2a809cb27ff6
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Spain Social Security Number (SSN)
+    id: 5df987c0-8eae-4bce-ace7-b316347f3070
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Spain Tax Identification Number
+    id: 10f0d113-b0e1-47dc-872a-a4f45b9376a3
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: SQL Server Connection String
+    id: e76b6205-d3cb-46f2-bd63-c90153f2f97d
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Surgical Procedures
+    id: daee7349-84f5-48ec-81c9-f6fafc7c976f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Sweden Driver's License Number
+    id: 70088720-90dd-47f5-805e-5525f3567391
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Sweden National ID
+    id: f69aaf40-79be-4fac-8f05-fd1910d272c8
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Sweden Passport Number
+    id: ba4e7456-55a9-4d89-9140-c33673553526
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Sweden Physical Addresses
+    id: 99d64fe7-8168-4cb8-9e8f-882444b4375a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Sweden Tax Identification Number
+    id: 139acba0-a5bc-4fbb-876d-f7a493ae8a40
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: SWIFT Code
+    id: cb2ab58c-9cb8-4c81-baf8-a4e106791df4
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Swiss Social Security Number AHV
+    id: 277cfa4b-6eaa-4a1b-9492-099dec849971
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Switzerland Physical Addresses
+    id: 0741710b-c0b5-400c-98a7-864942ac89be
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Taiwan National ID
+    id: 4C7BFC34-8DD1-421D-8FB7-6C6182C2AF03
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Taiwan Passport Number
+    id: e7251cb4-4c2c-41df-963e-924eb3dae04a
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Taiwan Physical Addresses
+    id: 7964a3bf-18fd-4e6c-a04e-d72f0cf4941c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Taiwan Resident Certificate (ARC/TARC)
+    id: 48269fec-05ea-46ea-b326-f5623a58c6e9
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Thai Population Identification Code
+    id: 44ca9e86-ead7-4c5d-884a-e2eaa401515e
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Turkey Physical Addresses
+    id: cf1d79ec-3162-49a8-9bcd-3cbeda2a3439
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: Turkish National Identification number
+    id: fb621f20-3876-4cfc-acec-8c8e73ca32c7
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Types Of Medication
+    id: f6dc2d17-3549-41e2-af29-ae1846ae9542
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: U.K. Driver's License Number
+    id: f93de4be-d94c-40df-a8be-461738047551
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: U.K. Electoral Roll Number
+    id: a3eea206-dc0c-4f06-9e22-aa1be3059963
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: U.K. National Health Service Number
+    id: 3192014e-2a16-44e9-aa69-4b20375c9a78
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: U.K. National Insurance Number (NINO)
+    id: 16c07343-c26f-49d2-a987-3daf717e94cc
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: U.K. Physical Addresses
+    id: accaf4c2-fb54-40f7-aea8-db0e36a2e9eb
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: U.K. Unique Taxpayer Reference Number
+    id: ad4a8116-0db8-439a-b545-6d967642f0ec
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: U.S. / U.K. Passport Number
+    id: 178ec42a-18b4-47cc-85c7-d62c92fd67f8
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: U.S. Bank Account Number
+    id: a2ce32a8-f935-4bb6-8e96-2a5157672e2c
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: U.S. Driver's License Number
+    id: dfeb356f-61cd-459e-bf0f-7c6d28b458c6
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: U.S. Individual Taxpayer Identification Number (ITIN)
+    id: e55e2a32-f92d-4985-a35d-a0b269eb687b
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: U.S. Physical Addresses
+    id: 44aa44f2-63d1-41df-af0d-970283ac41e2
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: U.S. Social Security Number (SSN)
+    id: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: UAE Identity Card Number
+    id: 853a8051-ad90-417c-9345-c73ac0adc1c3
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: UAE Passport Number
+    id: 111b5e63-6f4e-47c6-99bc-dd95625a5acf
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Ukraine Passport Number (Domestic)
+    id: 1817a540-221f-4459-9202-3bd78b81d803
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Ukraine Passport Number (International)
+    id: cfbe032d-22e0-4f28-ab68-d66e9641f1e2
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000000
+  - name: Ukraine Physical Addresses
+    id: 97bbd986-e9a8-47e9-91d0-3eb20fdb978f
+    publisher: Microsoft Corporation
+    type: Entity
+    rulePackId: 00000000-0000-0000-0000-000000000004
+  - name: User Login Credentials
+    id: 2de77d45-9d47-4ce2-990d-18e26b487194
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008
+  - name: X.509 Certificate Private Key
+    id: 417b111d-1909-4457-b686-d6470b29a7ec
+    publisher: Microsoft Corporation
+    type: Credential
+    rulePackId: 00000000-0000-0000-0000-000000000008

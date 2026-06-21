@@ -1,0 +1,150 @@
+name: PR Owner Gate
+
+# Intentionally NOT gated to actor.login. The sticky comment communicates
+# PR readiness state to any contributor and to the lab owner; it does not
+# itself apply `owner-approved` (that is `pr-auto-merge.yml`, which IS
+# gated to actor.login == 'contoso').
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize, labeled, unlabeled]
+
+permissions:
+  pull-requests: write
+  statuses: write
+  checks: write
+
+jobs:
+  # The job key MUST be a valid GitHub Actions identifier
+  # (`[a-zA-Z_][a-zA-Z0-9_-]*`); spaces in the key make every push event
+  # produce a zero-jobs failed workflow_run. See issue #115.
+  # Reference: https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions#jobsjob_id
+  #
+  # The user-visible job name (and the string a future branch-protection
+  # rule would reference under `required_status_checks.contexts`) is set
+  # by the `name:` field below — keep it in sync with any branch
+  # protection rule that names this check.
+  # Reference: https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions#jobsjob_idname
+  sticky-owner-prompt:
+    name: Sticky owner approval prompt
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Get PR context
+        id: pr-context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No open PR found for this event. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+          LABELS=$(gh pr view "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --json labels \
+            --jq '.labels[].name')
+
+          echo "labels<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$LABELS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+          HAS_NEEDS_REVIEW=$(echo "$LABELS" | grep -c "needs-review" || true)
+          HAS_APPROVED=$(echo "$LABELS" | grep -c "owner-approved" || true)
+          echo "has_needs_review=$HAS_NEEDS_REVIEW" >> "$GITHUB_OUTPUT"
+          echo "has_approved=$HAS_APPROVED" >> "$GITHUB_OUTPUT"
+
+      - name: Determine check state
+        id: check-state
+        if: steps.pr-context.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ steps.pr-context.outputs.pr_number }}"
+
+          HEAD_SHA=$(gh pr view "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --json headRefOid \
+            --jq '.headRefOid')
+
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+          CHECKS=$(gh api \
+            "repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs" \
+            --jq '.check_runs[] | select(.name != "Sticky owner approval prompt") | .conclusion' \
+            2>/dev/null || echo "")
+
+          if echo "$CHECKS" | grep -q "failure"; then
+            echo "checks_state=failing" >> "$GITHUB_OUTPUT"
+          elif echo "$CHECKS" | grep -q "null"; then
+            echo "checks_state=running" >> "$GITHUB_OUTPUT"
+          else
+            echo "checks_state=passing" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upsert sticky comment
+        if: steps.pr-context.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ steps.pr-context.outputs.pr_number }}"
+          HAS_NEEDS_REVIEW="${{ steps.pr-context.outputs.has_needs_review }}"
+          HAS_APPROVED="${{ steps.pr-context.outputs.has_approved }}"
+          CHECKS_STATE="${{ steps.check-state.outputs.checks_state }}"
+          MARKER="<!-- pr-owner-gate:prompt -->"
+
+          if [ "$HAS_APPROVED" -gt 0 ]; then
+            STATE_MSG="**This PR has been approved by the lab owner.** The \`owner-approved\` label has been applied. The \`pr-auto-merge\` workflow will enable auto-merge with squash."
+          elif [ "$HAS_NEEDS_REVIEW" = "0" ]; then
+            STATE_MSG="**Missing \`needs-review\` label.** This PR was not filed through \`@idea-intake\`. Add the label manually if this is intentional."
+          elif [ "$CHECKS_STATE" = "running" ]; then
+            STATE_MSG="**Checks are running.** Waiting for all status checks to complete before owner approval is available."
+          elif [ "$CHECKS_STATE" = "failing" ]; then
+            STATE_MSG="**One or more checks are failing.** Please resolve check failures before requesting owner approval."
+          else
+            STATE_MSG="**Ready for lab-owner approval.** All checks are passing and this PR carries \`needs-review\`."$'\n\n'"To approve, run \`@owner-approval\` in Copilot Chat, or run:"$'\n'"\`\`\`"$'\n'"gh pr edit $PR_NUMBER --add-label owner-approved"$'\n'"\`\`\`"
+          fi
+
+          COMMENT_BODY="${MARKER}
+
+          ## Owner Gate
+
+          ${STATE_MSG}
+
+          ---
+          *This comment is maintained automatically by the \`pr-owner-gate\` workflow. It updates on every push and label change. Re-toggle the \`needs-review\` label to refresh after a check completes.*"
+
+          EXISTING_ID=$(gh api \
+            "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" \
+            2>/dev/null | head -1)
+
+          if [ -n "$EXISTING_ID" ]; then
+            gh api -X PATCH \
+              "repos/${{ github.repository }}/issues/comments/$EXISTING_ID" \
+              -f body="$COMMENT_BODY"
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "${{ github.repository }}" \
+              --body "$COMMENT_BODY"
+          fi
+
+      - name: Report check result
+        if: steps.pr-context.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          HAS_APPROVED="${{ steps.pr-context.outputs.has_approved }}"
+
+          if [ "$HAS_APPROVED" -gt 0 ]; then
+            echo "Owner approval confirmed. Check passes."
+            exit 0
+          else
+            echo "Awaiting owner approval."
+            exit 0
+          fi

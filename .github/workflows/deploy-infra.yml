@@ -1,0 +1,52 @@
+name: deploy-infra
+
+# Manual-dispatch only until Wave 0 ships OIDC federated credentials
+# (scripts/New-AutomationIdentity.ps1) and the Purview account exists.
+# Re-add the `push:` trigger in the same PR that lands those deliverables.
+# Reference: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC federated login to Entra
+  contents: read
+
+env:
+  LOCATION: eastus
+  RESOURCE_GROUP: rg-purview-lab
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: lab
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Verify resource group exists
+        # The deploy identity is Contributor scoped to the resource group (least
+        # privilege per ADR 0010), so it cannot create the group — that is a
+        # subscription-scope write (`resourcegroups/write`). The resource group is
+        # a deployment prerequisite provisioned during bootstrap; verify it exists
+        # (a read the RG-scoped identity is allowed) rather than create it.
+        run: az group show -n "$RESOURCE_GROUP" -o none
+
+      - name: What-If
+        run: |
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.bicepparam
+
+      - name: Deploy
+        run: |
+          az deployment group create \
+            --resource-group "$RESOURCE_GROUP" \
+            --template-file infra/main.bicep \
+            --parameters infra/main.bicepparam

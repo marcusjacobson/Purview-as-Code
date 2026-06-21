@@ -1,0 +1,103 @@
+# Microsoft Purview as-Code -- DSPM lab configuration (desired state)
+#
+# Wave 3a (issue #74) Phase 1 scaffold. The Microsoft Purview Data
+# Security Posture Management (DSPM) dashboard is an aggregator
+# rendered in the Microsoft Purview portal; it consumes signals the
+# lab already authors in earlier waves (sensitivity labels, custom
+# SITs, DLP, IRM, the unified audit log). This file does NOT create
+# a "DSPM policy" object -- no such cmdlet surface exists. It declares:
+#
+#   1. The scope of Content Explorer harvesting (which labels, which
+#      SITs, which workloads).
+#   2. The cadence and persistence knobs the exporter enforces, per
+#      ADR 0021.
+#
+# Schema: ./dspm-config.schema.json (Draft-07).
+#
+# Two scripts consume this file:
+#
+#   scripts/Test-DSPMPosture.ps1
+#       Read-only verifier. Validates the schema, confirms the
+#       referenced upstream YAMLs exist and are non-empty (where
+#       appropriate), and -- when -ConnectTenant is supplied --
+#       checks that the unified audit log is enabled
+#       (Get-AdminAuditLogConfig) and that the
+#       'ContentExplorerListViewer' role group exists in the tenant.
+#       Emits a posture summary table; makes no writes.
+#
+#   scripts/Export-ContentExplorerData.ps1
+#       Read-only exporter. Iterates the resolved scope and calls
+#       Get-ContentExplorerData once per (item, Workload) pair,
+#       writing one JSON per pair plus a manifest.json into
+#       verify-dspm-export-output/<YYYY-MM-DD-HHmm>/. Throttle and
+#       retry knobs come from the export block below. The
+#       artifactDir is gitignored -- exports never land in source.
+#
+# Default state (Phase 1):
+#   * labels.include = "all"  -- pull every published label from
+#     data-plane/information-protection/labels.yaml once that file
+#     is hydrated.
+#   * sits.include   = "all"  -- pull every lab-authored custom SIT
+#     from data-plane/classifications/classifications.yaml only.
+#     The Microsoft reference catalog data-plane/classifications/sit-catalog.yaml
+#     (327 entries) was removed from scope.sits.sources during the
+#     v2 §5.4 drift closure (issue #366) -- enumerating it pushes the
+#     weekly run plan above the ~25-entry ceiling ADR 0021 "Harder"
+#     section warns about and burns Get-ContentExplorerData quota on
+#     SITs the lab has not actually applied. The catalog file is
+#     retained as a GUID lookup for IP / DLP per ADR 0016 §4; nothing
+#     about that usage changes. Opt-in re-introduction of selected
+#     built-in SITs is tracked as a separate follow-up.
+#   * workloads        = all four supported by Get-ContentExplorerData.
+#   * cadence          = "weekly"   per ADR 0021 Decision 1.
+#   * retentionDays    = 90         per ADR 0021 Decision 5 (mirrors
+#                                   audit retention horizon).
+#   * throttleSeconds  = 1          per ADR 0021 Decision 6.
+#   * maxRetries       = 3          per ADR 0021 Decision 6.
+#
+# Deferred to Phase 2 (separate follow-up issue, mirrors the
+# #267 / #271 cadence the lab uses for apply-path hardening):
+#   * .github/workflows/export-content-explorer.yml -- the cron
+#     wrapper that schedules Export-ContentExplorerData.ps1 weekly and
+#     uploads verify-dspm-export-output/ as a 90-day GitHub Actions
+#     artifact.
+#   * Adding the data-plane workload identity to the
+#     'ContentExplorerListViewer' role group (current members: []).
+#     Until that assignment exists, Get-ContentExplorerData returns
+#     401/403 and the exporter exits non-zero -- expected.
+#   * Live tenant smoke run of the exporter and the resulting JSON
+#     shape contract test.
+#
+# References:
+#   Microsoft Purview DSPM overview:
+#     https://learn.microsoft.com/en-us/purview/dspm
+#   Get started with DSPM:
+#     https://learn.microsoft.com/en-us/purview/dspm-get-started
+#   Content Explorer:
+#     https://learn.microsoft.com/en-us/purview/data-classification-content-explorer
+#   Get-ContentExplorerData (S&C PowerShell):
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-contentexplorerdata
+#   ADR 0021 (cadence + scope + retention):
+#     docs/adr/0021-dspm-content-explorer-cadence.md
+
+scope:
+  labels:
+    sources:
+      - data-plane/information-protection/labels.yaml
+    include: all
+  sits:
+    sources:
+      - data-plane/classifications/classifications.yaml
+    include: all
+  workloads:
+    - Exchange
+    - SharePoint
+    - OneDrive
+    - Teams
+
+export:
+  cadence: weekly
+  artifactDir: verify-dspm-export-output
+  retentionDays: 90
+  throttleSeconds: 1
+  maxRetries: 3

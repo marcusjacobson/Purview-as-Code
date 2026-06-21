@@ -1,0 +1,82 @@
+name: Issue Triage — Squad Routing
+
+# Intentionally NOT gated to actor.login. Routing labels (`squad:*`) are
+# useful triage signal for issues filed by any actor; the labels do not
+# imply owner-readiness for merge (that is `needs-review`, applied only
+# to lab-owner-filed issues by `idea-intake-autoadd.yml`).
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  route-to-squad:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure squad labels exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create "squad:lead-architect" --color "0075ca" \
+            --description "Routed to Lead Architect persona" \
+            --repo "${{ github.repository }}" || true
+          gh label create "squad:security-specialist" --color "e4e669" \
+            --description "Routed to Security Specialist persona" \
+            --repo "${{ github.repository }}" || true
+          gh label create "squad:automation-engineer" --color "0052cc" \
+            --description "Routed to Automation Engineer persona" \
+            --repo "${{ github.repository }}" || true
+          gh label create "squad:tester-validator" --color "5319e7" \
+            --description "Routed to Tester/Validator persona" \
+            --repo "${{ github.repository }}" || true
+          gh label create "squad:scribe" --color "bfd4f2" \
+            --description "Routed to Scribe persona" \
+            --repo "${{ github.repository }}" || true
+
+      - name: Route issue to squad persona
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          COMBINED="${ISSUE_TITLE} ${ISSUE_BODY}"
+          COMBINED_LOWER=$(echo "$COMBINED" | tr '[:upper:]' '[:lower:]')
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          REPO="${{ github.repository }}"
+
+          # Note: Keyword routing is intentionally additive — an issue may receive multiple squad
+          # labels when it spans domains. The primary persona is determined by the issue body's
+          # ## Squad Personas section (written by @idea-intake).
+
+          # Lead / Architect: architecture, ADRs, framework decisions, roadmap
+          if echo "$COMBINED_LOWER" | grep -qE \
+            'architecture|adr|decision record|roadmap|framework|cross-workstream|governance framework|tiebreaker|design pattern'; then
+            gh issue edit "$ISSUE_NUMBER" --add-label "squad:lead-architect" --repo "$REPO"
+          fi
+
+          # Security Specialist: security, compliance, policy, DLP, sensitivity labels, IRM, retention
+          if echo "$COMBINED_LOWER" | grep -qE \
+            'security|compliance|policy|dlp|data loss prevention|sensitivity label|insider risk|retention|audit log|dspm|role-gating|access control|conditional access|entra|identity protection'; then
+            gh issue edit "$ISSUE_NUMBER" --add-label "squad:security-specialist" --repo "$REPO"
+          fi
+
+          # Automation Engineer: scripts, PowerShell, Graph or Purview REST, automation, scheduling, data sources, scans, classifications
+          if echo "$COMBINED_LOWER" | grep -qE \
+            'script|powershell|graph api|purview rest|automation|schedule|reporting|pipeline|bulk|cmdlet|deploy script|data source|scan|classification|catalog|onboard|reconciler'; then
+            gh issue edit "$ISSUE_NUMBER" --add-label "squad:automation-engineer" --repo "$REPO"
+          fi
+
+          # Tester / Validator: testing, validation, UAT, QA, lab smoke, acceptance, exit criteria
+          if echo "$COMBINED_LOWER" | grep -qE \
+            'test|validation|uat|qa|quality assurance|acceptance criteria|exit criteria|verify|checklist|scenario|simulation|whatif|what-if'; then
+            gh issue edit "$ISSUE_NUMBER" --add-label "squad:tester-validator" --repo "$REPO"
+          fi
+
+          # Scribe: documentation, decisions, memory, context, runbook, notes
+          if echo "$COMBINED_LOWER" | grep -qE \
+            'document|notes|minutes|decisions|memory|context|scribe|runbook|guide|summary|write up|record'; then
+            gh issue edit "$ISSUE_NUMBER" --add-label "squad:scribe" --repo "$REPO"
+          fi

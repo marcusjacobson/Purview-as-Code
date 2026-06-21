@@ -1,0 +1,121 @@
+# Registered data sources (desired state).
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/data-sources
+# Reference: https://learn.microsoft.com/en-us/purview/data-map-data-scan-credentials
+#
+# Notes:
+# - `properties.collection.referenceName` must target an existing collection.
+# - `properties.credential` holds only Key Vault references (never secret values).
+# - For sources that support it, prefer `authType: ManagedIdentity`.
+# - Real Azure topology IDs (subscription, tenant) are committed as
+#   `${env:AZURE_SUBSCRIPTION_ID}` / `${env:AZURE_TENANT_ID}` per ADR 0023
+#   and resolved by scripts/Resolve-EnvTokens.ps1 at apply time.
+
+dataSources:
+  - name: AzureBlob-SampleData
+    kind: AzureStorage
+    properties:
+      endpoint: "https://stcontosolabblob.blob.core.windows.net/"
+      location: westus2
+      resourceName: stcontosolabblob
+      resourceGroup: rg-storage
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-storage/providers/Microsoft.Storage/storageAccounts/stcontosolabblob"
+      collection:
+        referenceName: jprasm
+      dataUseGovernance: Disabled
+  - name: AzureDataExplorer-TestData
+    kind: AzureDataExplorer
+    properties:
+      endpoint: "https://adxcontosolab.westus2.kusto.windows.net"
+      location: westus2
+      resourceName: adxcontosolab
+      resourceGroup: rg-dataexplorer
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-dataexplorer/providers/Microsoft.Kusto/Clusters/adxcontosolab"
+      collection:
+        referenceName: "4khzmw"
+      dataUseGovernance: Disabled
+      enableAzureDataExplorerFunctionsScan: false
+  - name: AzureDataLakeStorage-SynapseDL-TestData
+    kind: AdlsGen2
+    properties:
+      endpoint: "https://stcontosolabsynapse.dfs.core.windows.net/"
+      location: westus2
+      resourceName: stcontosolabsynapse
+      resourceGroup: rg-synapse
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-synapse/providers/Microsoft.Storage/storageAccounts/stcontosolabsynapse"
+      collection:
+        referenceName: c0fsrh
+      dataUseGovernance: Disabled
+  - name: AzureDataLakeStorage-TestData
+    kind: AdlsGen2
+    properties:
+      endpoint: "https://stcontosolabadls.dfs.core.windows.net/"
+      location: westus2
+      resourceName: stcontosolabadls
+      resourceGroup: rg-storage
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-storage/providers/Microsoft.Storage/storageAccounts/stcontosolabadls"
+      collection:
+        referenceName: js1tih
+      dataUseGovernance: Disabled
+  - name: AzureSqlDatabase-Test1
+    kind: AzureSqlDatabase
+    properties:
+      serverEndpoint: sql-contosolab-demo.database.windows.net
+      location: westus2
+      resourceName: sql-contosolab-demo
+      resourceGroup: rg-azuresql
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-azuresql/providers/Microsoft.Sql/servers/sql-contosolab-demo"
+      collection:
+        referenceName: bbot46
+      dataUseGovernance: Disabled
+  - name: AzureSynapseAnalytics-RegulatedFinanceReporting
+    kind: AzureSynapseWorkspace
+    properties:
+      dedicatedSqlEndpoint: synw-contosolab.sql.azuresynapse.net
+      serverlessSqlEndpoint: synw-contosolab-ondemand.sql.azuresynapse.net
+      location: westus2
+      resourceName: synw-contosolab
+      resourceGroup: rg-synapse
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-synapse/providers/Microsoft.Synapse/workspaces/synw-contosolab"
+      collection:
+        referenceName: c0fsrh
+      dataUseGovernance: Disabled
+  - name: DatabricksUnityCatalog-TestData
+    kind: DatabricksUnityCatalog
+    properties:
+      collection:
+        referenceName: "4k3yky"
+      metastoreId: "${env:DATABRICKS_METASTORE_ID}"
+      policyConnectionName: ""
+  - name: Dataverse-TestData
+    kind: Dataverse
+    properties:
+      webApiEndpoint: "https://org5146e274.crm.dynamics.com/api/data/v9.2"
+      collection:
+        referenceName: cqyzoe
+  - name: Fabric-Main
+    kind: Fabric
+    properties:
+      host: api.powerbi.com
+      tenant: "${env:AZURE_TENANT_ID}"
+      collection:
+        referenceName: ncu25o
+  - name: MySql-TestData
+    kind: MySql
+    properties:
+      host: mysql-contosolab-flex.mysql.database.azure.com
+      port: 3306
+      collection:
+        referenceName: "85cv3o"
+  - name: PostgreSQL-TestData
+    kind: PostgreSql
+    properties:
+      host: psql-contosolab-flex.postgres.database.azure.com
+      port: 5432
+      collection:
+        referenceName: a5oe4c

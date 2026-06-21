@@ -1,0 +1,423 @@
+# Microsoft Purview as-Code — Portal role-group membership (desired state)
+#
+# Desired state for Microsoft Purview / Microsoft 365 portal role-group
+# membership in the `contoso.onmicrosoft.com` tenant. These role groups are a
+# Microsoft 365 compliance-portal construct (Organization Management,
+# Compliance Administrator, eDiscovery Manager, Insider Risk Management,
+# Information Protection Admins/Analysts/Investigators/Readers, Records
+# Management, Data Loss Prevention Compliance Management, Communication
+# Compliance, and others). They are NOT collection-scoped; they are keyed
+# by role-group display name.
+#
+# The reconciler (`scripts/Deploy-PurviewRoleGroups.ps1`, tracked in the
+# Wave 0 checklist) consumes this file, compares each listed role group's
+# current membership against the desired `members` list, and performs
+# Add/Remove/NoChange operations. Role groups not listed in this file are
+# left untouched. Default steady state is an empty `roleGroups` list —
+# no-op safe on first run.
+#
+# First-run bootstrap against an existing tenant (REQUIRED):
+#   Before the first reconciler `-Apply` run against this file, run:
+#       ./scripts/Deploy-PurviewRoleGroups.ps1 -ExportCurrentState
+#   That switch populates `roleGroups:` with the live membership of every
+#   role group the automation identity can see. Review the resulting diff
+#   in a pull request, then merge. Only after that PR lands is it safe to
+#   run `-Apply` (or `-Apply -PruneMissing`) — otherwise the reconciler
+#   would treat your existing portal-configured permissions as drift and
+#   remove them. This first-run contract is mandatory for every
+#   `Deploy-*.ps1` per
+#   `.github/instructions/powershell.instructions.md`
+#   (section: "First-run-against-an-existing-tenant contract").
+#
+# Decision context and API choice:
+#   docs/adr/0009-portal-role-group-api-ship-order.md
+#     (supersedes docs/adr/0008-portal-role-group-api.md)
+#   docs/adr/0025-role-group-entra-backing-naming.md
+#     Every role group declared here gets a dedicated Microsoft Entra
+#     security group `sg-purview-<slug>` provisioned by
+#     `scripts/Deploy-RoleGroupBackingEntraGroups.ps1`. Every non-empty
+#     `members:` binding below references its dedicated `sg-purview-*`
+#     OID (Phase 2 of issue #383, landed in issue #385). The shared
+#     `Contoso-Purview-Administrators` group is no longer bound to any
+#     Purview role group; it remains in the tenant for non-Purview use
+#     at the lab owner's discretion.
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/purview-permissions
+#   https://learn.microsoft.com/en-us/microsoft-365/security/office-365-security/scc-permissions
+#   https://learn.microsoft.com/en-us/powershell/exchange/connect-to-scc-powershell
+#   https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2
+#   https://learn.microsoft.com/en-us/powershell/module/exchange/add-rolegroupmember
+#   https://learn.microsoft.com/en-us/powershell/module/exchange/remove-rolegroupmember
+#   https://learn.microsoft.com/en-us/powershell/module/exchange/get-rolegroupmember
+#
+# Fields per entry:
+#   name         (required, string) Exact Microsoft-published role-group
+#                display name. Case-sensitive match against the portal and
+#                against the `Identity` parameter of Get-RoleGroupMember.
+#                Examples: "Organization Management",
+#                "Compliance Administrator", "eDiscovery Manager",
+#                "Insider Risk Management",
+#                "Information Protection Admins".
+#   description  (optional, string) Short prose explaining why this entry
+#                exists. Not read by the reconciler; for human reviewers.
+#   members      (required, list of strings) Entra (Azure AD) **group**
+#                object IDs. One group OID per line. User UPNs and
+#                individual object IDs are intentionally rejected by the
+#                reconciler per `.github/instructions/security.instructions.md`
+#                rule #4 (least privilege — assign to groups, not users).
+#                Empty list is valid and means "this role group should have
+#                zero declarative members"; the reconciler will remove any
+#                drift.
+#
+# Authentication note:
+#   The reconciler authenticates via `Connect-IPPSSession` with
+#   certificate-based app-only auth. Runtime, invocation shape, and
+#   session-reuse rules are mandated in
+#   `.github/instructions/powershell.instructions.md`
+#   (section: "Runtime: pwsh 7.4+ only, and the Connect-IPPSSession auth
+#   constraint"). The automation identity itself is produced by the
+#   future `scripts/New-AutomationIdentity.ps1` (Wave 0 #5), which is
+#   blocked on §8 Q3 + Q4 ADRs. Until that script and its ADRs land, this
+#   YAML remains the default empty list.
+#
+# Example (commented-out; do not uncomment on main):
+#   - name: Organization Management
+#     description: Tenant-wide Exchange / S&C break-glass administration.
+#     members:
+#       - 00000000-0000-0000-0000-000000000000   # Entra group OID for the break-glass Security Admins group
+#
+#   - name: Compliance Administrator
+#     description: Read + configure compliance solutions (DLP, DLM, etc.).
+#     members:
+#       - 00000000-0000-0000-0000-000000000000   # Entra group OID for the Compliance Admins group
+#
+#   - name: eDiscovery Manager
+#     description: Create + manage eDiscovery cases and holds.
+#     members: []
+
+# Default steady state is an empty list.
+# Add one or more entries using the shape above, run the reconciler, and
+# review the drift report before merging.
+roleGroups:
+  - name: AttackSimAdministrators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: AttackSimPayloadAuthors
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: AuditManager
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: AuditReader
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: BillingAdministrator
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: CommunicationCompliance
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: CommunicationComplianceAdministrators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members:
+      - 778dc3b1-f15e-404a-9387-da735914c5fd  # sg-purview-communication-compliance-administrators
+  - name: CommunicationComplianceAnalysts
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: CommunicationComplianceInvestigators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: CommunicationComplianceViewers
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: ComplianceAdministrator
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members:
+      - b44e14d0-568d-4894-83d3-0567c43300d3  # sg-purview-compliance-administrator
+  - name: ComplianceDataAdministrator
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members:
+      - 2c321b85-00c9-41b7-98b9-dd5972832149  # sg-purview-compliance-data-administrator
+  - name: ComplianceManagerAdministrators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: ComplianceManagerAssessors
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: ComplianceManagerContributors
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: ComplianceManagerReaders
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: ContentExplorerContentViewer
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 2 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: ContentExplorerListViewer
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 2 user(s), 0 group(s). Users are not managed by this reconciler.
+    # Wave 3a Phase 2 / Issue #74 — wrapper group for the data-plane workload
+    # identity (gh-oidc-purview-data-plane) so the export-content-explorer.yml
+    # workflow can call Get-ContentExplorerData. Populate with your tenant's
+    # wrapper-group object ID (per-tenant) — mirror it in
+    # infra/parameters/lab.yaml::automation.apps.dataPlane.roleGroupMembership.contentExplorerListViewer.
+    # Empty list = safe default (no membership change). See ADR 0023 for
+    # displayName-based resolution instead of a literal OID.
+    # Reference: docs/adr/0021-dspm-content-explorer-cadence.md (Decision 4)
+    members: []
+  - name: DataCatalogCurators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataEstateInsightsAdmins
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataEstateInsightsReaders
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataGovernance
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataInvestigator
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityAIAdmins
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityAIContentViewers
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityAIViewers
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityDLPTriageAgent
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityDSPMPostureAgent
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityInvestigationAdmins
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityInvestigationInvestigators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityInvestigationReviewers
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityIRMTriageAgent
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityManagement
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSecurityViewers
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: DataSourceAdministrators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members:
+      - da12cc42-d310-4568-9516-b075bc8f8dc7  # sg-purview-data-source-administrators
+  - name: DefaultRoleAssignmentPolicy
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: eDiscoveryManager
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: ExactDataMatchUploadAdmins
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: GlobalReader
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InformationProtection
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InformationProtectionAdmins
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    # Issue #381 — grant the lab-owner admin group authoring rights on sensitivity
+    # labels and label policies via the least-privilege portal role group. Per
+    # ADR 0025, this binding now uses the dedicated
+    # sg-purview-information-protection-admins Entra group (issue #385 Phase 2
+    # rebind) instead of the shared Contoso-Purview-Administrators group, restoring
+    # the original Issue #381 AC#1 least-privilege shape.
+    # Reference: https://learn.microsoft.com/en-us/purview/purview-permissions
+    members:
+      - 8c8a09bf-6d00-40bc-af6d-6920d687fb1b  # sg-purview-information-protection-admins
+  - name: InformationProtectionAnalysts
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InformationProtectionInvestigators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InformationProtectionReaders
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InsiderRiskManagement
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InsiderRiskManagementAdmins
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InsiderRiskManagementAnalysts
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InsiderRiskManagementApprovers
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InsiderRiskManagementAuditors
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InsiderRiskManagementInvestigators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: InsiderRiskManagementSessionApprovers
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: IRMContributors
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: KnowledgeAdministrators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members:
+      - 2480c17d-15ea-4887-971e-463078b3e9c0  # sg-purview-knowledge-administrators
+  - name: MailFlowAdministrator
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: OrganizationManagement
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: PrivacyManagement
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: PrivacyManagementAdministrators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members:
+      - 5e1ac091-aeaf-4ab6-ab71-3cff597a762f  # sg-purview-privacy-management-administrators
+  - name: PrivacyManagementAnalysts
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: PrivacyManagementContributors
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: PrivacyManagementInvestigators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: PrivacyManagementViewers
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: PurviewAdministrators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members:
+      - a60b9428-7443-4c18-af2d-3560c5d659d2  # sg-purview-purview-administrators
+  - name: PurviewAgentManagement
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 3 user(s), 0 group(s). Users are not managed by this reconciler.
+    members:
+      - 4d0a711a-460b-4d7c-9d05-c5e8b62977a0  # sg-purview-purview-agent-management
+  - name: PurviewConsumptionManagement
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members:
+      - 0341b885-8d98-4082-89d0-7f770eeaa52a  # sg-purview-purview-consumption-management
+  - name: QuarantineAdministrator
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: RecordsManagement
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: Reviewer
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: SecurityAdministrator
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: SecurityOperator
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: SecurityReader
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 1 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: ServiceAssuranceUser
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: SubjectRightsRequestAdministrators
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: SubjectRightsRequestApprovers
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []
+  - name: SupervisoryReview
+    description: Exported from contoso.onmicrosoft.com on 2026-04-25.
+    # Current tenant assignments: 0 user(s), 0 group(s). Users are not managed by this reconciler.
+    members: []

@@ -1,0 +1,53 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/irm/entity-lists.schema.json",
+    "title": "Microsoft Purview Insider Risk Management entity lists",
+    "description": "Desired state for Microsoft Purview Insider Risk Management entity lists consumed by scripts/Deploy-IRMEntityLists.ps1. Reference: https://learn.microsoft.com/en-us/purview/insider-risk-management-settings-priority-user-groups",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "entityLists" ],
+    "properties": {
+        "entityLists": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/irmEntityList" }
+        }
+    },
+    "definitions": {
+        "irmEntityList": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "type" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Unique entity list identifier. Maps to the -Name parameter of New-InsiderRiskEntityList. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-insiderriskentitylist"
+                },
+                "type": {
+                    "type": "string",
+                    "description": "Entity list type. Immutable after creation -- changing this requires deleting and recreating the list. Maps to -Type on New-InsiderRiskEntityList. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-insiderriskentitylist",
+                    "enum": [ "UserType", "GroupType", "SiteType" ]
+                },
+                "displayName": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Human-readable display name. Maps to -DisplayName on New-InsiderRiskEntityList and Set-InsiderRiskEntityList. Optional."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Free-form description. Maps to -Description on New-InsiderRiskEntityList and Set-InsiderRiskEntityList. Optional."
+                },
+                "entities": {
+                    "type": "array",
+                    "description": "Member identifiers. UPNs for UserType, group identifiers for GroupType, site URLs for SiteType. Maps to -Entities on New/Set-InsiderRiskEntityList (full replace on Set). Omitting this key means do-not-manage membership; an empty array means desired-empty. Comparison is order-insensitive. Optional.",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                }
+            }
+        }
+    }
+}

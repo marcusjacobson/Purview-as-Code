@@ -1,0 +1,75 @@
+﻿# Microsoft Purview as-Code -- Insider Risk Management (IRM) policies (desired state)
+#
+# Desired-state declaration for Microsoft Purview Insider Risk
+# Management policies, consumed by `scripts/Deploy-IRMPolicies.ps1`
+# (Wave 2d, issue #81). The script compares each desired policy
+# against the live tenant via `Get-InsiderRiskPolicy`, then performs
+# Create / Update / NoChange operations. Orphan policies (live in
+# tenant, absent from this YAML) are reported and skipped unless
+# `-PruneMissing` is specified.
+#
+# Schema: ./policies.schema.json (Draft-07).
+#
+# Default state: empty (`policies: []`). The v2 §5.3 review on
+# 2026-06-14 (issue #603) closed the v1-era staging-policy entry as
+# Phase 2 disposition (c) follow-up issue; the e2e smoke for this
+# domain uses throwaway `e2e-irm-smoke-*` policies created and torn
+# down by `scripts/Invoke-IRMSmokeTest.ps1` rather than a permanent
+# YAML entry. Future net-new IRM policies in this repo land via a
+# dedicated `feat(irm)` PR.
+#
+# Skip baseline (see docs/adr/0036-irm-tenant-setting-immovable.md):
+#   The live tenant carries one Microsoft-managed `TenantSetting`
+#   policy (`IRM_Tenant_Setting_<tenant-guid>`) plus four
+#   operator-authored `IRM Lab — *` policies under active testing
+#   (mid-testing hard rule per issue #603). All five names are
+#   baselined into the `skip_names_irm` workflow input default so
+#   `-PruneMissing` runs never plan a mutation against them. The
+#   verbatim list lives in ADR 0036 §"The skip baseline".
+#
+# Each policy entry maps to the conservative subset of
+# `New-InsiderRiskPolicy` parameters that are stable across PowerShell
+# module versions:
+#
+#   name        -- Unique policy identifier (string, required).
+#                   Becomes the `-Name` argument.
+#   description -- Free-form policy description (string, optional).
+#                   Maps to `-Comment` on `New-InsiderRiskPolicy`.
+#   scenario    -- IRM template name (string, required). Maps to
+#                   `-InsiderRiskScenario`. See `policies.schema.json`
+#                   for the verified enum.
+#   enabled     -- Optional boolean. When omitted, the cmdlet default
+#                   applies (typically the policy is created in a
+#                   disabled / staging state).
+#
+# Note: `priority` is intentionally NOT a managed field. Although
+# `Get-InsiderRiskPolicy` returns a `Priority` property, neither
+# `New-InsiderRiskPolicy` nor `Set-InsiderRiskPolicy` accept a
+# `-Priority` parameter (verified against a live Security &
+# Compliance PowerShell session in issue #267).
+#
+# References:
+#   Microsoft Purview Insider Risk Management overview:
+#     https://learn.microsoft.com/en-us/purview/insider-risk-management
+#   Get started with Insider Risk Management:
+#     https://learn.microsoft.com/en-us/purview/insider-risk-management-configure
+#   Get-InsiderRiskPolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/get-insiderriskpolicy
+#   New-InsiderRiskPolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/new-insiderriskpolicy
+#   Set-InsiderRiskPolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/set-insiderriskpolicy
+#   Remove-InsiderRiskPolicy:
+#     https://learn.microsoft.com/en-us/powershell/module/exchange/remove-insiderriskpolicy
+#   ADR 0036 (tenant-setting + mid-testing skip baseline):
+#     docs/adr/0036-irm-tenant-setting-immovable.md
+
+policies:
+  - name: pac-lab-irm-data-leaks
+    description: >
+      Permanent YAML-managed lab policy for as-code governance of the
+      LeakOfInformation scenario. Managed by Deploy-IRMPolicies.ps1;
+      distinct from the operator-authored "IRM Lab—General data leaks"
+      policy. Authored via issue #605.
+    scenario: LeakOfInformation
+    enabled: false

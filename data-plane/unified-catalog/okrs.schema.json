@@ -1,0 +1,55 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/okrs.schema.json",
+    "title": "Microsoft Purview Unified Catalog — OKRs",
+    "description": "Desired state for Unified Catalog objectives and key results consumed by scripts/Deploy-UnifiedCatalog.ps1 (tracked in #340). Reference: https://learn.microsoft.com/en-us/purview/unified-catalog. Per ADR 0024, Microsoft Learn does not yet document the Unified Catalog REST data-plane surface; the field shape below will be tightened when the authoring-surface ADR lands.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "items" ],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/okr" },
+            "description": "List of objectives. Default state is the empty list."
+        }
+    },
+    "definitions": {
+        "okr": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "domain" ],
+            "properties": {
+                "name":        { "type": "string", "minLength": 1 },
+                "description": { "type": "string" },
+                "domain":      { "type": "string", "minLength": 1 },
+                "targetDate": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                    "description": "ISO-8601 calendar date (YYYY-MM-DD)."
+                },
+                "owners": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [ "Draft", "Published", "Expired" ]
+                },
+                "keyResults": {
+                    "type": "array",
+                    "items": { "$ref": "#/definitions/keyResult" }
+                }
+            }
+        },
+        "keyResult": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name" ],
+            "properties": {
+                "name":         { "type": "string", "minLength": 1 },
+                "target":       { "type": "string" },
+                "currentValue": { "type": "string" }
+            }
+        }
+    }
+}

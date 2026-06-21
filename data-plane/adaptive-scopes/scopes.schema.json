@@ -1,0 +1,45 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/adaptive-scopes.schema.json",
+    "title": "Microsoft Purview adaptive policy scopes",
+    "description": "Desired state for adaptive policy scopes consumed by scripts/Deploy-AdaptiveScopes.ps1. See docs/adr/0034-adaptive-scope-schema.md. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-adaptivescope and https://learn.microsoft.com/en-us/purview/purview-adaptive-scopes",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "scopes": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/adaptiveScope" }
+        }
+    },
+    "definitions": {
+        "adaptiveScope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "locationType", "filterConditions" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "pattern": "^lab-as-[a-z0-9]([a-z0-9-]{0,55}[a-z0-9])?$",
+                    "description": "Unique scope identifier. The lab-as- prefix is the lab ownership marker required by issue #548 -- adaptive scopes are tenant-wide and the prefix makes lab provenance obvious in the M365 admin surface."
+                },
+                "locationType": {
+                    "type": "string",
+                    "enum": [ "User", "Group", "Site" ],
+                    "description": "Scope membership shape. Immutable per Microsoft Learn -- changing it requires delete + recreate. ADR 0034 Decision 2 allowed-attribute set is User-only at present; Group and Site are TODO: probe required."
+                },
+                "filterConditions": {
+                    "type": "string",
+                    "minLength": 2,
+                    "description": "JSON string passed unchanged to New-AdaptiveScope -FilterConditions / Set-AdaptiveScope -FilterConditions. ADR 0034 Decision 1: the cmdlet rejects hashtable input at depth 1; only JSON string works. Shape: { \"Conjunction\": \"And\", \"Conditions\": [ { \"Name\": \"<attr>\", \"Value\": \"<v>\", \"Operator\": \"Equals\" } ] }. User-scope Name allowlist (probed 2026-06-05): Alias | Department | Title | Office | City. Reconciler validates well-formed JSON via Test-Json -Json $body; cmdlet is the source of truth for attribute-name and value validation."
+                },
+                "comment": {
+                    "type": "string",
+                    "maxLength": 512,
+                    "description": "Optional human-readable note. Not tracked for drift; the reconciler does not write a tenant Comment field (New-AdaptiveScope has no -Comment parameter)."
+                }
+            }
+        }
+    }
+}

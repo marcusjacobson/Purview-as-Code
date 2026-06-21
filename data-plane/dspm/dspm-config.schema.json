@@ -1,0 +1,109 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/dspm/dspm-config.schema.json",
+    "title": "Microsoft Purview DSPM lab configuration",
+    "description": "Declarative scope and cadence for the Wave 3a Microsoft Purview Data Security Posture Management (DSPM) signal-source verifier (scripts/Test-DSPMPosture.ps1) and Content Explorer exporter (scripts/Export-ContentExplorerData.ps1). DSPM itself is an aggregator surfaced by Microsoft in the Purview portal; this file declares the signal sources the lab feeds it and the cadence the lab harvests Content Explorer evidence on. References: https://learn.microsoft.com/en-us/purview/dspm-get-started, docs/adr/0021-dspm-content-explorer-cadence.md.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "scope", "export" ],
+    "properties": {
+        "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "labels", "sits", "workloads" ],
+            "description": "Inputs the exporter iterates. Per ADR 0021 Decision 3, each run iterates the union of published labels and custom SITs across the listed workloads.",
+            "properties": {
+                "labels": {
+                    "$ref": "#/definitions/sourceSelector",
+                    "description": "Sensitivity labels source. Default source is data-plane/information-protection/labels.yaml (Wave 1)."
+                },
+                "sits": {
+                    "$ref": "#/definitions/sourceSelector",
+                    "description": "Sensitive Information Types source. Default source is data-plane/classifications/classifications.yaml (lab-authored custom SITs only). The Microsoft reference catalog data-plane/classifications/sit-catalog.yaml is intentionally NOT enumerated here per the v2 §5.4 drift closure (issue #366) -- it would push the weekly Get-ContentExplorerData run plan above the ~25-entry ceiling ADR 0021 'Harder' section warns about. The catalog file remains a GUID lookup for IP / DLP per ADR 0016 §4; opt-in re-introduction of selected built-in SITs is tracked separately."
+                },
+                "workloads": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "Workloads passed to Get-ContentExplorerData -Workload. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/get-contentexplorerdata",
+                    "items": {
+                        "type": "string",
+                        "enum": [ "Exchange", "SharePoint", "OneDrive", "Teams" ]
+                    }
+                }
+            }
+        },
+        "export": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "cadence", "artifactDir", "retentionDays", "throttleSeconds", "maxRetries" ],
+            "description": "Cadence, output, and throttling knobs grounded in ADR 0021 decisions 1, 5, and 6.",
+            "properties": {
+                "cadence": {
+                    "type": "string",
+                    "enum": [ "weekly", "on-demand" ],
+                    "description": "Primary cadence label. The actual schedule lives in the GitHub Actions workflow that calls Export-ContentExplorerData.ps1; this field is a human-readable contract anchor. ADR 0021 Decision 1 selects 'weekly'."
+                },
+                "artifactDir": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Repo-relative directory the exporter writes timestamped subfolders into. ADR 0021 Decision 5 selects 'verify-dspm-export-output'. Must be gitignored."
+                },
+                "retentionDays": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 365,
+                    "description": "GitHub Actions artifact retention in days. ADR 0021 Decision 5 aligns this to the 90-day audit retention horizon."
+                },
+                "throttleSeconds": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Sleep between consecutive Get-ContentExplorerData calls. ADR 0021 Decision 6 selects 1 second."
+                },
+                "maxRetries": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10,
+                    "description": "Maximum retries on transient HTTP 429 from Get-ContentExplorerData. ADR 0021 Decision 6 selects 3."
+                }
+            }
+        }
+    },
+    "definitions": {
+        "sourceSelector": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "sources", "include" ],
+            "properties": {
+                "sources": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "Repo-relative paths to the upstream desired-state YAMLs this scope source pulls from.",
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    }
+                },
+                "include": {
+                    "oneOf": [
+                        {
+                            "type": "string",
+                            "enum": [ "all" ],
+                            "description": "Include every entry the upstream YAMLs produce."
+                        },
+                        {
+                            "type": "array",
+                            "uniqueItems": true,
+                            "description": "Opt-in scoping: include only the named entries (by display name for labels, or by name / immutable identifier for SITs). Use this shape to add selected Microsoft built-in SITs from data-plane/classifications/sit-catalog.yaml to DSPM scope once the lab actively classifies content against them, without re-enumerating the full 327-entry catalog. The Test-DSPMPosture.ps1 ceiling guard rail (issue #610) emits Warn above 25 total entries (labels + SITs) and Fail above 100; thresholds are pinned to ADR 0021 'Harder' section.",
+                            "items": {
+                                "type": "string",
+                                "minLength": 1
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+}

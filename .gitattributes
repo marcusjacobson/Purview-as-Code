@@ -1,0 +1,45 @@
+# Repo-wide line-ending and text/binary policy.
+# Reference: https://docs.github.com/en/get-started/git-basics/configuring-git-to-handle-line-endings
+# Reference: https://git-scm.com/docs/gitattributes#_end_of_line_conversion
+#
+# Default: treat every file as text and normalize to LF in the repo.
+# `text=auto` lets Git detect binary content and skip conversion for it.
+# `eol=lf` pins the working-tree line ending to LF on every platform,
+# overriding the per-user `core.autocrlf` setting (which on
+# Git-for-Windows defaults to `true` and otherwise rewrites LF to CRLF
+# on checkout).
+* text=auto eol=lf
+
+# PowerShell scripts are authored and executed primarily on Windows
+# pwsh hosts (per `.github/instructions/powershell.instructions.md`).
+# Keep CRLF in the working tree to match host conventions; the blob
+# stays normalized via `text`.
+*.ps1         text eol=crlf
+*.psm1        text eol=crlf
+*.psd1        text eol=crlf
+*.ps1xml      text eol=crlf
+
+# Everything else this repo authors is consumed by Linux CI runners
+# (yamllint, bicep CLI, GitHub Actions, markdown rendering). Pin LF so
+# what runs locally matches CI byte-for-byte.
+*.yaml        text eol=lf
+*.yml         text eol=lf
+*.bicep       text eol=lf
+*.bicepparam  text eol=lf
+*.json        text eol=lf
+*.md          text eol=lf
+*.code-workspace text eol=lf
+.gitignore    text eol=lf
+.gitattributes text eol=lf
+
+# Common binary kinds. Listed defensively even though no binary file
+# is currently tracked, so a future `docs/` screenshot or icon does
+# not get accidentally text-normalized.
+*.png         binary
+*.jpg         binary
+*.jpeg        binary
+*.gif         binary
+*.ico         binary
+*.pdf         binary
+*.zip         binary
+*.gz          binary

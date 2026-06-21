@@ -1,0 +1,25 @@
+﻿# Microsoft Purview Insider Risk Management entity lists -- desired state.
+#
+# Consumed by scripts/Deploy-IRMEntityLists.ps1.
+# Schema: data-plane/irm/entity-lists.schema.json (JSON Schema Draft-07).
+#
+# Skip baseline (see ADR-0039)
+# ─────────────────────────────
+# The desired-state list is intentionally empty (`entityLists: []`). The
+# `skip_names_irm_entity_list` CI default carries one name:
+#
+#   IRM-Lab-Priority-Users   -- UserType entity list backing the
+#                               `IRM Lab -- Data leaks by priority users`
+#                               policy (scenario HighValueEmployeeDataLeak).
+#                               Under the #603 hard rule (no mutation during
+#                               active testing). Ratified as baseline-skip in
+#                               docs/adr/0039-irm-entity-list-tracked-fields.md.
+#
+# Remove `IRM-Lab-Priority-Users` from the CI default and declare it here
+# only after the #603 testing window closes (follow-up #604/#606).
+#
+# Reference: https://learn.microsoft.com/en-us/purview/insider-risk-management-settings-priority-user-groups
+# Reference: docs/adr/0039-irm-entity-list-tracked-fields.md
+# Reference: docs/adr/0029-source-of-truth-direction-policy.md
+
+entityLists: []

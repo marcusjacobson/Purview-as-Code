@@ -1,0 +1,37 @@
+# Microsoft Purview Unified Catalog — Health controls (desired state)
+#
+# Health controls are data-quality / observability rules attached to a
+# governance domain (and optionally to specific data products or CDEs).
+# Each control declares a measurable expectation and the action taken
+# when the expectation is violated. The Unified Catalog surfaces
+# control results as health metrics on the parent domain.
+#
+# Default steady state is `items: []` — no-op safe on first run.
+# Live content onboarding is tracked separately and depends on #340.
+#
+# Decision context:
+#   docs/adr/0024-unified-catalog-folder-placement.md
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/unified-catalog
+#
+# Field shape (validated against health-controls.schema.json):
+#   name         (required, string)   Display name. Unique across the file.
+#   description  (optional, string)   Short prose describing the control.
+#   domain       (required, string)   Parent governance domain name.
+#   controlType  (optional, string)   One of: Completeness, Accuracy,
+#                                     Timeliness, Uniqueness, Validity,
+#                                     Consistency, Other.
+#   owners       (optional, string[]) Entra group display names.
+#   status       (optional, string)   One of: Draft, Published, Expired.
+#
+# Example (commented-out; do not uncomment on main):
+#   - name: Customer email not null
+#     description: Every customer record must have a non-null email.
+#     domain: Sales
+#     controlType: Completeness
+#     owners:
+#       - sg-purview-customer360-owners
+#     status: Draft
+
+items: []

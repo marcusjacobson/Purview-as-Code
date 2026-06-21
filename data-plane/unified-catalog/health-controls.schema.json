@@ -1,0 +1,40 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/health-controls.schema.json",
+    "title": "Microsoft Purview Unified Catalog — health controls",
+    "description": "Desired state for Unified Catalog health (data-quality) controls consumed by scripts/Deploy-UnifiedCatalog.ps1 (tracked in #340). Reference: https://learn.microsoft.com/en-us/purview/unified-catalog. Per ADR 0024, Microsoft Learn does not yet document the Unified Catalog REST data-plane surface; the field shape below will be tightened when the authoring-surface ADR lands.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "items" ],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/healthControl" },
+            "description": "List of health controls. Default state is the empty list."
+        }
+    },
+    "definitions": {
+        "healthControl": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "domain" ],
+            "properties": {
+                "name":        { "type": "string", "minLength": 1 },
+                "description": { "type": "string" },
+                "domain":      { "type": "string", "minLength": 1 },
+                "controlType": {
+                    "type": "string",
+                    "enum": [ "Completeness", "Accuracy", "Timeliness", "Uniqueness", "Validity", "Consistency", "Other" ]
+                },
+                "owners": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [ "Draft", "Published", "Expired" ]
+                }
+            }
+        }
+    }
+}

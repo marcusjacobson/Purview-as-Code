@@ -1,0 +1,88 @@
+# Desired-state collection hierarchy.
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/accountdataplane/collections
+#
+# The root collection shares the name of the Purview account and is managed by Azure.
+# Children listed here are created/updated under it. Removing an entry DOES NOT delete
+# the collection (deletion is opt-in; see scripts/Deploy-Collections.ps1 -PruneMissing).
+
+rootCollection: purview-contoso-lab
+
+# Optional allow-list of tenant collections that must NEVER be deleted by
+# `-PruneMissing`. Use this for system-managed or service-created collections
+# that return `HTTP 400 code 1006 -- "<name> can't be deleted with this API."`
+# (see PR #307 Cycle 3 for the original failure mode). Names match
+# case-insensitively against the `name` (URL segment) field. Default: empty.
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/accountdataplane/collections/delete-collection
+protected: []
+
+collections:
+  - name: c8iacz
+    friendlyName: Non-Prod
+    description: Sample and Testing data
+    parent: purview-contoso-lab
+    children:
+      - name: chfb1r
+        friendlyName: Platform Data
+        children:
+          - name: cqyzoe
+            friendlyName: Dataverse
+      - name: euvfmr
+        friendlyName: Relational
+        description: Relational Databases
+        children:
+          - name: "85cv3o"
+            friendlyName: MySQL
+          - name: a5oe4c
+            friendlyName: PostgreSQL
+          - name: bbot46
+            friendlyName: AzureSQL
+      - name: ev04jw
+        friendlyName: Storage
+        children:
+          - name: jprasm
+            friendlyName: Blob Storage
+          - name: js1tih
+            friendlyName: ADLS Gen2
+      - name: o41l3i
+        friendlyName: Analytics Platform
+        children:
+          - name: c0fsrh
+            friendlyName: Synapse
+          - name: ncu25o
+            friendlyName: Fabric
+      - name: ppjrrw
+        friendlyName: NoSQL & Analytics
+        children:
+          - name: "4khzmw"
+            friendlyName: Azure Data Explorer -Kusto
+      - name: voxgql
+        friendlyName: Integration
+        children:
+          - name: "4k3yky"
+            friendlyName: Databricks
+  - name: enterprise
+    friendlyName: Enterprise Catalog
+    description: Top-level collection for enterprise data assets.
+    parent: purview-contoso-lab
+    children:
+      - name: finance
+        friendlyName: Finance
+        description: Finance domain data sources and assets.
+      - name: human-resources
+        friendlyName: Human Resources
+        description: HR domain data sources and assets.
+      - name: sales
+        friendlyName: Sales
+        description: Sales and CRM domain assets.
+  - name: sandbox
+    friendlyName: Sandbox
+    description: Experimental / non-production assets.
+    parent: purview-contoso-lab
+  - name: "1lfhuf"
+    friendlyName: HR
+    description: Highly sensitive PII data
+    parent: purview-contoso-lab
+  - name: "9vsaza"
+    friendlyName: Finance
+    description: Regulated, sensitive business data
+    parent: purview-contoso-lab

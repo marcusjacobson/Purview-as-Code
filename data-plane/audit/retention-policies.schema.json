@@ -1,0 +1,70 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/audit/retention-policies.schema.json",
+    "title": "Microsoft Purview unified audit log retention policies",
+    "description": "Desired state for Microsoft Purview audit log retention policies consumed by scripts/Set-AuditRetentionPolicy.ps1. Reference: https://learn.microsoft.com/en-us/purview/audit-log-retention-policies",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "policies" ],
+    "properties": {
+        "policies": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/retentionPolicy" }
+        }
+    },
+    "definitions": {
+        "retentionPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "retentionDuration" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Unique policy identifier. Maps to the -Name parameter of New-UnifiedAuditLogRetentionPolicy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-unifiedauditlogretentionpolicy"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Free-form policy description. Maps to -Description."
+                },
+                "recordTypes": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "AuditLogRecordType enum values. Reference: https://learn.microsoft.com/en-us/office/office-365-management-api/office-365-management-activity-api-schema#auditlogrecordtype"
+                },
+                "operations": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "Audit operation names (e.g. FileAccessed). Reference: https://learn.microsoft.com/en-us/purview/audit-log-activities"
+                },
+                "userIds": {
+                    "type": "array",
+                    "items": { "type": "string", "format": "email", "minLength": 1 },
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "description": "User principal names to scope the policy to specific users."
+                },
+                "retentionDuration": {
+                    "type": "string",
+                    "enum": [ "OneYear", "ThreeYears", "SevenYears", "TenYears" ],
+                    "description": "Tenant-supported retention values only. Long retention requires the Microsoft 365 E5 / audit add-on. Reference: https://learn.microsoft.com/en-us/purview/audit-log-retention-policies"
+                },
+                "priority": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Tie-breaker when an event matches multiple policies. Lower values win. Optional; cmdlet supplies a default when omitted."
+                }
+            },
+            "anyOf": [
+                { "required": [ "recordTypes" ] },
+                { "required": [ "operations" ] },
+                { "required": [ "userIds" ] }
+            ]
+        }
+    }
+}

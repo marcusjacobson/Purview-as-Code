@@ -1,0 +1,228 @@
+name: drift-detection
+
+# Scheduled drift-detection loop for the Purview-as-Code lab. Runs all
+# reconcilers in read-only mode (-WhatIf) against the live
+# contoso.onmicrosoft.com tenant and opens a GitHub issue when drift is
+# detected between the repo's desired-state YAML and the live tenant.
+#
+# Part of the agentic-process-modernization-plan Slice 7.
+#
+# Read-only contract: every tenant call is -WhatIf only. No deploy step
+# exists. Per security principle #9 and mcp-tool-usage.instructions.md
+# read-only default, this workflow never invokes the apply path of any
+# Deploy-*.ps1 script. The issue is routed to @idea-intake via labels.
+#
+# Federated credential reuse: the gh-oidc-purview-data-plane app's
+# federated credential is scoped to
+# `repo:contoso/Purview-as-Code-Generic:environment:lab`
+# (per ADR 0010). Because this job declares `environment: lab`, no new
+# federated credential subject is required for the schedule trigger.
+#
+# Key Vault access: the runner principal signs the IPPS client_assertion
+# JWT via `az keyvault key sign` against kv-contoso-lab-01. The vault is
+# private-network by default; the workflow temp-opens its public endpoint
+# for the duration of the drift check and restores it via an
+# `if: always()` step.
+#
+# References (Microsoft Learn, GitHub Docs):
+#   https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+#   https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust
+#   https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+
+on:
+  schedule:
+    # Weekly Monday at 02:00 UTC. Cron grammar:
+    # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+permissions:
+  id-token: write           # OIDC token for azure/login@v2.
+  contents: read            # Checkout only; no writes.
+  issues: write             # gh issue create when drift detected.
+
+concurrency:
+  group: drift-detection-lab
+  cancel-in-progress: false
+
+jobs:
+  detect-drift:
+    name: Detect drift
+    runs-on: ubuntu-latest
+    environment: lab
+    env:
+      KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install PowerShell modules
+        shell: pwsh
+        run: |
+          Install-Module powershell-yaml -Force -Scope CurrentUser
+          Install-Module ExchangeOnlineManagement -Force -Scope CurrentUser
+          Install-Module Microsoft.Graph.Identity.DirectoryManagement -Force -Scope CurrentUser
+
+      - name: Temporarily allow Key Vault public access
+        id: kv-open
+        shell: pwsh
+        run: |
+          if (-not $env:KEY_VAULT_NAME) {
+            throw "vars.KEY_VAULT_NAME is not set on the lab environment. Set it before re-running."
+          }
+          az keyvault update `
+            --name $env:KEY_VAULT_NAME `
+            --public-network-access Enabled `
+            --default-action Allow `
+            --only-show-errors `
+            -o none
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "opened=true"
+          # Wait for the network rule change to propagate before the first
+          # data-plane call (matches the local lab smoke recipe).
+          Start-Sleep -Seconds 25
+
+      - name: Run reconcilers in WhatIf mode
+        id: reconcile
+        shell: pwsh
+        run: |
+          # Discover all Deploy-*.ps1 reconcilers that support -WhatIf.
+          # Exclude Deploy-Policies.ps1 (retired per ADR 0038).
+          $reconcilers = Get-ChildItem -Path scripts/Deploy-*.ps1 -Exclude Deploy-Policies.ps1 | Where-Object {
+            $content = Get-Content $_.FullName -Raw
+            $content -match 'SupportsShouldProcess'
+          }
+
+          $driftDetected = $false
+          $driftReport = @()
+
+          foreach ($script in $reconcilers) {
+            Write-Host "::group::Running $($script.Name) -WhatIf"
+            $scriptName = $script.Name
+            
+            try {
+              # Capture output and run with -WhatIf.
+              $output = & $script.FullName -WhatIf 2>&1 | Out-String
+              Write-Host $output
+              
+              # Parse for "Plan:" line indicating changes.
+              # Standard reconciler output format: "Plan: X adds, Y updates, Z removes"
+              if ($output -match 'Plan:\s+\d+\s+add|Plan:\s+\d+\s+update|Plan:\s+\d+\s+remove') {
+                $planLine = ($output -split "`n" | Where-Object { $_ -match '^Plan:' }) -join '; '
+                if ($planLine -and $planLine -notmatch 'Plan:\s+0\s+adds?,\s+0\s+updates?,\s+0\s+removes?') {
+                  $driftDetected = $true
+                  $driftReport += "- **$scriptName**: $planLine"
+                  Write-Host "::warning::Drift detected in $scriptName"
+                }
+              }
+            }
+            catch {
+              Write-Host "::error::$scriptName failed: $_"
+              $driftReport += "- **$scriptName**: ❌ Failed: $_"
+            }
+            
+            Write-Host "::endgroup::"
+          }
+
+          # Write drift status to output for the issue-creation step.
+          if ($driftDetected) {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "drift=true"
+            # Write report to a temp file for the issue body.
+            $reportText = $driftReport -join "`n"
+            Set-Content -Path drift-report.txt -Value $reportText
+            Write-Host "::notice::Drift detected. Issue will be opened."
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "drift=false"
+            Write-Host "::notice::No drift detected."
+          }
+
+      - name: Check for existing drift issue
+        if: steps.reconcile.outputs.drift == 'true'
+        id: check-issue
+        shell: pwsh
+        run: |
+          # Check if an open issue with squad:automation-engineer label already exists
+          # to avoid creating duplicates.
+          $existingIssue = gh issue list --label "squad:automation-engineer" --label "drift-detected" --state open --limit 1 --json number --jq '.[0].number'
+          
+          if ($existingIssue) {
+            Write-Host "::notice::Existing drift issue #$existingIssue is open. Skipping duplicate creation."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "skip=true"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "skip=false"
+          }
+
+      - name: Open drift-detection issue
+        if: steps.reconcile.outputs.drift == 'true' && steps.check-issue.outputs.skip == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $report = Get-Content drift-report.txt -Raw
+          $runUrl = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          
+          $issueBody = @"
+          ## Summary
+
+          The scheduled drift-detection loop detected differences between the repo's desired-state YAML under ``data-plane/`` and the live ``contoso.onmicrosoft.com`` tenant.
+
+          This issue was opened automatically by ``.github/workflows/drift-detection.yml``.
+
+          ## Drift report
+
+          $report
+
+          ## Next steps
+
+          1. Review the [workflow run]($runUrl) for full reconciler output.
+          2. Decide whether to:
+             - Accept the drift back into source (run the matching ``sync-*-from-tenant.yml`` workflow).
+             - Overwrite the portal edits (merge a PR that updates the desired-state YAML and re-deploys).
+             - Ratify the deviation via an ADR.
+          3. Close this issue once drift is resolved.
+
+          ## References
+
+          - [Agentic process modernization plan — Slice 7](https://github.com/contoso/Purview-as-Code-Generic/blob/main/docs/governance/agentic-process-modernization-plan.md#slice-7--drift-detection-loop)
+          - [ADR 0029 — Source-of-truth direction policy](https://github.com/contoso/Purview-as-Code-Generic/blob/main/docs/adr/0029-source-of-truth-direction-policy.md)
+          "@
+
+          gh issue create `
+            --title "Drift detected in contoso.onmicrosoft.com tenant" `
+            --body $issueBody `
+            --label "needs-review,squad:automation-engineer,drift-detected"
+
+          Write-Host "::notice::Drift issue created successfully."
+
+      - name: Restore Key Vault network defaults
+        if: always() && steps.kv-open.outputs.opened == 'true'
+        shell: pwsh
+        run: |
+          az keyvault update `
+            --name $env:KEY_VAULT_NAME `
+            --public-network-access Disabled `
+            --default-action Deny `
+            --only-show-errors `
+            -o none
+
+      - name: Summarize result
+        if: always()
+        shell: pwsh
+        env:
+          DRIFT_DETECTED: ${{ steps.reconcile.outputs.drift }}
+        run: |
+          if ($env:DRIFT_DETECTED -eq 'true') {
+            Write-Host "::notice::Drift detected. Review the issue for details."
+          } elseif ($env:DRIFT_DETECTED -eq 'false') {
+            Write-Host "::notice::No drift detected. Tenant matches desired state."
+          } else {
+            Write-Host "::warning::Drift detection did not complete (job failed before reconcile step finished)."
+          }

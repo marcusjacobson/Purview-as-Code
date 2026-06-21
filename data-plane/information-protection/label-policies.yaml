@@ -1,0 +1,169 @@
+# Microsoft Purview as-Code — Sensitivity label policies (desired state)
+#
+# Desired state for the sensitivity-label POLICIES that publish the labels
+# from `data-plane/information-protection/labels.yaml` (#65) to the
+# `contoso.onmicrosoft.com` tenant. Label policies are tenant-wide objects that
+# bind a set of labels + advanced settings to one or more end-user
+# locations (Exchange, Modern Groups, Schematized data); they are *not*
+# the labels themselves. The reconciler `scripts/Deploy-LabelPolicies.ps1`
+# consumes this file, compares each desired policy against the live
+# tenant via `Get-LabelPolicy`, and performs Create / Update / NoChange
+# operations. Orphan policies (live in tenant, missing from YAML) are
+# reported and skipped unless `-PruneMissing` is specified.
+#
+# Two policies per `docs/adr/0015-label-policy-shape.md`:
+#
+#   1. Lab-Default-Files-Emails
+#        Mode             : Enable             (publishes -> Status: Published)
+#        ExchangeLocation : [All]              (lab owner mailbox; multi-user
+#                                                tenant pivot to a `scope:` group
+#                                                left to a follow-up issue)
+#        Labels           : every label declared in labels.yaml,
+#                            referenced as `<parent>/<displayName>` for
+#                            sublabels and bare `<displayName>` for
+#                            top-level labels (matches the composite-key
+#                            shape `Deploy-Labels.ps1` already uses for
+#                            sublabel disambiguation, see #131).
+#        AdvancedSettings : the three keys from ADR 0015 §3 -- additions
+#                           require a follow-up issue with a Learn citation.
+#
+#   2. Lab-Disabled-Placeholder
+#        Mode             : Disable            (Get-LabelPolicy reports
+#                                                Status: Unpublished;
+#                                                exists only to exercise the
+#                                                non-Published round-trip on
+#                                                the `-ExportCurrentState`
+#                                                path -- ADR 0015 alternative
+#                                                wording: "PendingDeletion or
+#                                                equivalent unpublished
+#                                                state").
+#        ExchangeLocation : [All]
+#        Labels           : []                 (no label assignment)
+#        AdvancedSettings : {}                 (no advanced settings)
+#
+# First-run bootstrap against an existing tenant (REQUIRED):
+#   Before the first reconciler `-Apply` run against this file, run:
+#       ./scripts/Deploy-LabelPolicies.ps1 -ExportCurrentState
+#   That switch populates `labelPolicies:` with whatever the live tenant
+#   already has. Review the resulting diff in a pull request, then merge.
+#   Only after that PR lands is it safe to run `-Apply` (or
+#   `-Apply -PruneMissing`). Otherwise the reconciler would treat any
+#   existing portal-configured policy as drift. Mandatory first-run
+#   contract per `.github/instructions/powershell.instructions.md`
+#   ("First-run-against-an-existing-tenant contract").
+#
+# Out of scope for this file (per ADR 0015):
+#   - PurviewLocation, OneDriveLocation, SharePointLocation,
+#     Skype/Teams locations -- additive follow-up issues; the schema
+#     must accept them without reshape.
+#   - ModernGroupLocation is now tracked (ADR 0030 row 4 / issue #471);
+#     the baseline ships empty (`modernGroupLocation: []`).  A group
+#     value activates when a real M365 group is assigned in a follow-up.
+#
+# Scope -- exchangeLocationException (ADR 0015 section Scope -- Option A,
+# updated 2026-05-31 for ADR 0030 row 3 / issue #492). The schema now
+# accepts an optional `exchangeLocationException:` list of mailbox
+# SMTP / DN / GUID, or mail-enabled group identifier (DN or SMTP). Per
+# the Microsoft Learn investigation captured in the PR commit message,
+# the cmdlet ``-ExchangeLocationException`` parameter accepts these
+# identifiers verbatim -- no Microsoft Graph principal-id resolution
+# (ADR 0023 Category 3) is required for this surface. Both shipped
+# policies leave the field unset (scope = [All] users); flipping any
+# policy's scope to a specific exclusion list is its own follow-up
+# issue per ADR 0030 section 5 No batching.
+#   - Default-label assignment (`defaultLabel:`) -- highest-impact
+#     end-user change; explicitly deferred.
+#   - Auto-labeling policies -- separate construct, separate reconciler
+#     (#67).
+#   - Draft-07 JSON schema -- separate file (#68).
+#
+# Allowed `advancedSettings:` keys (ADR 0015 §3 allowlist; extended by
+# ADR 0030 row 1 / issue #488 and row 2 / issue #490):
+#   RequireDowngradeJustification : (bool) prompt user when reducing
+#                                    classification.
+#   MandatoryLabelling            : (bool) block save/send on unlabelled
+#                                    items. Default false in lab.
+#   HideBarByDefault              : (bool) hide the sensitivity bar.
+#                                    Default false in lab.
+#   OutlookDefaultLabel           : (label reference, composite or bare)
+#                                    pre-select this label on new emails
+#                                    in Outlook. User may change before
+#                                    send. Lab uses `Public` (lowest
+#                                    classification) so smallest-blast-
+#                                    radius pre-selection still lets the
+#                                    user opt up. Resolved YAML-side to
+#                                    the immutable label GUID by
+#                                    `scripts/Deploy-LabelPolicies.ps1`
+#                                    via `Resolve-DesiredAdvancedSettingLabel`.
+#   teamworkdefaultlabelid        : (label reference, composite or bare)
+#                                    pre-select this label on new Outlook
+#                                    calendar events and Teams meetings.
+#                                    User may change before send. Same
+#                                    `Public`-as-safe-default rationale as
+#                                    OutlookDefaultLabel. Resolved via the
+#                                    same `Resolve-DesiredAdvancedSettingLabel`
+#                                    helper. Key name is all-lowercase per
+#                                    the Microsoft Learn example shape
+#                                    (Set-LabelPolicy reference page).
+#   Any other key is a schema-validation error in `Deploy-LabelPolicies.ps1`.
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/sensitivity-labels
+#   https://learn.microsoft.com/en-us/purview/create-sensitivity-labels#publish-sensitivity-labels-by-creating-a-label-policy
+#   https://learn.microsoft.com/en-us/purview/sensitivity-labels-office-apps#configure-advanced-settings
+#   https://learn.microsoft.com/en-us/purview/sensitivity-labels-aip#outlook-specific-options-for-default-label-and-mandatory-labeling
+#   https://learn.microsoft.com/en-us/purview/sensitivity-labels-meetings
+#   https://learn.microsoft.com/en-us/purview/create-sensitivity-labels#when-changes-take-effect
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-labelpolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-labelpolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-labelpolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/remove-labelpolicy
+#
+# Sample-data rule (`.github/instructions/sample-data.instructions.md`):
+#   - The lab targets a single tenant with a single human owner; both
+#     policies bind to `ExchangeLocation: [All]`. No real UPNs, group
+#     IDs, or mailbox addresses appear in this file. Future scope-by-
+#     group pivots must use the synthetic placeholder
+#     `00000000-0000-0000-0000-000000000000` until a real group ID is
+#     available, in which case the value flows through ParametersFile,
+#     not through committed YAML.
+
+labelPolicies:
+  - name: Global sensitivity label policy
+    mode: Enable
+    exchangeLocation:
+      - All
+    modernGroupLocation: []
+    includedAdministrativeUnits: []
+    powerBIComplianceInformation: true
+    labels:
+      - General
+      - Public
+    advancedSettings:
+      DefaultLabel: "General"
+      OutlookDefaultLabel: "General"
+      RequireDowngradeJustification: "true"
+      teamworkdefaultlabelid: "General"
+  - name: Lab Confidential + HC
+    mode: Enable
+    exchangeLocation:
+      - All
+    modernGroupLocation: []
+    includedAdministrativeUnits: []
+    powerBIComplianceInformation: true
+    labels:
+      - Confidential
+      - Confidential/External
+      - Confidential/Internal
+      - Confidential/Partner
+      - General
+      - Highly Confidential
+      - Highly Confidential/External (Restricted)
+      - Highly Confidential/Internal (Restricted)
+      - Highly Confidential/Partner (Restricted)
+      - Public
+    advancedSettings:
+      DefaultLabel: "General"
+      OutlookDefaultLabel: "General"
+      RequireDowngradeJustification: "true"
+      teamworkdefaultlabelid: "General"

@@ -1,0 +1,34 @@
+# Microsoft Purview Unified Catalog — Critical Data Elements (desired state)
+#
+# A Critical Data Element (CDE) is a business-defined attribute whose
+# accuracy is essential to operations or reporting. CDEs are mapped to
+# data products and serve as anchors for data-quality health controls.
+#
+# Default steady state is `items: []` — no-op safe on first run.
+# Live content onboarding is tracked separately and depends on #340.
+#
+# Decision context:
+#   docs/adr/0024-unified-catalog-folder-placement.md
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/unified-catalog
+#
+# Field shape (validated against critical-data-elements.schema.json):
+#   name         (required, string)   Display name. Unique across the file.
+#   description  (optional, string)   Short prose describing the element.
+#   domain       (required, string)   Parent governance domain name.
+#   dataType     (optional, string)   One of: String, Number, Date,
+#                                     Boolean, Identifier, Other.
+#   owners       (optional, string[]) Entra group display names.
+#   status       (optional, string)   One of: Draft, Published, Expired.
+#
+# Example (commented-out; do not uncomment on main):
+#   - name: Customer Tax ID
+#     description: Government-issued tax identifier for billing reconciliation.
+#     domain: Finance
+#     dataType: Identifier
+#     owners:
+#       - sg-purview-finance-domain-owners
+#     status: Draft
+
+items: []

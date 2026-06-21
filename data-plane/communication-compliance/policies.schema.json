@@ -1,0 +1,91 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/communication-compliance/policies.schema.json",
+    "title": "Microsoft Purview Communication Compliance policies",
+    "description": "Desired state for Microsoft Purview Communication Compliance policies consumed by scripts/Deploy-CommunicationCompliance.ps1. Reference: https://learn.microsoft.com/en-us/purview/communication-compliance",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "policies" ],
+    "properties": {
+        "policies": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/communicationCompliancePolicy" }
+        }
+    },
+    "definitions": {
+        "communicationCompliancePolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "reviewers" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Unique policy identifier. Maps to the -Name parameter of New-SupervisoryReviewPolicyV2. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-supervisoryreviewpolicyv2"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Free-form policy description. Maps to -Comment on New-SupervisoryReviewPolicyV2."
+                },
+                "reviewers": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                        "type": "string",
+                        "minLength": 3,
+                        "description": "Reviewer principal: a user UPN or a mail-enabled security group SMTP address."
+                    },
+                    "description": "Reviewers who triage flagged matches. Maps to -Reviewers on New-SupervisoryReviewPolicyV2. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-supervisoryreviewpolicyv2"
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether the policy is active. When omitted, the cmdlet default applies."
+                },
+                "rules": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": { "$ref": "#/definitions/communicationComplianceRule" },
+                    "description": "Optional list of supervisory review rules attached to this policy. Each rule controls what content is reviewed (conditions, sampling rate, content sources). When omitted or empty, the script manages the policy header only and leaves existing rules untouched. Note: there is no Remove-SupervisoryReviewRule cmdlet on the V2 surface (verified against Microsoft Learn on 2026-05-16); rules can be created and updated, but not deleted in place. Removing a rule requires removing its parent policy. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-supervisoryreviewrule"
+                }
+            }
+        },
+        "communicationComplianceRule": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Unique rule name within the parent policy. Maps to the -Name parameter of New-SupervisoryReviewRule. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-supervisoryreviewrule"
+                },
+                "condition": {
+                    "type": "string",
+                    "description": "Rule condition expression evaluated against in-scope content (KQL-style predicate). Maps to the -Condition parameter of New-SupervisoryReviewRule. When omitted, the cmdlet default applies (typically reviews all in-scope content). Reference: https://learn.microsoft.com/en-us/purview/communication-compliance-policies"
+                },
+                "samplingRate": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Percentage of in-scope content to surface for review (1-100). Maps to -SamplingRate on New-SupervisoryReviewRule. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-supervisoryreviewrule"
+                },
+                "contentSources": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "items": {
+                        "type": "string",
+                        "minLength": 1
+                    },
+                    "description": "Workloads to scan (e.g., ExchangeOnline, TeamsMessages, YammerMessages). Maps to -ContentSources on New-SupervisoryReviewRule. Allowed values vary by tenant license; verify against Microsoft Learn before adding entries. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-supervisoryreviewrule"
+                },
+                "ocr": {
+                    "type": "boolean",
+                    "description": "Whether to apply OCR to image content. Maps to -Ocr on New-SupervisoryReviewRule."
+                }
+            }
+        }
+    }
+}

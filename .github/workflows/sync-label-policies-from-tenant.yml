@@ -1,0 +1,248 @@
+name: sync-label-policies-from-tenant
+
+# Drift-back companion to deploy-label-policies.yml. Detects portal-only
+# edits to the Microsoft Purview / Microsoft 365 sensitivity-label POLICY
+# set in the contoso.onmicrosoft.com tenant and opens (or refreshes) a pull
+# request that re-exports tenant state into
+# data-plane/information-protection/label-policies.yaml. The PR is
+# reviewed by the lab owner; merging it restores the repo as source of
+# truth, after which deploy-label-policies.yml's conflict guard passes
+# again on the new SHA.
+#
+# Sibling of sync-labels-from-tenant.yml (PR #149). Where that workflow
+# owns the label TAXONOMY, this workflow owns the BINDING of those labels
+# to end-user locations via *-LabelPolicy cmdlets.
+#
+# Read-only against the tenant. This workflow never invokes the apply
+# path of Deploy-LabelPolicies.ps1; it only runs -ExportCurrentState. The
+# apply path lives in deploy-label-policies.yml (PR #181) and is gated by
+# its own conflict guard.
+#
+# No -RedactIdentities: unlike labels.yaml (which can carry owner UPNs /
+# object IDs), label-policies.yaml carries only policy names, the
+# `ExchangeLocation: [All]` token, label-name references, and the
+# allow-listed advanced-settings keys defined in ADR 0015 Section 3.
+# Nothing in the exported shape resolves to a real tenant identifier.
+#
+# Federated credential reuse: the gh-oidc-purview-data-plane app's
+# federated credential is scoped to
+# `repo:contoso/Purview-as-Code-Generic:environment:lab`
+# (per ADR 0010). Because this job declares `environment: lab`, no new
+# federated credential subject is required for the schedule trigger.
+#
+# Key Vault access: the runner principal signs the IPPS client_assertion
+# JWT via `az keyvault key sign` against kv-contoso-lab-01. The vault is
+# private-network by default; the workflow temp-opens its public endpoint
+# for the duration of the export and restores it via an `if: always()`
+# step. The 30-second sleep matches deploy-label-policies.yml (PR #181);
+# the 25-second value used by sync-labels-from-tenant.yml has been flaky
+# in local lab smoke runs.
+#
+# References (Microsoft Learn, GitHub Docs, action upstream):
+#   https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+#   https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust
+#   https://learn.microsoft.com/en-us/powershell/exchange/connect-to-scc-powershell
+#   https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-labelpolicy
+#   https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+#   https://github.com/peter-evans/create-pull-request
+
+on:
+  schedule:
+    # Daily at 06:00 UTC. Cron grammar:
+    # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write           # OIDC token for azure/login@v2.
+  contents: write           # peter-evans/create-pull-request pushes the auto/label-policies-drift-sync branch.
+  pull-requests: write      # peter-evans/create-pull-request opens / updates the PR.
+
+concurrency:
+  group: sync-label-policies-lab
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync label policies from tenant
+    runs-on: ubuntu-latest
+    environment: lab
+    env:
+      KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install PowerShell modules
+        shell: pwsh
+        run: |
+          Install-Module powershell-yaml -Force -Scope CurrentUser
+          # Connect-IPPSSession -AccessToken requires ExchangeOnlineManagement
+          # v3.8.0-Preview1+; -AllowPrerelease until GA. Mirrors deploy-label-policies.yml.
+          # Reference: https://learn.microsoft.com/en-us/powershell/exchange/exchange-online-powershell-v2
+          Install-Module ExchangeOnlineManagement -Force -Scope CurrentUser -AllowPrerelease
+
+      - name: Temporarily allow Key Vault public access
+        id: kv-open
+        shell: pwsh
+        run: |
+          if (-not $env:KEY_VAULT_NAME) {
+            throw "vars.KEY_VAULT_NAME is not set on the lab environment. Set it before re-running."
+          }
+          az keyvault update `
+            --name $env:KEY_VAULT_NAME `
+            --public-network-access Enabled `
+            --default-action Allow `
+            --only-show-errors `
+            -o none
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "opened=true"
+          # Wait for the network rule change to propagate before the first
+          # data-plane call. 30s matches deploy-label-policies.yml; 25s has
+          # been flaky in local lab smoke runs.
+          Start-Sleep -Seconds 30
+
+      - name: Export tenant label policies into tracked YAML
+        shell: pwsh
+        run: |
+          # -ExportCurrentState rewrites only the `policies:` block of the
+          # target file (header comment is preserved). No -RedactIdentities:
+          # label-policies.yaml has no fields that resolve to real tenant
+          # identifiers (see header comment). -Force is required because
+          # the file already declares policies.
+          ./scripts/Deploy-LabelPolicies.ps1 `
+            -ExportCurrentState `
+            -Force `
+            -Path 'data-plane/information-protection/label-policies.yaml'
+
+      - name: Filter cosmetic-only export diff (issue #508)
+        shell: pwsh
+        run: |
+          # The export round-trip via ConvertTo-Yaml strips inline YAML
+          # comments and blank lines below the line-splice cut point;
+          # that is a deferred defect class tracked separately. We do
+          # not want it to open a drift-back PR every scheduled run, so
+          # we inspect the diff here and revert the file when the only
+          # changes are blank lines and comment-only lines. Tracked-field
+          # changes (any other line) flow through unchanged and
+          # peter-evans/create-pull-request opens the PR as before.
+          # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_regular_expressions
+          $path = 'data-plane/information-protection/label-policies.yaml'
+          $diff = git diff -U0 -- $path
+          if (-not $diff) {
+            Write-Host '::notice::No diff after export.'
+            return
+          }
+          $meaningful = $false
+          foreach ($line in ($diff -split "`n")) {
+            if ($line -notmatch '^[-+]') { continue }
+            if ($line -match '^(---|\+\+\+)') { continue }
+            $payload = $line.Substring(1)
+            if ($payload -match '^\s*$') { continue }
+            if ($payload -match '^\s*#') { continue }
+            $meaningful = $true
+            break
+          }
+          if (-not $meaningful) {
+            Write-Host '::notice::Diff is cosmetic-only (blank lines + YAML comments). Reverting export and skipping drift-back PR per issue #508.'
+            git checkout HEAD -- $path
+          } else {
+            Write-Host '::notice::Meaningful drift detected. Proceeding to drift-back PR.'
+          }
+
+      - name: Open or update drift-back PR
+        id: cpr
+        # peter-evans/create-pull-request@v8.1.1
+        # SHA reused from sync-labels-from-tenant.yml (PR #149); re-verified
+        # 2026-05-13 against
+        # https://github.com/peter-evans/create-pull-request/releases/tag/v8.1.1
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1
+        with:
+          add-paths: data-plane/information-protection/label-policies.yaml
+          branch: auto/label-policies-drift-sync
+          base: main
+          delete-branch: false
+          title: 'chore(data-plane): sync label policies from tenant'
+          commit-message: |
+            chore(data-plane): sync label policies from tenant
+
+            Automated drift-back from sync-label-policies-from-tenant.yml.
+            Re-exports the live Microsoft Purview / Microsoft 365
+            sensitivity-label POLICY set in tenant contoso.onmicrosoft.com into
+            data-plane/information-protection/label-policies.yaml so the
+            repo remains source of truth.
+
+            See: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-labelpolicy
+          labels: |
+            needs-review
+            squad:automation-engineer
+          body: |
+            Automated drift-back from `.github/workflows/sync-label-policies-from-tenant.yml`.
+
+            The live Microsoft Purview / Microsoft 365 sensitivity-label
+            POLICY set in tenant `contoso.onmicrosoft.com` no longer matches
+            `data-plane/information-protection/label-policies.yaml`. This
+            PR re-exports the tenant state via
+            `scripts/Deploy-LabelPolicies.ps1 -ExportCurrentState` so the
+            repo regains source-of-truth before the next
+            `deploy-label-policies.yml` apply.
+
+            ## Review checklist
+
+            - [ ] The diff reflects an intended portal edit. If the portal
+                  edit was a mistake, **close this PR** and revert the
+                  edit in the Microsoft Purview portal instead.
+            - [ ] Any `advancedSettings` keys in the exported diff are on
+                  the ADR 0015 Section 3 allow-list (`RequireDowngradeJustification`,
+                  `MandatoryLabelling`, `HideBarByDefault`). If a new key
+                  appears, file an ADR 0015 amendment before merging.
+            - [ ] After merge, the next `deploy-label-policies.yml` push
+                  run on `main` should pass its conflict guard on the new
+                  SHA.
+
+            ## Notes
+
+            - This workflow runs as the GitHub Actions `GITHUB_TOKEN`, so
+              the PR open event will not automatically dispatch other
+              workflows (`validate.yml` etc.). To re-run validation,
+              close and reopen the PR, or push an empty commit to the
+              `auto/label-policies-drift-sync` branch.
+            - Trigger: `${{ github.event_name }}` (run id `${{ github.run_id }}`).
+
+            Refs: #182
+
+      - name: Restore Key Vault network defaults
+        if: always() && steps.kv-open.outputs.opened == 'true'
+        shell: pwsh
+        run: |
+          az keyvault update `
+            --name $env:KEY_VAULT_NAME `
+            --public-network-access Disabled `
+            --default-action Deny `
+            --only-show-errors `
+            -o none
+
+      - name: Summarize result
+        if: always()
+        shell: pwsh
+        env:
+          PR_OPERATION: ${{ steps.cpr.outputs.pull-request-operation }}
+          PR_URL: ${{ steps.cpr.outputs.pull-request-url }}
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PR_OPERATION)) {
+            Write-Host "::notice::Drift-back step did not produce a PR outcome (the job failed before reaching peter-evans/create-pull-request)."
+          } elseif ($env:PR_OPERATION -eq 'none') {
+            Write-Host "::notice::No drift detected. Tenant matches data-plane/information-protection/label-policies.yaml."
+          } else {
+            Write-Host ("::notice::Drift PR {0}: #{1} {2}" -f $env:PR_OPERATION, $env:PR_NUMBER, $env:PR_URL)
+          }

@@ -1,0 +1,117 @@
+# Watch-list manifest — scheduled re-open-trigger re-verification (#725).
+#
+# Each entry is a Microsoft Learn / REST / Graph page whose change would unblock a
+# standing §8 watch-list ADR. The watch-list-review loop
+# (.github/workflows/watch-list-review.yml) fetches each `url` weekly (read-only,
+# public) and flags a MATERIAL change against the recorded baseline, then opens a
+# single deduplicated issue routed to @idea-intake. The loop never auto-closes a
+# watch-list issue and never ships a reconciler change — a flagged trigger still
+# requires a human re-verification (often interactive-tenant) per the cited ADR.
+#
+# signal types:
+#   updated-since : the page is expected HTTP 200 today. Flag when its `updated_at`
+#                   date advances past `baseline` (Microsoft touched the page →
+#                   re-verify) OR when the status is no longer 200 (moved / retired).
+#   appears       : the page is expected HTTP 404 today (the authoring surface does
+#                   not exist yet). Flag when it becomes reachable (HTTP 200) — the
+#                   surface may have shipped, which is itself a re-open trigger.
+#
+# `url` records the CURRENT canonical address. Cmdlet pages were migrated from
+# /powershell/module/exchange/* to /powershell/module/exchangepowershell/* (the
+# loop follows redirects regardless); accepted ADRs are immutable, so the current
+# URL lives here, not in the ADR (see #725, same link-rot class as #710).
+#
+# Baselines captured 2026-06-20. References:
+#   https://learn.microsoft.com/en-us/purview/whats-new
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+
+entries:
+  - id: adr-0019-q10-comms-compliance
+    adr: docs/adr/0019-cc-graph-pivot.md
+    row: project-plan §8 Q10
+    relatedIssue: 367
+    url: https://learn.microsoft.com/en-us/purview/communication-compliance-policies
+    signal: updated-since
+    baseline: '2026-06-01'
+    lastVerified: '2026-06-20'
+
+  - id: adr-0022-q11-dspm-for-ai
+    adr: docs/adr/0022-dspm-for-ai-authoring-surface.md
+    row: project-plan §8 Q11
+    relatedIssue: 368
+    url: https://learn.microsoft.com/en-us/purview/dspm-for-ai
+    signal: updated-since
+    baseline: '2026-05-01'
+    lastVerified: '2026-06-20'
+
+  - id: adr-0027-q14-label-autoapply-article
+    adr: docs/adr/0027-autoapplication-removal-watch-list.md
+    row: project-plan §8 Q14
+    relatedIssue: 512
+    url: https://learn.microsoft.com/en-us/purview/apply-sensitivity-label-automatically
+    signal: updated-since
+    baseline: '2026-06-17'
+    lastVerified: '2026-06-20'
+
+  - id: adr-0027-q14-label-autoapply-set-label
+    adr: docs/adr/0027-autoapplication-removal-watch-list.md
+    row: project-plan §8 Q14
+    relatedIssue: 512
+    url: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-label
+    signal: updated-since
+    baseline: '2026-05-16'
+    lastVerified: '2026-06-20'
+
+  - id: adr-0035-q15-records-file-plan-manager
+    adr: docs/adr/0035-records-seed-content-immovable.md
+    row: project-plan §8 Q15
+    relatedIssue: 364
+    url: https://learn.microsoft.com/en-us/purview/file-plan-manager
+    signal: updated-since
+    baseline: '2026-04-30'
+    lastVerified: '2026-06-20'
+
+  - id: adr-0035-q15-records-remove-fileplanproperty
+    adr: docs/adr/0035-records-seed-content-immovable.md
+    row: project-plan §8 Q15
+    relatedIssue: 364
+    url: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/remove-fileplanpropertyauthority
+    signal: updated-since
+    baseline: '2026-05-16'
+    lastVerified: '2026-06-20'
+
+  - id: adr-0036-irm-tenant-setting
+    adr: docs/adr/0036-irm-tenant-setting-immovable.md
+    row: project-plan §5.3 IRM
+    relatedIssue: 603
+    url: https://learn.microsoft.com/en-us/purview/insider-risk-management-settings
+    signal: updated-since
+    baseline: '2025-11-18'
+    lastVerified: '2026-06-20'
+
+  - id: adr-0037-q13-unified-catalog-concept
+    adr: docs/adr/0037-unified-catalog-authoring-surface.md
+    row: project-plan §8 Q13
+    relatedIssue: 375
+    url: https://learn.microsoft.com/en-us/purview/unified-catalog
+    signal: updated-since
+    baseline: '2026-03-16'
+    lastVerified: '2026-06-20'
+
+  - id: adr-0037-q13-unified-catalog-rest-uc
+    adr: docs/adr/0037-unified-catalog-authoring-surface.md
+    row: project-plan §8 Q13
+    relatedIssue: 375
+    url: https://learn.microsoft.com/en-us/rest/api/purview/unifiedcatalogdataplane/
+    signal: appears
+    baseline: '404'
+    lastVerified: '2026-06-20'
+
+  - id: adr-0037-q13-unified-catalog-rest-datagov
+    adr: docs/adr/0037-unified-catalog-authoring-surface.md
+    row: project-plan §8 Q13
+    relatedIssue: 375
+    url: https://learn.microsoft.com/en-us/rest/api/purview/datagovernancedataplane/
+    signal: appears
+    baseline: '404'
+    lastVerified: '2026-06-20'
