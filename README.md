@@ -2,8 +2,11 @@
 
 > **This is a tenant-neutral template.** Every tenant-specific value is a placeholder using
 > Microsoft's documented fictitious identifiers (`contoso`, `contoso.onmicrosoft.com`). It will
-> **not** deploy against a real tenant until you tailor it. To tailor a fresh clone, run the
-> **Tenant Intake** agent — open Copilot Chat and invoke [`@operator-tenant`](.github/agents/operator-tenant.agent.md),
+> **not** deploy against a real tenant until you make it yours. First run the **Kickoff** agent
+> [`@operator-kickoff`](.github/agents/operator-kickoff.agent.md) to choose where your copy lives
+> (a local workspace or your own GitHub repo) and sever it from this source template so it can
+> never contribute content back, per [ADR 0045](docs/adr/0045-template-kickoff-spinoff-model.md).
+> Then run the **Tenant Intake** agent [`@operator-tenant`](.github/agents/operator-tenant.agent.md),
 > or edit [`infra/parameters/lab.yaml`](infra/parameters/lab.yaml) by hand and follow
 > [Getting started](docs/getting-started.md). Placeholders to replace: GitHub org/repo, tenant
 > domain, resource group, Purview account name, Key Vault, Log Analytics, OIDC app display names,
@@ -15,13 +18,14 @@ Declarative, version-controlled configuration of a Microsoft Purview environment
 
 ## Quick start
 
-From an empty clone to a tailored, deployable repo in five steps. Full detail: **[Tenant onboarding guide](docs/tenant-onboarding.md)**.
+From an empty copy to a tailored, deployable repo in six steps. Full detail: **[Tenant onboarding guide](docs/tenant-onboarding.md)**.
 
-1. **Clone** this template — click **Use this template** on GitHub, or `git clone https://github.com/<your-org>/<your-repo>.git`.
-2. **Tailor it.** Open the repo in VS Code, start Copilot Chat, and run the **Tenant Intake** agent [`@operator-tenant`](.github/agents/operator-tenant.agent.md). It interviews you for your tenant values and writes them into [`infra/parameters/lab.yaml`](infra/parameters/lab.yaml) and the identity-boundary statements.
-3. **Review the diff** the agent produced, then commit it on a branch.
-4. **Wire up identity.** Create the Microsoft Entra app + OIDC federated credential and set the GitHub Environment secrets — see [Getting started §1–§2](docs/getting-started.md).
-5. **Validate and deploy.** Run `az bicep build` and the Pester suite, then the `deploy-infra` / `deploy-data-plane` workflows — see the [Tenant onboarding guide](docs/tenant-onboarding.md) and [Getting started §4](docs/getting-started.md).
+1. **Get a copy.** Click **Use this template** on GitHub (a template-generated repo has unrelated history and cannot push back to the source), or `git clone https://github.com/<your-org>/<your-repo>.git` for a local workspace.
+2. **Decouple it.** Run the **Kickoff** agent [`@operator-kickoff`](.github/agents/operator-kickoff.agent.md) to choose a local workspace or a spin-off repo and install the no-push-back guard, per [ADR 0045](docs/adr/0045-template-kickoff-spinoff-model.md). (If you used **Use this template**, GitHub already decoupled you.)
+3. **Tailor it.** Run the **Tenant Intake** agent [`@operator-tenant`](.github/agents/operator-tenant.agent.md). It interviews you for your tenant values and writes them into [`infra/parameters/lab.yaml`](infra/parameters/lab.yaml) and the identity-boundary statements.
+4. **Review the diff** the agent produced, then commit it on a branch.
+5. **Wire up identity.** Create the Microsoft Entra app + OIDC federated credential, set the GitHub Environment secrets, and set the `OWNER_APPROVAL_LOGIN` repository variable — see [Getting started §1–§2](docs/getting-started.md).
+6. **Validate and deploy.** Run `az bicep build` and the Pester suite, then the `deploy-infra` / `deploy-data-plane` workflows — see the [Tenant onboarding guide](docs/tenant-onboarding.md) and [Getting started §4](docs/getting-started.md).
 
 ## Why two planes?
 

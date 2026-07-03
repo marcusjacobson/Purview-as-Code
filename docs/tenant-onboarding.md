@@ -2,12 +2,12 @@
 
 This guide takes a fresh clone of the **Purview-as-Code generic template** from zero to a
 tailored, deployable repository for **your** Microsoft Purview tenant. It orchestrates the
-clone → tailor → wire-up → deploy flow and hands off to [Getting started](getting-started.md)
+clone → decouple → tailor → wire-up → deploy flow and hands off to [Getting started](getting-started.md)
 for the detailed identity setup.
 
 > This template ships tenant-neutral. Every tenant-specific value is a Microsoft-documented
 > placeholder (`contoso`, `contoso.onmicrosoft.com`, zero-GUID). It will **not** deploy against
-> a real tenant until you complete Step 2.
+> a real tenant until you complete Step 3.
 
 ## Prerequisites
 
@@ -22,26 +22,50 @@ for the detailed identity setup.
 - Local tooling for validation: **Azure CLI** (`az`, includes Bicep), **PowerShell 7.4+**, and
   **Pester 5.x** (the test runner installs it if missing).
 
-## Step 1 — Clone the template
+## Step 1 — Get a copy of the template
 
 Use either path:
 
-- **GitHub UI:** click **Use this template → Create a new repository**. See
+- **GitHub UI (recommended for a spin-off repo):** click **Use this template → Create a new
+  repository**. A template-generated repository starts from a single commit with unrelated
+  history, so it cannot open a pull request back to the source template. See
   [Creating a repository from a template](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template).
-- **Command line:**
+- **Command line (for a local workspace):**
 
   ```bash
   git clone https://github.com/<your-org>/<your-repo>.git
   cd <your-repo>
   ```
 
+## Step 2 — Decouple your copy with the Kickoff agent
+
+Sever your copy from the source template so it can never contribute content back, per
+[ADR 0045](adr/0045-template-kickoff-spinoff-model.md).
+
+- If you used **Use this template** (Step 1), GitHub already decoupled you: a template-generated
+  repository has unrelated history and cannot open a pull request back to the source. You can skip
+  to Step 3.
+- If you **cloned** the template, open the repo in VS Code, start Copilot Chat, and run the
+  **Kickoff** agent:
+
+  ```text
+  @operator-kickoff
+  ```
+
+  The agent ([`.github/agents/operator-kickoff.agent.md`](../.github/agents/operator-kickoff.agent.md))
+  offers **Local workspace** (removes the source `origin` and resets history) or **Spin-off GitHub
+  repository** (creates your own repo and repoints `origin`), installs the no-push-back guard
+  ([`scripts/Set-KickoffGuard.ps1`](../scripts/Set-KickoffGuard.ps1)), verifies it
+  ([`scripts/Test-KickoffGuard.ps1`](../scripts/Test-KickoffGuard.ps1)), then hands off to the
+  Tenant Intake agent.
+
+## Step 3 — Tailor the copy with the Tenant Intake agent
+
 Create a working branch so the tailoring lands as a reviewable diff:
 
 ```bash
 git checkout -b chore/tenant-intake
 ```
-
-## Step 2 — Tailor the clone with the Tenant Intake agent
 
 Open the repo in VS Code, start Copilot Chat, and invoke the **Tenant Intake** agent:
 
@@ -63,12 +87,12 @@ them into:
   [`.github/CODEOWNERS`](../.github/CODEOWNERS), and the naming instructions.
 
 What the agent **never** does: store a secret or real subscription/tenant/object ID in any file,
-and never deploy. Subscription and tenant IDs belong in GitHub secrets, not in source (Step 4).
+and never deploy. Subscription and tenant IDs belong in GitHub secrets, not in source (Step 5).
 
 > Prefer to edit by hand? Open [`infra/parameters/lab.yaml`](../infra/parameters/lab.yaml) and
 > replace the values in the `TEMPLATE — replace the placeholder values below` header block.
 
-## Step 3 — Review the tailoring diff
+## Step 4 — Review the tailoring diff
 
 ```bash
 git --no-pager diff
@@ -87,7 +111,7 @@ Commit when satisfied:
 git add -A && git commit -m "chore(repo): tailor template for <your-tenant>"
 ```
 
-## Step 4 — Wire up the deployment identity and secrets
+## Step 5 — Wire up the deployment identity and secrets
 
 The repository authenticates to Azure from GitHub Actions using a **Microsoft Entra app + OIDC
 federated credential** — no stored client secret. Per
@@ -114,7 +138,7 @@ Follow [Getting started §1–§2](getting-started.md) for the exact `az ad app`
 > Never commit any of these values. They live only in GitHub secrets and in your local
 > `az account set` context.
 
-## Step 5 — Validate locally
+## Step 6 — Validate locally
 
 ```bash
 # Control plane compiles
@@ -126,7 +150,7 @@ pwsh -File tests/Run-Pester.ps1
 
 Both must pass before you deploy.
 
-## Step 6 — First deploy
+## Step 7 — First deploy
 
 Run the workflows from the **Actions** tab (or follow [Getting started §4](getting-started.md)):
 

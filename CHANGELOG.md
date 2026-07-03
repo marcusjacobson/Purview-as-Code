@@ -32,6 +32,7 @@ To add an entry:
 
 ### Documentation
 
+- **docs:** rewrite the README quick-start and tenant-onboarding guide to lead with the `@operator-kickoff` decouple step before tenant intake (#8)
 - **docs:** add ADR 0045 implementation tracking plan sequencing the follow-on tasks #6–#9 (#10)
 
 ## 2026-06-21
