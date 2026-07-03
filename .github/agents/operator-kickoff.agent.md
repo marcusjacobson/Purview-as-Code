@@ -61,12 +61,23 @@ git status --short
 git branch --show-current
 ```
 
-- Capture the current `origin` fetch URL — this is the **source template URL** the guard will be
-  built against. Detection is at runtime; nothing is hardcoded.
+- **Resolve the source template URL robustly** — how the copy was derived determines where the
+  source lives:
+  - **Use this template:** query the template relationship —
+    `gh repo view --json templateRepository -q '.templateRepository.url'` returns the true source.
+    Here `origin` is *your own* repo, not the source. References:
+    [gh repo view](https://cli.github.com/manual/gh_repo_view),
+    [Get a repository](https://docs.github.com/en/rest/repos/repos#get-a-repository) (`template_repository`).
+  - **git clone of the template:** there is no template relationship, so the source is the current
+    `origin` fetch URL (`git remote get-url origin`).
+  Confirm the resolved source URL with the owner, and pass it explicitly as `-SourceUrl` to the
+  guard scripts in Step 3. Never resolve the source to your own `origin` in Use-this-template mode.
+  Detection is at runtime; nothing is hardcoded.
 - **Layer 4 self-check.** If this working tree *is* the canonical source template repository (you
   are the template maintainer, not a consumer), **stop** — refuse to sever the source from itself.
-  Confirm with the owner: "Is this a copy you intend to decouple from the source template, not the
-  canonical template itself?" Proceed only on an affirmative.
+  Programmatic check: `gh repo view --json isTemplate -q '.isTemplate'` returns `true` for the
+  canonical template itself. Confirm with the owner: "Is this a copy you intend to decouple from
+  the source template, not the canonical template itself?" Proceed only on an affirmative.
 - Working tree should be clean. If dirty, ask the owner to commit or stash first.
 - Confirm this is an un-tailored template copy (README banner "tenant-neutral template"; `contoso`
   placeholders present). If it is already tailored/decoupled, warn before proceeding.
@@ -146,8 +157,8 @@ Install the git-level guard layers (disable any retained `upstream` push URL; in
 `pre-push` hook):
 
 ```pwsh
-./scripts/Set-KickoffGuard.ps1 -WhatIf   # preview first
-./scripts/Set-KickoffGuard.ps1           # apply after the owner confirms
+./scripts/Set-KickoffGuard.ps1 -SourceUrl '<source-url>' -WhatIf   # preview first
+./scripts/Set-KickoffGuard.ps1 -SourceUrl '<source-url>'           # apply after the owner confirms
 ```
 
 Then verify — this is a hard gate; do not hand off if it fails:
@@ -185,11 +196,15 @@ You never tailor tenant values, commit, push, or deploy yourself.
 5. **Never tailor tenant values** — that is `@operator-tenant`'s job. Hand off after the guard
    verifies.
 6. **Never hand off if `Test-KickoffGuard.ps1` fails.** The guard is a precondition for tailoring.
+7. **Never resolve the source template URL to your own `origin` in Use-this-template mode.** Use
+   the GitHub `templateRepository` relationship; a guard must never target the consumer's own repo.
 
 ## References
 
 - [Creating a repository from a template](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template)
 - [About forks](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/about-forks)
+- [gh repo view](https://cli.github.com/manual/gh_repo_view)
+- [Get a repository](https://docs.github.com/en/rest/repos/repos#get-a-repository)
 - [git-remote](https://git-scm.com/docs/git-remote)
 - [githooks](https://git-scm.com/docs/githooks)
 - [gh repo create](https://cli.github.com/manual/gh_repo_create)

@@ -44,7 +44,8 @@ Sever your copy from the source template so it can never contribute content back
 
 - If you used **Use this template** (Step 1), GitHub already decoupled you: a template-generated
   repository has unrelated history and cannot open a pull request back to the source. You can skip
-  to Step 3.
+  to Step 3. (If you run `@operator-kickoff` here anyway, it resolves the true source via the
+  GitHub template relationship, not `origin`, and installs only the optional pre-push backstop.)
 - If you **cloned** the template, open the repo in VS Code, start Copilot Chat, and run the
   **Kickoff** agent:
 

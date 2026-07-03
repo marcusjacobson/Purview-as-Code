@@ -20,6 +20,7 @@ To add an entry:
 
 ### Added
 
+- **scripts:** resolve the `@operator-kickoff` source template URL via the GitHub template relationship (with `origin` fallback), so the no-push-back guard works after "Use this template" and never targets the consumer's own repo (#18)
 - **scripts:** add the `@operator-kickoff` kickoff agent and the no-push-back guard (`scripts/modules/KickoffGuard.psm1`, `Set-KickoffGuard.ps1`, `Test-KickoffGuard.ps1`) that severs a template copy from the source repository, with Pester coverage (#7)
 
 ### Changed

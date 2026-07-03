@@ -216,8 +216,46 @@ exit 0
     return $template.Replace('__SOURCE_URL__', $normalized)
 }
 
+function Resolve-KickoffSourceUrl {
+    <#
+    .SYNOPSIS
+        Resolve the source template URL to guard against, preferring the
+        GitHub template relationship over 'origin'.
+    .DESCRIPTION
+        For a repository created via "Use this template", 'origin' is the
+        consumer's own repository and the true source is the GitHub template
+        relationship ('template_repository'). For a plain 'git clone' of the
+        template there is no template relationship, so 'origin' is the source.
+        Returns the template URL when present, otherwise origin, otherwise
+        empty. This precedence is what stops the guard from targeting the
+        consumer's own repository after "Use this template".
+        Reference: https://cli.github.com/manual/gh_repo_view
+    #>
+    [OutputType([string])]
+    param(
+        [Parameter()]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$OriginUrl = '',
+
+        [Parameter()]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$TemplateRepositoryUrl = ''
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($TemplateRepositoryUrl)) {
+        return $TemplateRepositoryUrl.Trim()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OriginUrl)) {
+        return $OriginUrl.Trim()
+    }
+    return ''
+}
+
 Export-ModuleMember -Function `
     'Get-NormalizedRepoUrl', `
     'Test-IsSameRepoUrl', `
     'Get-KickoffGuardStatus', `
-    'Get-KickoffPrePushHookContent'
+    'Get-KickoffPrePushHookContent', `
+    'Resolve-KickoffSourceUrl'
