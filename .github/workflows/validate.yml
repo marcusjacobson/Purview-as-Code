@@ -177,3 +177,18 @@ jobs:
           }
           Write-Host ''
           Write-Host 'All non-exempt Deploy-*.ps1 scripts satisfy the full-circle reconciler contract.'
+
+  landing-page-embeds:
+    name: Landing page embedded docs freshness
+    runs-on: ubuntu-latest
+    # Verifies that the offline documentation snapshots embedded in index.html
+    # (the file:// fallback for the reader panel) still match their source docs
+    # (README.md + docs/**). If a source doc changed without refreshing the
+    # snapshots, this fails. Regenerate and commit with:
+    #   pwsh ./scripts/Update-LandingPageEmbeds.ps1
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_functions_cmdletbindingattribute
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check embedded docs are current
+        shell: pwsh
+        run: ./scripts/Update-LandingPageEmbeds.ps1 -Check

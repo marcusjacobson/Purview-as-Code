@@ -20,6 +20,7 @@ To add an entry:
 
 ### Added
 
+- **scripts:** add `Update-LandingPageEmbeds.ps1` to refresh (and `-Check`) the offline documentation snapshots embedded in `index.html` (#22)
 - **scripts:** resolve the `@operator-kickoff` source template URL via the GitHub template relationship (with `origin` fallback), so the no-push-back guard works after "Use this template" and never targets the consumer's own repo (#18)
 - **scripts:** add the `@operator-kickoff` kickoff agent and the no-push-back guard (`scripts/modules/KickoffGuard.psm1`, `Set-KickoffGuard.ps1`, `Test-KickoffGuard.ps1`) that severs a template copy from the source repository, with Pester coverage (#7)
 
@@ -39,6 +40,14 @@ To add an entry:
 - **docs:** add an opinionated kickoff guide (`docs/kickoff-guide.md`) and feature it as the "start here" entry point in the README (#20)
 - **docs:** rewrite the README quick-start and tenant-onboarding guide to lead with the `@operator-kickoff` decouple step before tenant intake (#8)
 - **docs:** add ADR 0045 implementation tracking plan sequencing the follow-on tasks #6–#9 (#10)
+
+### Tests
+
+- **scripts:** add Pester coverage for `Update-LandingPageEmbeds.ps1` (embedding, drift detection, `-WhatIf` safety, idempotency) (#22)
+
+### CI/CD
+
+- **ci:** add a `validate.yml` gate that fails when `index.html`'s embedded doc snapshots drift from their source docs (#22)
 
 ## 2026-06-21
 

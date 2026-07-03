@@ -681,8 +681,9 @@
     Offline snapshots of the linked docs, so the reader panel works when this page is
     opened directly from disk (file://) where browsers block fetch of local files.
     When the page is served over HTTP the reader fetches the live file first and only
-    falls back to these snapshots. They are generated from the source docs — refresh
-    them whenever those docs change (see docs/README notes in PR #23).
+    falls back to these snapshots. They are generated from the source docs — do not
+    hand-edit. Refresh with `pwsh ./scripts/Update-LandingPageEmbeds.ps1`; the
+    landing-page-embeds job in .github/workflows/validate.yml fails if they drift.
   -->
   <!-- EMBEDDED-DOCS:START -->
   <script type="text/markdown" data-doc="README.md">
@@ -818,6 +819,196 @@ References:
 Scheduled watch loops (drift, surface, and the planned code- and feature-currency loops) file their findings as review issues into a discoverable queue — see [`.github/copilot-automations/README.md`](.github/copilot-automations/README.md).
 
   </script>
+  <script type="text/markdown" data-doc="docs/architecture.md">
+# Architecture
+
+## Two-plane model
+
+```mermaid
+flowchart LR
+    PR[Pull request] --> Validate[validate.yml<br/>Bicep lint · yamllint · PSScriptAnalyzer]
+    Validate -->|merge| Main[main branch]
+    Main -->|infra/** changed| Infra[deploy-infra.yml]
+    Main -->|data-plane/** or scripts/** changed| Data[deploy-data-plane.yml]
+
+    Infra -->|az deployment group create| ARM[(Azure Resource Manager)]
+    ARM -->|Microsoft.Purview/accounts| Account[Purview Account<br/>purview-contoso-lab]
+
+    Data -->|OIDC| Entra[(Entra ID)]
+    Entra -->|Bearer https://purview.azure.net| DP[Purview Data Plane APIs]
+    DP --> Collections
+    DP --> Glossary
+    DP --> Classifications
+    DP --> Sources[Data Sources]
+    DP --> Scans
+
+    subgraph Purview account
+        Account
+        Collections
+        Glossary
+        Classifications
+        Sources
+        Scans
+    end
+```
+
+## Why this shape
+
+- **Account name is identity.** The Purview account name is the DNS hostname of the data plane (`<name>.purview.azure.com`) and the name of the root collection. Renaming is effectively a rebuild; IaC treats it as a fixed input.
+- **Data plane is not in ARM.** Collections, glossary, classifications, sources, and scans are invisible to Bicep/Terraform. They live behind the Atlas v2 / Purview scan / Purview account REST APIs. That is why this repo ships PowerShell helpers driven by YAML manifests.
+- **OIDC > client secret.** The federated credential on the Entra app lets GitHub Actions obtain short-lived tokens for both `https://management.azure.com` (ARM) and `https://purview.azure.net` (data plane) with no stored secret.
+- **Idempotent upserts.** Each script resolves current state and issues PUTs. Deletes are deliberately opt-in to prevent a mis-merged PR from dropping production collections.
+
+## Endpoints & API versions
+
+| Concern | Endpoint | API version |
+|---|---|---|
+| Account / collections | `https://<acct>.purview.azure.com/account` | `2019-11-01-preview` |
+| Atlas (glossary, typedefs, entities) | `https://<acct>.purview.azure.com/datamap/api/atlas/v2` | Atlas v2 |
+| Scanning (sources, scans, rulesets) | `https://<acct>.purview.azure.com/scan` | `2022-02-01-preview` |
+
+> [!NOTE]
+> The DevOps / data-owner policies surface (`https://<acct>.purview.azure.com/policystore`, `2022-08-01-preview`) is **no longer managed by this repo**. Its reconciler was retired per [ADR 0038](adr/0038-devops-policies-reconciler-retirement.md) — the surface is in classic customer-support mode with documentation mirrored under `/purview/legacy/` and no GA `api-version`.
+
+References: [Purview REST API index](https://learn.microsoft.com/en-us/rest/api/purview/), [Microsoft.Purview/accounts Bicep](https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts).
+
+
+## Reference patterns adopted from `Azure-Deployment-Pipelines`
+
+The reference repo (`Azure-Deployment-Pipelines/Purview/`) ships three working solutions today: `Purview-AutoLabel-Policy`, `Bulk-Sensitivity-Label-Change-M365`, and `SIT-Confidence-Analysis` (sister repo; paths are workspace-local on the lab owner's machine, not navigable from this repo). Patterns worth porting, with this repo's translation:
+
+| Reference repo pattern | This repo's translation |
+|---|---|
+| `ExchangeOnlineManagement` v3.0+ with `Connect-IPPSSession` for Security & Compliance Center cmdlets | Same module, same cmdlet. Add `Connect-ComplianceCenter.ps1` helper alongside [`scripts/Connect-Purview.ps1`](../scripts/Connect-Purview.ps1). |
+| App-only cert-in-Key-Vault auth for unattended runs | Same pattern. Certificate issued into the existing lab Key Vault, federated to the GitHub Actions workload identity per [Use Azure Login with OpenID Connect](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect). |
+| Three policy modes: `TestWithoutNotifications` → `TestWithNotifications` → `Enable` | Preserved verbatim in `data-plane/information-protection/auto-label-policies.yaml` as `mode:`. Default in new files is `TestWithoutNotifications`. |
+| Three confidence tiers: Low (≤65%) / Medium (66–84%) / High (85–100%) | Preserved. Encoded as `confidenceLevel:` on each SIT reference. See [Sensitive information type confidence levels](https://learn.microsoft.com/en-us/purview/sensitive-information-type-learn-about#more-information-on-confidence-levels). |
+| SIT identity by GUID (for example, `a44669fe-0d48-453d-a9b1-2cc83f2cba77` for U.S. SSN) | Preserved. GUIDs live in `data-plane/classifications/sit-catalog.yaml` with a human-readable `displayName:` beside each one. |
+| `params.json` per-solution config file | Translated to YAML (`solution.yaml` + `*.params.yaml`) to match [`.github/instructions/data-plane-yaml.instructions.md`](../.github/instructions/data-plane-yaml.instructions.md). JSON is not a first-class format here. |
+| Azure DevOps pipelines with service connections | Translated to GitHub Actions with OIDC federated credentials. Same outcome, different CI. |
+| Content Explorer CSV export as the confidence-analysis data source (not Data Explorer) | Preserved as guidance in the DSPM/analysis wave. |
+| Windows PowerShell 5.1 requirement for WAM | **Not adopted.** This repo mandates pwsh 7.4+ per [`.github/instructions/powershell.instructions.md`](../.github/instructions/powershell.instructions.md). Any cmdlet that truly requires 5.1 is called out in an ADR or avoided. |
+
+## Sensitivity label protection model
+
+Each encrypted sublabel in [`data-plane/information-protection/labels.yaml`](../data-plane/information-protection/labels.yaml) declares a `protectionType:` value (`Template`, `UserDefined`, or `RemoveProtection`). The choice is a deliberate security-posture trade-off; flipping it changes both the runtime behavior and the Microsoft Purview portal UX. The repo default is `UserDefined`.
+
+| `protectionType:` | Permissions source | UI "Assign permissions" editor | When to choose |
+|---|---|---|---|
+| `Template` | Permissions are baked into the label and applied identically every time the label is set. | Grayed out in the Purview portal — users and admins cannot adjust per-document permissions. | High-assurance scenarios where the permission set must be uniform, auditable, and immune to user error (regulated data, compliance-driven access controls). |
+| `UserDefined` | Permissions are chosen at apply time by the labeller (user or admin) within the bounds the label allows. | Available in the Purview portal — permissions can be set per document. | Day-to-day collaboration where the labeller needs flexibility (sharing specific files with named partners, ad-hoc external recipients). |
+| `RemoveProtection` | No encryption applied; any prior encryption is stripped. | Not applicable. | Down-classification flows and explicit "unprotect" sublabels. |
+
+Switching between `Template` and `UserDefined` is a YAML edit followed by a reconciler apply (`./scripts/Deploy-Labels.ps1`). It is reversible at any time. Re-evaluate the choice during any review that touches label scope, audience, or compliance posture. References: [Set-Label cmdlet](https://learn.microsoft.com/en-us/powershell/module/exchange/set-label), [Configure usage rights for Azure Information Protection](https://learn.microsoft.com/en-us/azure/information-protection/configure-usage-rights).
+
+### Applying label changes via CI
+
+Sensitivity labels are reconciled by the `Deploy sensitivity labels` step in the [`deploy-data-plane`](../.github/workflows/deploy-data-plane.yml) workflow. The workflow is manual-dispatch only (`workflow_dispatch`), and the labels step shares the same Key Vault firewall open/close window as the role-groups step so the vault returns to `publicNetworkAccess: Disabled` after every run.
+
+Dispatch procedure:
+
+1. Open the workflow in the GitHub Actions UI: **Actions → deploy-data-plane → Run workflow**.
+2. Choose inputs:
+   - `plan_labels_only: true` — runs `Deploy-Labels.ps1 -WhatIf`. No `Set-Label` calls; produces the plan table only. Use this first whenever the YAML has changed since the last apply.
+   - `plan_labels_only: false` (default) — runs `Deploy-Labels.ps1` for a live apply against the lab tenant.
+   - `prune_role_groups`: leave `false` unless the dispatch is specifically reconciling role-group drift; it does not affect labels.
+3. Confirm the run targets the `lab` environment and the `feat/...` or `main` ref you expect.
+4. After completion, inspect the `Deploy sensitivity labels` step log for the reconciler plan table and any `WARNING` rows (for example, the documented `autoApplicationOf` create-path gap).
+
+Who can dispatch: anyone with `write` access to the repo can dispatch, but the dispatch flows through the `lab` GitHub environment which is owner-gated. The data-plane workload identity (`gh-oidc-purview-data-plane`) is the principal that mutates labels; portal UI changes by humans require membership in `sg-purview-information-protection-admins`.
+
+  </script>
+  <script type="text/markdown" data-doc="docs/getting-started.md">
+# Getting started
+
+This guide wires the scaffolded repo to your existing `contoso-lab` Microsoft Purview account.
+
+## 1. One-time: deployment identity
+
+Create (or reuse) an Entra application that GitHub Actions will impersonate via OIDC federated credentials. Detailed steps: [Authenticate for APIs](https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane).
+
+```bash
+# Create the app + service principal
+az ad app create --display-name "gh-Purview-as-Code-Generic"
+APP_ID=$(az ad app list --display-name "gh-Purview-as-Code-Generic" --query "[0].appId" -o tsv)
+az ad sp create --id "$APP_ID"
+SP_OID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
+
+# Add a GitHub OIDC federated credential (replace owner/repo/ref)
+az ad app federated-credential create --id "$APP_ID" --parameters '{
+  "name": "github-main",
+  "issuer": "https://token.actions.githubusercontent.com",
+  "subject": "repo:contoso/Purview-as-Code-Generic:ref:refs/heads/main",
+  "audiences": ["api://AzureADTokenExchange"]
+}'
+```
+
+Grant the service principal:
+
+1. **Azure RBAC** — `Contributor` on the target resource group (needed for `infra/` deployment).
+2. **Purview data plane roles** — assigned at the root collection of the Purview account:
+   - `Collection Admin` — required for account/metadata APIs, collection CRUD, role assignments.
+   - `Data Curator` — required for glossary, classification typedefs, lineage.
+   - `Data Source Administrator` — required for data source registration and scans.
+
+> [!NOTE]
+> `Policy Author` is **not** required. This repo does not author DevOps / data-owner policies — that reconciler was retired per [ADR 0038](adr/0038-devops-policies-reconciler-retirement.md).
+
+Assignment UI: Purview portal → Data Map → Collections → root → **Role assignments**. See [Access control in Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions).
+
+## 2. GitHub configuration
+
+Under **Settings → Secrets and variables → Actions**:
+
+- Secrets (Environment: `lab`):
+  - `AZURE_CLIENT_ID` = `$APP_ID`
+  - `AZURE_TENANT_ID`
+  - `AZURE_SUBSCRIPTION_ID`
+- Variables (Environment: `lab`):
+  - `PURVIEW_ACCOUNT_NAME` = `purview-contoso-lab` (or your actual account name)
+- Variables (Repository — not environment-scoped, because [`pr-auto-merge.yml`](../.github/workflows/pr-auto-merge.yml) runs without an `environment:`):
+  - `OWNER_APPROVAL_LOGIN` = your GitHub login (the lab owner). The auto-merge workflow only enables merge when the `owner-approved` label is applied by this login. Set under **Settings → Secrets and variables → Actions → Variables**. See [Store information in variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables).
+
+Create the `lab` environment (Settings → Environments → New environment → `lab`).
+
+## 3. Point at the existing Purview account
+
+The `contoso-lab` account already exists, so the control-plane deploy will reconcile its properties (idempotent). Before the first run:
+
+1. Edit [`infra/main.bicepparam`](../infra/main.bicepparam) so `purviewAccountName` and `location` match the existing account.
+2. Edit [`data-plane/collections/collections.yaml`](../data-plane/collections/collections.yaml) so `rootCollection` equals the existing account name (root collection shares the account name).
+
+## 4. First deploy
+
+```bash
+# Optional local dry run
+az login
+pwsh ./scripts/Deploy-Collections.ps1     -AccountName purview-contoso-lab -WhatIf
+pwsh ./scripts/Deploy-Glossary.ps1        -AccountName purview-contoso-lab -WhatIf
+pwsh ./scripts/Deploy-Classifications.ps1 -AccountName purview-contoso-lab -WhatIf
+```
+
+Then push to `main` — `deploy-infra` runs first, followed by `deploy-data-plane`.
+
+## 5. Day-2 workflow
+
+- All changes via pull request.
+- `validate` runs on every PR (Bicep lint, yamllint, PSScriptAnalyzer).
+- Merging to `main` triggers the deploy workflow for whichever plane changed.
+- Destructive operations (collection delete, glossary term delete) are gated behind explicit `-PruneMissing` flags that are deliberately not enabled in CI yet.
+
+## 6. Context handoffs between chat sessions
+
+Long iterations of [`/build-item`](../.github/prompts/build-item.prompt.md) can fill the Copilot Chat context window or span multiple work sessions. Two prompt files manage the handoff:
+
+- [`/prepare-handoff`](../.github/prompts/prepare-handoff.prompt.md) — run **at the end** of a chat session that needs to pause. It writes a single Markdown brief to `.copilot-tracking/handoff/<branch>-<timestamp>.md` describing what was validated, what's left, and which prompt to resume with. The `.copilot-tracking/` folder is gitignored, so the brief is local-only scratch and never lands in a PR.
+- [`/resume-from-handoff`](../.github/prompts/resume-from-handoff.prompt.md) — run **at the start** of a fresh chat session. It loads the most recent brief, re-runs branch and working-tree precondition checks, restates the next step, and routes back to `/build-item` (or `@artifact-resolver`, or an ADR draft) per the brief. After a successful hand-off the brief is deleted automatically — briefs are one-shot.
+
+When to use them: context window ≥ 80% full, more than ~30 tool calls accumulated in the session, topic shifting between planes, end of a work day, or handing off to another contributor. See [`.github/instructions/context-handoff.instructions.md`](../.github/instructions/context-handoff.instructions.md) for the full trigger list and the rules on what a brief MUST and MUST NOT contain (no secrets, no real identifiers, no tool-call transcripts).
+
+When **not** to use them: for "ask a quick side question", prefer VS Code's [`/fork`](https://code.visualstudio.com/docs/copilot/chat/chat-sessions#_fork-a-chat-session). For "this iteration went sideways, undo", use [chat checkpoints](https://code.visualstudio.com/docs/copilot/chat/chat-checkpoints). Handoffs are for *cross-session resume*, not undo or branching.
+
+  </script>
   <script type="text/markdown" data-doc="docs/kickoff-guide.md">
 # Kickoff guide — stand up your own Purview-as-Code environment
 
@@ -938,196 +1129,6 @@ entry point.
 - **[Access control in Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions)** — least-privilege roles.
 - **[Use Azure Login with OpenID Connect](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect)** — OIDC for CI/CD.
 - [Tenant onboarding guide](tenant-onboarding.md) · [Getting started](getting-started.md) · [Architecture](architecture.md) · [ADR 0045](adr/0045-template-kickoff-spinoff-model.md)
-
-  </script>
-  <script type="text/markdown" data-doc="docs/getting-started.md">
-# Getting started
-
-This guide wires the scaffolded repo to your existing `contoso-lab` Microsoft Purview account.
-
-## 1. One-time: deployment identity
-
-Create (or reuse) an Entra application that GitHub Actions will impersonate via OIDC federated credentials. Detailed steps: [Authenticate for APIs](https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane).
-
-```bash
-# Create the app + service principal
-az ad app create --display-name "gh-Purview-as-Code-Generic"
-APP_ID=$(az ad app list --display-name "gh-Purview-as-Code-Generic" --query "[0].appId" -o tsv)
-az ad sp create --id "$APP_ID"
-SP_OID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
-
-# Add a GitHub OIDC federated credential (replace owner/repo/ref)
-az ad app federated-credential create --id "$APP_ID" --parameters '{
-  "name": "github-main",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:contoso/Purview-as-Code-Generic:ref:refs/heads/main",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-```
-
-Grant the service principal:
-
-1. **Azure RBAC** — `Contributor` on the target resource group (needed for `infra/` deployment).
-2. **Purview data plane roles** — assigned at the root collection of the Purview account:
-   - `Collection Admin` — required for account/metadata APIs, collection CRUD, role assignments.
-   - `Data Curator` — required for glossary, classification typedefs, lineage.
-   - `Data Source Administrator` — required for data source registration and scans.
-
-> [!NOTE]
-> `Policy Author` is **not** required. This repo does not author DevOps / data-owner policies — that reconciler was retired per [ADR 0038](adr/0038-devops-policies-reconciler-retirement.md).
-
-Assignment UI: Purview portal → Data Map → Collections → root → **Role assignments**. See [Access control in Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions).
-
-## 2. GitHub configuration
-
-Under **Settings → Secrets and variables → Actions**:
-
-- Secrets (Environment: `lab`):
-  - `AZURE_CLIENT_ID` = `$APP_ID`
-  - `AZURE_TENANT_ID`
-  - `AZURE_SUBSCRIPTION_ID`
-- Variables (Environment: `lab`):
-  - `PURVIEW_ACCOUNT_NAME` = `purview-contoso-lab` (or your actual account name)
-- Variables (Repository — not environment-scoped, because [`pr-auto-merge.yml`](../.github/workflows/pr-auto-merge.yml) runs without an `environment:`):
-  - `OWNER_APPROVAL_LOGIN` = your GitHub login (the lab owner). The auto-merge workflow only enables merge when the `owner-approved` label is applied by this login. Set under **Settings → Secrets and variables → Actions → Variables**. See [Store information in variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables).
-
-Create the `lab` environment (Settings → Environments → New environment → `lab`).
-
-## 3. Point at the existing Purview account
-
-The `contoso-lab` account already exists, so the control-plane deploy will reconcile its properties (idempotent). Before the first run:
-
-1. Edit [`infra/main.bicepparam`](../infra/main.bicepparam) so `purviewAccountName` and `location` match the existing account.
-2. Edit [`data-plane/collections/collections.yaml`](../data-plane/collections/collections.yaml) so `rootCollection` equals the existing account name (root collection shares the account name).
-
-## 4. First deploy
-
-```bash
-# Optional local dry run
-az login
-pwsh ./scripts/Deploy-Collections.ps1     -AccountName purview-contoso-lab -WhatIf
-pwsh ./scripts/Deploy-Glossary.ps1        -AccountName purview-contoso-lab -WhatIf
-pwsh ./scripts/Deploy-Classifications.ps1 -AccountName purview-contoso-lab -WhatIf
-```
-
-Then push to `main` — `deploy-infra` runs first, followed by `deploy-data-plane`.
-
-## 5. Day-2 workflow
-
-- All changes via pull request.
-- `validate` runs on every PR (Bicep lint, yamllint, PSScriptAnalyzer).
-- Merging to `main` triggers the deploy workflow for whichever plane changed.
-- Destructive operations (collection delete, glossary term delete) are gated behind explicit `-PruneMissing` flags that are deliberately not enabled in CI yet.
-
-## 6. Context handoffs between chat sessions
-
-Long iterations of [`/build-item`](../.github/prompts/build-item.prompt.md) can fill the Copilot Chat context window or span multiple work sessions. Two prompt files manage the handoff:
-
-- [`/prepare-handoff`](../.github/prompts/prepare-handoff.prompt.md) — run **at the end** of a chat session that needs to pause. It writes a single Markdown brief to `.copilot-tracking/handoff/<branch>-<timestamp>.md` describing what was validated, what's left, and which prompt to resume with. The `.copilot-tracking/` folder is gitignored, so the brief is local-only scratch and never lands in a PR.
-- [`/resume-from-handoff`](../.github/prompts/resume-from-handoff.prompt.md) — run **at the start** of a fresh chat session. It loads the most recent brief, re-runs branch and working-tree precondition checks, restates the next step, and routes back to `/build-item` (or `@artifact-resolver`, or an ADR draft) per the brief. After a successful hand-off the brief is deleted automatically — briefs are one-shot.
-
-When to use them: context window ≥ 80% full, more than ~30 tool calls accumulated in the session, topic shifting between planes, end of a work day, or handing off to another contributor. See [`.github/instructions/context-handoff.instructions.md`](../.github/instructions/context-handoff.instructions.md) for the full trigger list and the rules on what a brief MUST and MUST NOT contain (no secrets, no real identifiers, no tool-call transcripts).
-
-When **not** to use them: for "ask a quick side question", prefer VS Code's [`/fork`](https://code.visualstudio.com/docs/copilot/chat/chat-sessions#_fork-a-chat-session). For "this iteration went sideways, undo", use [chat checkpoints](https://code.visualstudio.com/docs/copilot/chat/chat-checkpoints). Handoffs are for *cross-session resume*, not undo or branching.
-
-  </script>
-  <script type="text/markdown" data-doc="docs/architecture.md">
-# Architecture
-
-## Two-plane model
-
-```mermaid
-flowchart LR
-    PR[Pull request] --> Validate[validate.yml<br/>Bicep lint · yamllint · PSScriptAnalyzer]
-    Validate -->|merge| Main[main branch]
-    Main -->|infra/** changed| Infra[deploy-infra.yml]
-    Main -->|data-plane/** or scripts/** changed| Data[deploy-data-plane.yml]
-
-    Infra -->|az deployment group create| ARM[(Azure Resource Manager)]
-    ARM -->|Microsoft.Purview/accounts| Account[Purview Account<br/>purview-contoso-lab]
-
-    Data -->|OIDC| Entra[(Entra ID)]
-    Entra -->|Bearer https://purview.azure.net| DP[Purview Data Plane APIs]
-    DP --> Collections
-    DP --> Glossary
-    DP --> Classifications
-    DP --> Sources[Data Sources]
-    DP --> Scans
-
-    subgraph Purview account
-        Account
-        Collections
-        Glossary
-        Classifications
-        Sources
-        Scans
-    end
-```
-
-## Why this shape
-
-- **Account name is identity.** The Purview account name is the DNS hostname of the data plane (`<name>.purview.azure.com`) and the name of the root collection. Renaming is effectively a rebuild; IaC treats it as a fixed input.
-- **Data plane is not in ARM.** Collections, glossary, classifications, sources, and scans are invisible to Bicep/Terraform. They live behind the Atlas v2 / Purview scan / Purview account REST APIs. That is why this repo ships PowerShell helpers driven by YAML manifests.
-- **OIDC > client secret.** The federated credential on the Entra app lets GitHub Actions obtain short-lived tokens for both `https://management.azure.com` (ARM) and `https://purview.azure.net` (data plane) with no stored secret.
-- **Idempotent upserts.** Each script resolves current state and issues PUTs. Deletes are deliberately opt-in to prevent a mis-merged PR from dropping production collections.
-
-## Endpoints & API versions
-
-| Concern | Endpoint | API version |
-|---|---|---|
-| Account / collections | `https://<acct>.purview.azure.com/account` | `2019-11-01-preview` |
-| Atlas (glossary, typedefs, entities) | `https://<acct>.purview.azure.com/datamap/api/atlas/v2` | Atlas v2 |
-| Scanning (sources, scans, rulesets) | `https://<acct>.purview.azure.com/scan` | `2022-02-01-preview` |
-
-> [!NOTE]
-> The DevOps / data-owner policies surface (`https://<acct>.purview.azure.com/policystore`, `2022-08-01-preview`) is **no longer managed by this repo**. Its reconciler was retired per [ADR 0038](adr/0038-devops-policies-reconciler-retirement.md) — the surface is in classic customer-support mode with documentation mirrored under `/purview/legacy/` and no GA `api-version`.
-
-References: [Purview REST API index](https://learn.microsoft.com/en-us/rest/api/purview/), [Microsoft.Purview/accounts Bicep](https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts).
-
-
-## Reference patterns adopted from `Azure-Deployment-Pipelines`
-
-The reference repo (`Azure-Deployment-Pipelines/Purview/`) ships three working solutions today: `Purview-AutoLabel-Policy`, `Bulk-Sensitivity-Label-Change-M365`, and `SIT-Confidence-Analysis` (sister repo; paths are workspace-local on the lab owner's machine, not navigable from this repo). Patterns worth porting, with this repo's translation:
-
-| Reference repo pattern | This repo's translation |
-|---|---|
-| `ExchangeOnlineManagement` v3.0+ with `Connect-IPPSSession` for Security & Compliance Center cmdlets | Same module, same cmdlet. Add `Connect-ComplianceCenter.ps1` helper alongside [`scripts/Connect-Purview.ps1`](../scripts/Connect-Purview.ps1). |
-| App-only cert-in-Key-Vault auth for unattended runs | Same pattern. Certificate issued into the existing lab Key Vault, federated to the GitHub Actions workload identity per [Use Azure Login with OpenID Connect](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect). |
-| Three policy modes: `TestWithoutNotifications` → `TestWithNotifications` → `Enable` | Preserved verbatim in `data-plane/information-protection/auto-label-policies.yaml` as `mode:`. Default in new files is `TestWithoutNotifications`. |
-| Three confidence tiers: Low (≤65%) / Medium (66–84%) / High (85–100%) | Preserved. Encoded as `confidenceLevel:` on each SIT reference. See [Sensitive information type confidence levels](https://learn.microsoft.com/en-us/purview/sensitive-information-type-learn-about#more-information-on-confidence-levels). |
-| SIT identity by GUID (for example, `a44669fe-0d48-453d-a9b1-2cc83f2cba77` for U.S. SSN) | Preserved. GUIDs live in `data-plane/classifications/sit-catalog.yaml` with a human-readable `displayName:` beside each one. |
-| `params.json` per-solution config file | Translated to YAML (`solution.yaml` + `*.params.yaml`) to match [`.github/instructions/data-plane-yaml.instructions.md`](../.github/instructions/data-plane-yaml.instructions.md). JSON is not a first-class format here. |
-| Azure DevOps pipelines with service connections | Translated to GitHub Actions with OIDC federated credentials. Same outcome, different CI. |
-| Content Explorer CSV export as the confidence-analysis data source (not Data Explorer) | Preserved as guidance in the DSPM/analysis wave. |
-| Windows PowerShell 5.1 requirement for WAM | **Not adopted.** This repo mandates pwsh 7.4+ per [`.github/instructions/powershell.instructions.md`](../.github/instructions/powershell.instructions.md). Any cmdlet that truly requires 5.1 is called out in an ADR or avoided. |
-
-## Sensitivity label protection model
-
-Each encrypted sublabel in [`data-plane/information-protection/labels.yaml`](../data-plane/information-protection/labels.yaml) declares a `protectionType:` value (`Template`, `UserDefined`, or `RemoveProtection`). The choice is a deliberate security-posture trade-off; flipping it changes both the runtime behavior and the Microsoft Purview portal UX. The repo default is `UserDefined`.
-
-| `protectionType:` | Permissions source | UI "Assign permissions" editor | When to choose |
-|---|---|---|---|
-| `Template` | Permissions are baked into the label and applied identically every time the label is set. | Grayed out in the Purview portal — users and admins cannot adjust per-document permissions. | High-assurance scenarios where the permission set must be uniform, auditable, and immune to user error (regulated data, compliance-driven access controls). |
-| `UserDefined` | Permissions are chosen at apply time by the labeller (user or admin) within the bounds the label allows. | Available in the Purview portal — permissions can be set per document. | Day-to-day collaboration where the labeller needs flexibility (sharing specific files with named partners, ad-hoc external recipients). |
-| `RemoveProtection` | No encryption applied; any prior encryption is stripped. | Not applicable. | Down-classification flows and explicit "unprotect" sublabels. |
-
-Switching between `Template` and `UserDefined` is a YAML edit followed by a reconciler apply (`./scripts/Deploy-Labels.ps1`). It is reversible at any time. Re-evaluate the choice during any review that touches label scope, audience, or compliance posture. References: [Set-Label cmdlet](https://learn.microsoft.com/en-us/powershell/module/exchange/set-label), [Configure usage rights for Azure Information Protection](https://learn.microsoft.com/en-us/azure/information-protection/configure-usage-rights).
-
-### Applying label changes via CI
-
-Sensitivity labels are reconciled by the `Deploy sensitivity labels` step in the [`deploy-data-plane`](../.github/workflows/deploy-data-plane.yml) workflow. The workflow is manual-dispatch only (`workflow_dispatch`), and the labels step shares the same Key Vault firewall open/close window as the role-groups step so the vault returns to `publicNetworkAccess: Disabled` after every run.
-
-Dispatch procedure:
-
-1. Open the workflow in the GitHub Actions UI: **Actions → deploy-data-plane → Run workflow**.
-2. Choose inputs:
-   - `plan_labels_only: true` — runs `Deploy-Labels.ps1 -WhatIf`. No `Set-Label` calls; produces the plan table only. Use this first whenever the YAML has changed since the last apply.
-   - `plan_labels_only: false` (default) — runs `Deploy-Labels.ps1` for a live apply against the lab tenant.
-   - `prune_role_groups`: leave `false` unless the dispatch is specifically reconciling role-group drift; it does not affect labels.
-3. Confirm the run targets the `lab` environment and the `feat/...` or `main` ref you expect.
-4. After completion, inspect the `Deploy sensitivity labels` step log for the reconciler plan table and any `WARNING` rows (for example, the documented `autoApplicationOf` create-path gap).
-
-Who can dispatch: anyone with `write` access to the repo can dispatch, but the dispatch flows through the `lab` GitHub environment which is owner-gated. The data-plane workload identity (`gh-oidc-purview-data-plane`) is the principal that mutates labels; portal UI changes by humans require membership in `sg-purview-information-protection-admins`.
 
   </script>
   <script type="text/markdown" data-doc="docs/tenant-onboarding.md">
