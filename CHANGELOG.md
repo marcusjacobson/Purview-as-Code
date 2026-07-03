@@ -35,6 +35,7 @@ To add an entry:
 
 ### Documentation
 
+- **docs:** add a browser-openable HTML landing page (`index.html`) at the repo root (#22)
 - **docs:** add an opinionated kickoff guide (`docs/kickoff-guide.md`) and feature it as the "start here" entry point in the README (#20)
 - **docs:** rewrite the README quick-start and tenant-onboarding guide to lead with the `@operator-kickoff` decouple step before tenant intake (#8)
 - **docs:** add ADR 0045 implementation tracking plan sequencing the follow-on tasks #6–#9 (#10)

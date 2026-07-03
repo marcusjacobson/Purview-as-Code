@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Purview-as-Code — declarative Microsoft Purview governance</title>
+  <meta name="description" content="A tenant-neutral template that manages a Microsoft Purview environment as version-controlled code across two planes: control (Bicep) and data (YAML + PowerShell), deployed by GitHub Actions." />
+  <style>
+    :root {
+      --bg: #0f1020;
+      --bg-soft: #171833;
+      --surface: #1d1f3d;
+      --surface-2: #24274d;
+      --border: #33366b;
+      --text: #e8e9f5;
+      --muted: #a9abce;
+      --accent: #7b61ff;
+      --accent-2: #29c8c8;
+      --accent-3: #ffb020;
+      --control: #7b61ff;
+      --data: #29c8c8;
+      --code-bg: #0b0c1a;
+      --radius: 14px;
+      --maxw: 1080px;
+      --shadow: 0 10px 40px rgba(0,0,0,.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 600px at 80% -10%, rgba(123,97,255,.28), transparent 60%),
+        radial-gradient(900px 500px at 0% 10%, rgba(41,200,200,.16), transparent 55%),
+        var(--bg);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent-2); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+    /* ---------- Nav ---------- */
+    header.nav {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(10px);
+      background: rgba(15,16,32,.72);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 62px;
+      gap: 16px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .2px; }
+    .brand .logo {
+      width: 30px; height: 30px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid; place-items: center; font-size: 15px; color: #0b0c1a; font-weight: 800;
+    }
+    nav.links { display: flex; gap: 22px; }
+    nav.links a { color: var(--muted); font-size: 14px; font-weight: 500; }
+    nav.links a:hover { color: var(--text); text-decoration: none; }
+    @media (max-width: 760px) { nav.links { display: none; } }
+
+    /* ---------- Hero ---------- */
+    .hero { padding: 76px 0 40px; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 12.5px; font-weight: 600; letter-spacing: .3px;
+      color: var(--accent-3);
+      background: rgba(255,176,32,.1);
+      border: 1px solid rgba(255,176,32,.35);
+      padding: 6px 12px; border-radius: 999px; margin-bottom: 22px;
+    }
+    .hero h1 {
+      font-size: clamp(34px, 5.2vw, 58px);
+      line-height: 1.05; margin: 0 0 18px;
+      letter-spacing: -.5px;
+    }
+    .hero h1 .grad {
+      background: linear-gradient(100deg, var(--accent) 10%, var(--accent-2) 90%);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    .hero p.lead { font-size: clamp(16px, 2.1vw, 20px); color: var(--muted); max-width: 720px; margin: 0 0 30px; }
+    .cta-row { display: flex; flex-wrap: wrap; gap: 14px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 9px;
+      padding: 12px 22px; border-radius: 10px; font-weight: 600; font-size: 15px;
+      border: 1px solid transparent; cursor: pointer; transition: transform .12s ease, box-shadow .12s ease;
+    }
+    .btn:hover { text-decoration: none; transform: translateY(-1px); }
+    .btn-primary { background: linear-gradient(135deg, var(--accent), #5a43e0); color: #fff; box-shadow: 0 8px 24px rgba(123,97,255,.4); }
+    .btn-ghost { background: transparent; border-color: var(--border); color: var(--text); }
+    .btn-ghost:hover { border-color: var(--accent-2); }
+
+    /* ---------- Section scaffolding ---------- */
+    section { padding: 56px 0; border-top: 1px solid rgba(51,54,107,.5); }
+    section:first-of-type { border-top: none; }
+    .eyebrow { text-transform: uppercase; letter-spacing: 2px; font-size: 12px; font-weight: 700; color: var(--accent-2); margin: 0 0 10px; }
+    h2.section-title { font-size: clamp(26px, 3.6vw, 38px); margin: 0 0 14px; letter-spacing: -.3px; }
+    .section-intro { color: var(--muted); max-width: 760px; font-size: 17px; margin: 0 0 34px; }
+
+    /* ---------- Cards ---------- */
+    .grid { display: grid; gap: 20px; }
+    .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    .grid-2 { grid-template-columns: repeat(2, 1fr); }
+    @media (max-width: 860px) { .grid-3, .grid-2 { grid-template-columns: 1fr; } }
+
+    .card {
+      background: linear-gradient(180deg, var(--surface), var(--bg-soft));
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 26px;
+    }
+    .card h3 { margin: 0 0 10px; font-size: 19px; }
+    .card p { margin: 0; color: var(--muted); font-size: 15px; }
+    .icon {
+      width: 42px; height: 42px; border-radius: 11px; margin-bottom: 16px;
+      display: grid; place-items: center; font-size: 20px;
+      background: rgba(123,97,255,.14); border: 1px solid rgba(123,97,255,.3);
+    }
+
+    /* ---------- Two-plane ---------- */
+    .planes { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+    @media (max-width: 860px) { .planes { grid-template-columns: 1fr; } }
+    .plane {
+      border-radius: var(--radius); padding: 26px; border: 1px solid var(--border);
+      background: var(--surface);
+      position: relative; overflow: hidden;
+    }
+    .plane::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 4px; }
+    .plane.control::before { background: var(--control); }
+    .plane.data::before { background: var(--data); }
+    .plane .tag { font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+    .plane.control .tag { color: var(--control); }
+    .plane.data .tag { color: var(--data); }
+    .plane h3 { margin: 8px 0 12px; font-size: 21px; }
+    .plane ul { margin: 14px 0 0; padding-left: 18px; color: var(--muted); font-size: 14.5px; }
+    .plane ul li { margin-bottom: 7px; }
+    .kv { display: flex; gap: 10px; font-size: 13.5px; margin-top: 6px; }
+    .kv .k { color: var(--muted); min-width: 76px; }
+    .kv .v { color: var(--text); font-weight: 600; }
+    code.inline { background: var(--code-bg); border: 1px solid var(--border); padding: 2px 7px; border-radius: 6px; font-size: 13px; color: #d9d6ff; }
+
+    /* ---------- Pipeline ---------- */
+    .pipe { display: flex; flex-wrap: wrap; align-items: stretch; gap: 12px; }
+    .pipe .step {
+      flex: 1 1 180px; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 18px;
+    }
+    .pipe .step .n { font-size: 12px; color: var(--accent-2); font-weight: 700; letter-spacing: 1px; }
+    .pipe .step h4 { margin: 6px 0 6px; font-size: 16px; }
+    .pipe .step p { margin: 0; color: var(--muted); font-size: 13.5px; }
+    .arrow { align-self: center; color: var(--accent); font-size: 22px; }
+    @media (max-width: 760px) { .arrow { transform: rotate(90deg); } }
+
+    /* ---------- Steps (numbered) ---------- */
+    ol.steps { list-style: none; counter-reset: s; padding: 0; margin: 0; }
+    ol.steps > li {
+      counter-increment: s; position: relative; padding: 20px 20px 20px 76px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 14px;
+    }
+    ol.steps > li::before {
+      content: counter(s); position: absolute; left: 20px; top: 18px;
+      width: 38px; height: 38px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #0b0c1a; font-weight: 800; display: grid; place-items: center; font-size: 17px;
+    }
+    ol.steps h4 { margin: 0 0 5px; font-size: 17px; }
+    ol.steps p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+    /* ---------- Layout tree ---------- */
+    pre.tree {
+      background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 22px; overflow-x: auto; font-size: 13px; line-height: 1.7;
+      font-family: "Cascadia Code", "Consolas", ui-monospace, monospace; color: #cdd0f5; margin: 0;
+    }
+    pre.tree .c { color: #6f74a8; }
+    pre.tree .d { color: #8fe3e3; }
+
+    /* ---------- Principles ---------- */
+    .principle { display: flex; gap: 14px; align-items: flex-start; }
+    .principle .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 8px; flex: none; background: var(--accent); box-shadow: 0 0 0 4px rgba(123,97,255,.16); }
+    .principle h4 { margin: 0 0 4px; font-size: 16px; }
+    .principle p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+    /* ---------- References ---------- */
+    .refs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    @media (max-width: 760px) { .refs { grid-template-columns: 1fr; } }
+    .ref {
+      display: flex; gap: 12px; align-items: center; padding: 14px 16px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 14px;
+    }
+    .ref .ms { flex: none; width: 26px; height: 26px; border-radius: 6px; background: #fff; display: grid; place-items: center; }
+    .ref .ms span { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5px; }
+    .ref .ms i { width: 5px; height: 5px; display: block; }
+    .ref .ms i:nth-child(1){ background:#f25022; } .ref .ms i:nth-child(2){ background:#7fba00; }
+    .ref .ms i:nth-child(3){ background:#00a4ef; } .ref .ms i:nth-child(4){ background:#ffb900; }
+
+    /* ---------- Callout ---------- */
+    .callout {
+      background: linear-gradient(135deg, rgba(123,97,255,.14), rgba(41,200,200,.1));
+      border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 24px;
+      display: flex; gap: 16px; align-items: flex-start;
+    }
+    .callout .mark { font-size: 22px; }
+    .callout p { margin: 0; color: var(--text); font-size: 15px; }
+    .callout code.inline { font-size: 12.5px; }
+
+    /* ---------- Footer ---------- */
+    footer { border-top: 1px solid var(--border); padding: 34px 0 48px; color: var(--muted); font-size: 13.5px; }
+    footer .foot-inner { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 14px; }
+    footer a { color: var(--muted); }
+    footer a:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <div class="brand"><span class="logo">P</span> Purview-as-Code</div>
+      <nav class="links">
+        <a href="#what">Overview</a>
+        <a href="#planes">Two planes</a>
+        <a href="#how">How it works</a>
+        <a href="#start">Get started</a>
+        <a href="#layout">Layout</a>
+        <a href="#refs">References</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ================= HERO ================= -->
+  <div class="hero">
+    <div class="wrap">
+      <span class="badge">● Tenant-neutral template — make it yours before deploying</span>
+      <h1>Manage <span class="grad">Microsoft Purview</span><br />as version-controlled code.</h1>
+      <p class="lead">
+        A declarative, reviewable definition of an entire Microsoft Purview environment for a single
+        tenant — both the Azure resource and the governance catalog — deployed automatically by
+        GitHub Actions. Everything is a pull request.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="docs/kickoff-guide.md">Start with the Kickoff guide →</a>
+        <a class="btn btn-ghost" href="README.md">Read the README</a>
+        <a class="btn btn-ghost" href="#how">See how it works</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= WHAT ================= -->
+  <section id="what">
+    <div class="wrap">
+      <p class="eyebrow">What is this?</p>
+      <h2 class="section-title">Infrastructure-as-Code for data governance</h2>
+      <p class="section-intro">
+        Microsoft Purview does not ship a single "Purview-as-Code" product. This repository fills
+        that gap: it expresses your Purview configuration as code so every change is diff-able,
+        reviewable in a pull request, and applied by an idempotent, auditable pipeline — never by
+        hand-clicking in a portal.
+      </p>
+
+      <div class="grid grid-3">
+        <div class="card">
+          <div class="icon">📝</div>
+          <h3>Declarative</h3>
+          <p>Human-readable YAML and Bicep describe the desired state. The repo, not the portal, is the source of truth.</p>
+        </div>
+        <div class="card">
+          <div class="icon">🔁</div>
+          <h3>Idempotent</h3>
+          <p>Every apply script reads current state, diffs it, then upserts. Re-running changes nothing that already matches.</p>
+        </div>
+        <div class="card">
+          <div class="icon">🔐</div>
+          <h3>Least privilege</h3>
+          <p>GitHub Actions authenticates to Azure with short-lived OIDC tokens — no long-lived secrets stored anywhere.</p>
+        </div>
+        <div class="card">
+          <div class="icon">🧭</div>
+          <h3>Reviewable</h3>
+          <p>A pull request <em>is</em> the change-review process. Control-plane and data-plane changes never mix in one PR.</p>
+        </div>
+        <div class="card">
+          <div class="icon">🤖</div>
+          <h3>Agent-assisted</h3>
+          <p>A Squad of workspace-scoped Copilot agents intakes ideas, drafts issues, implements, and gates on owner approval.</p>
+        </div>
+        <div class="card">
+          <div class="icon">📚</div>
+          <h3>Learn-grounded</h3>
+          <p>Every resource, cmdlet, and API call cites a current Microsoft Learn page — model recall alone is never enough.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= PLANES ================= -->
+  <section id="planes">
+    <div class="wrap">
+      <p class="eyebrow">The core idea</p>
+      <h2 class="section-title">Two planes, kept deliberately separate</h2>
+      <p class="section-intro">
+        A complete Purview IaC repo must manage two independent planes, each with its own API
+        surface and authentication model. A change almost always lives in exactly one of them.
+      </p>
+
+      <div class="planes">
+        <div class="plane control">
+          <span class="tag">Control plane</span>
+          <h3>The Azure resource</h3>
+          <p style="color:var(--muted);margin:0 0 12px;font-size:14.5px;">
+            The <code class="inline">Microsoft.Purview/accounts</code> resource, networking,
+            managed identity, and SKU — defined as Bicep.
+          </p>
+          <div class="kv"><span class="k">Folder</span><span class="v"><code class="inline">infra/</code></span></div>
+          <div class="kv"><span class="k">Language</span><span class="v">Bicep · Azure CLI</span></div>
+          <div class="kv"><span class="k">API</span><span class="v">Azure Resource Manager</span></div>
+          <div class="kv"><span class="k">Auth</span><span class="v">Azure RBAC (Contributor on RG)</span></div>
+          <div class="kv"><span class="k">Deploys via</span><span class="v"><code class="inline">deploy-infra.yml</code></span></div>
+        </div>
+
+        <div class="plane data">
+          <span class="tag">Data plane</span>
+          <h3>The governance catalog</h3>
+          <p style="color:var(--muted);margin:0 0 12px;font-size:14.5px;">
+            Sensitivity labels, DLP, data lifecycle & records, insider risk, communication
+            compliance, DSPM, plus Data Map collections, glossary, classifications, sources & scans.
+          </p>
+          <div class="kv"><span class="k">Folder</span><span class="v"><code class="inline">data-plane/</code> + <code class="inline">scripts/</code></span></div>
+          <div class="kv"><span class="k">Language</span><span class="v">YAML rendered by PowerShell</span></div>
+          <div class="kv"><span class="k">API</span><span class="v">Purview data-plane REST + S&amp;C PowerShell</span></div>
+          <div class="kv"><span class="k">Auth</span><span class="v">App-only identity (OIDC / cert in Key Vault)</span></div>
+          <div class="kv"><span class="k">Deploys via</span><span class="v"><code class="inline">deploy-data-plane.yml</code></span></div>
+        </div>
+      </div>
+
+      <div class="callout" style="margin-top:22px;">
+        <span class="mark">💡</span>
+        <p>
+          <strong>Why the split?</strong> The account name is the DNS hostname of the data plane
+          (<code class="inline">&lt;name&gt;.purview.azure.com</code>) and is treated as a fixed
+          input. Collections, glossary, classifications, sources, and scans are invisible to
+          ARM/Bicep — they live behind the Atlas v2 and Purview REST APIs, which is why the repo
+          ships PowerShell reconcilers driven by YAML.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= HOW ================= -->
+  <section id="how">
+    <div class="wrap">
+      <p class="eyebrow">How it works</p>
+      <h2 class="section-title">From pull request to deployed governance</h2>
+      <p class="section-intro">
+        A single CI/CD flow validates every change, then routes merges to the right plane by path.
+        OIDC federated credentials give GitHub Actions short-lived tokens for both Azure Resource
+        Manager and the Purview data plane — with no stored secret.
+      </p>
+
+      <div class="pipe">
+        <div class="step">
+          <div class="n">01</div>
+          <h4>Pull request</h4>
+          <p>You open a PR that changes one plane. Reviewers see the full diff of desired state.</p>
+        </div>
+        <div class="arrow">→</div>
+        <div class="step">
+          <div class="n">02</div>
+          <h4>Validate</h4>
+          <p><code class="inline">validate.yml</code> runs Bicep lint, yamllint, and PSScriptAnalyzer.</p>
+        </div>
+        <div class="arrow">→</div>
+        <div class="step">
+          <div class="n">03</div>
+          <h4>Merge to main</h4>
+          <p>Path filters decide which deploy workflow fires next.</p>
+        </div>
+        <div class="arrow">→</div>
+        <div class="step">
+          <div class="n">04</div>
+          <h4>Deploy</h4>
+          <p><code class="inline">infra/**</code> → ARM. <code class="inline">data-plane/**</code> or <code class="inline">scripts/**</code> → Purview REST APIs.</p>
+        </div>
+      </div>
+
+      <div class="grid grid-2" style="margin-top:26px;">
+        <div class="card">
+          <h3>Control-plane path</h3>
+          <p>
+            The <code class="inline">deploy-infra</code> workflow runs
+            <code class="inline">az deployment group create</code> against
+            <code class="inline">infra/main.bicep</code>, provisioning the
+            <code class="inline">Microsoft.Purview/accounts</code> resource and its dependencies.
+          </p>
+        </div>
+        <div class="card">
+          <h3>Data-plane path</h3>
+          <p>
+            The <code class="inline">deploy-data-plane</code> workflow authenticates via OIDC, then
+            each <code class="inline">Deploy-*.ps1</code> reconciler renders its YAML manifest into
+            idempotent PUT/PATCH calls against the Purview data-plane APIs. Deletes are opt-in.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= GET STARTED ================= -->
+  <section id="start">
+    <div class="wrap">
+      <p class="eyebrow">Use it yourself</p>
+      <h2 class="section-title">From an empty copy to a deployable repo in six steps</h2>
+      <p class="section-intro">
+        This is a tenant-neutral template — every tenant-specific value is a documented placeholder
+        (<code class="inline">contoso</code>, <code class="inline">contoso.onmicrosoft.com</code>).
+        It will not deploy against a real tenant until you make it yours. The
+        <a href="docs/tenant-onboarding.md">tenant onboarding guide</a> has the exact commands.
+      </p>
+
+      <ol class="steps">
+        <li>
+          <h4>Get a copy</h4>
+          <p>Click <strong>Use this template</strong> on GitHub for a clean-history spin-off that can never push back, or <code class="inline">git clone</code> for a local workspace.</p>
+        </li>
+        <li>
+          <h4>Decouple it</h4>
+          <p>Run the <code class="inline">@operator-kickoff</code> agent to pick a local workspace or spin-off repo and install the no-push-back guard.</p>
+        </li>
+        <li>
+          <h4>Tailor it</h4>
+          <p>Run the <code class="inline">@operator-tenant</code> agent — it interviews you and writes your values into <code class="inline">infra/parameters/lab.yaml</code> and the identity-boundary statements.</p>
+        </li>
+        <li>
+          <h4>Review the diff</h4>
+          <p>Inspect what the agent produced, then commit it on a branch.</p>
+        </li>
+        <li>
+          <h4>Wire up identity</h4>
+          <p>Create the Microsoft Entra app + OIDC federated credential, set the GitHub Environment secrets, and set the <code class="inline">OWNER_APPROVAL_LOGIN</code> variable.</p>
+        </li>
+        <li>
+          <h4>Validate and deploy</h4>
+          <p>Run <code class="inline">az bicep build</code> and the Pester suite, then trigger the <code class="inline">deploy-infra</code> and <code class="inline">deploy-data-plane</code> workflows.</p>
+        </li>
+      </ol>
+
+      <div class="callout" style="margin-top:22px;">
+        <span class="mark">🔒</span>
+        <p>
+          <strong>Never commit real identifiers or secrets.</strong> Real tenant IDs, subscription
+          IDs, object IDs, and credentials belong in GitHub Environment secrets and are referenced
+          by name. In source, always use the zero-GUID placeholder
+          <code class="inline">00000000-0000-0000-0000-000000000000</code> and Microsoft's
+          fictitious names (<code class="inline">contoso</code>,
+          <code class="inline">fabrikam</code>, <code class="inline">adatum</code>).
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= LAYOUT ================= -->
+  <section id="layout">
+    <div class="wrap">
+      <p class="eyebrow">Find your way around</p>
+      <h2 class="section-title">Repository layout</h2>
+      <p class="section-intro">
+        Two planes, one folder each, plus the automation and docs that hold them together. The
+        plane-to-workflow path filters depend on this separation — never put data-plane YAML under
+        <code class="inline">infra/</code>, and never put Bicep under <code class="inline">data-plane/</code>.
+      </p>
+
+      <pre class="tree">.
+├── <span class="d">.github/</span>
+│   ├── <span class="d">workflows/</span>     <span class="c"># validate + deploy-infra + deploy-data-plane</span>
+│   ├── <span class="d">instructions/</span>  <span class="c"># path-scoped Copilot rules (Bicep, PowerShell, YAML…)</span>
+│   ├── <span class="d">prompts/</span>       <span class="c"># reusable /-invoked task templates</span>
+│   └── <span class="d">agents/</span>        <span class="c"># workspace-scoped Squad agents (personas)</span>
+├── <span class="d">infra/</span>             <span class="c"># CONTROL PLANE — Bicep: Purview account + dependencies</span>
+│   ├── main.bicep
+│   ├── main.bicepparam
+│   ├── <span class="d">modules/</span>
+│   └── <span class="d">parameters/</span>
+├── <span class="d">data-plane/</span>        <span class="c"># DATA PLANE — desired-state governance content</span>
+│   ├── <span class="d">information-protection/</span>  <span class="c"># sensitivity labels + policies</span>
+│   ├── <span class="d">classifications/</span>        <span class="c"># sensitive information type catalog</span>
+│   ├── <span class="d">dlp/  data-lifecycle/  records/  irm/  dspm/</span>
+│   ├── <span class="d">collections/  glossary/  data-sources/  scans/</span>
+│   └── <span class="d">purview-role-groups/  administrative-units/</span>
+├── <span class="d">scripts/</span>           <span class="c"># PowerShell 7+ reconcilers, smoke tests, provisioning</span>
+│   ├── Connect-Purview.ps1
+│   ├── Deploy-*.ps1   <span class="c"># idempotent reconciler per data-plane solution</span>
+│   └── <span class="d">modules/</span>
+├── <span class="d">docs/</span>              <span class="c"># kickoff, onboarding, architecture, ADRs, runbooks</span>
+├── <span class="d">tests/</span>             <span class="c"># Pester 5.x unit tests (no live tenant)</span>
+├── AGENTS.md
+└── README.md</pre>
+    </div>
+  </section>
+
+  <!-- ================= PRINCIPLES ================= -->
+  <section id="principles">
+    <div class="wrap">
+      <p class="eyebrow">Non-negotiables</p>
+      <h2 class="section-title">Design principles</h2>
+      <div class="grid grid-2">
+        <div class="card">
+          <div class="principle"><span class="dot"></span><div>
+            <h4>Idempotent</h4>
+            <p>Every apply script GETs current state, diffs, then PUT/PATCHes.</p>
+          </div></div>
+        </div>
+        <div class="card">
+          <div class="principle"><span class="dot"></span><div>
+            <h4>Declarative YAML</h4>
+            <p>Human-reviewable manifests; a pull request equals a change review.</p>
+          </div></div>
+        </div>
+        <div class="card">
+          <div class="principle"><span class="dot"></span><div>
+            <h4>Least privilege</h4>
+            <p>OIDC federated credentials from GitHub to Entra — no long-lived secrets.</p>
+          </div></div>
+        </div>
+        <div class="card">
+          <div class="principle"><span class="dot"></span><div>
+            <h4>Separation of concerns</h4>
+            <p>Control-plane PRs never change catalog content, and vice versa.</p>
+          </div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= REFERENCES ================= -->
+  <section id="refs">
+    <div class="wrap">
+      <p class="eyebrow">Grounded in Microsoft Learn</p>
+      <h2 class="section-title">References</h2>
+      <p class="section-intro">
+        Microsoft Learn is the authoritative source for every recommendation in this repo. The core
+        pages behind the two-plane model:
+      </p>
+      <div class="refs">
+        <a class="ref" href="https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts" target="_blank" rel="noopener">
+          <span class="ms"><span><i></i><i></i><i></i><i></i></span></span>
+          Microsoft.Purview/accounts resource (Bicep / ARM)
+        </a>
+        <a class="ref" href="https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane" target="_blank" rel="noopener">
+          <span class="ms"><span><i></i><i></i><i></i><i></i></span></span>
+          Authenticate for Purview APIs
+        </a>
+        <a class="ref" href="https://learn.microsoft.com/en-us/rest/api/purview/" target="_blank" rel="noopener">
+          <span class="ms"><span><i></i><i></i><i></i><i></i></span></span>
+          Purview data-plane REST API reference
+        </a>
+        <a class="ref" href="https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions" target="_blank" rel="noopener">
+          <span class="ms"><span><i></i><i></i><i></i><i></i></span></span>
+          Access control in Microsoft Purview
+        </a>
+        <a class="ref" href="https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect" target="_blank" rel="noopener">
+          <span class="ms"><span><i></i><i></i><i></i><i></i></span></span>
+          Use Azure Login with OpenID Connect
+        </a>
+        <a class="ref" href="https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template" target="_blank" rel="noopener">
+          <span class="ms"><span><i></i><i></i><i></i><i></i></span></span>
+          Create a repository from a template
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap foot-inner">
+      <div>
+        Purview-as-Code — a tenant-neutral template for declarative Microsoft Purview governance.<br />
+        Target account placeholder: <code class="inline">contoso-lab</code> · tenant <code class="inline">contoso.onmicrosoft.com</code>.
+      </div>
+      <div>
+        <a href="docs/kickoff-guide.md">Kickoff guide</a> ·
+        <a href="docs/getting-started.md">Getting started</a> ·
+        <a href="docs/architecture.md">Architecture</a> ·
+        <a href="README.md">README</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
