@@ -39,8 +39,14 @@
         https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_functions_cmdletbindingattribute
 
 .PARAMETER SourceUrl
-    The source template repository URL to guard against. Defaults to the
-    current 'origin' fetch URL (the URL a fresh clone originated from).
+    The source template repository URL to guard against. When omitted, it is
+    resolved from -TemplateRepositoryUrl (preferred) then the current 'origin'
+    fetch URL (the git-clone path).
+
+.PARAMETER TemplateRepositoryUrl
+    The GitHub template relationship URL (from 'gh repo view --json
+    templateRepository'). For a repo created via "Use this template" this is the
+    true source, since 'origin' is the consumer's own repo. Preferred over origin.
 
 .PARAMETER UpstreamRemoteName
     Name of a retained read-only remote whose push URL should be disabled.
@@ -63,6 +69,9 @@
 param(
     [Parameter()]
     [string]$SourceUrl,
+
+    [Parameter()]
+    [string]$TemplateRepositoryUrl,
 
     [Parameter()]
     [string]$UpstreamRemoteName = 'upstream',
@@ -97,14 +106,25 @@ if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
     $RepoRoot = $top.Output
 }
 
-# Resolve the source template URL from origin when not supplied.
+# Resolve the source template URL. Precedence: explicit -SourceUrl, then the GitHub template
+# relationship (-TemplateRepositoryUrl), then 'origin' (the git-clone path). A repo created via
+# "Use this template" has origin = the consumer's own repo, so origin is NOT the source there --
+# pass -SourceUrl or -TemplateRepositoryUrl in that case.
 if ([string]::IsNullOrWhiteSpace($SourceUrl)) {
-    $originUrl = Invoke-Git -GitArgs @('remote', 'get-url', 'origin')
-    if ($originUrl.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($originUrl.Output)) {
-        throw "Could not detect the source template URL: 'origin' is not set. Pass -SourceUrl explicitly with the URL this workspace originated from."
+    $originResult = Invoke-Git -GitArgs @('remote', 'get-url', 'origin')
+    $originUrl = if ($originResult.ExitCode -eq 0) { $originResult.Output } else { '' }
+    $SourceUrl = Resolve-KickoffSourceUrl -OriginUrl $originUrl -TemplateRepositoryUrl $TemplateRepositoryUrl
+
+    if ([string]::IsNullOrWhiteSpace($SourceUrl)) {
+        throw "Could not resolve the source template URL: no -SourceUrl, no -TemplateRepositoryUrl, and 'origin' is not set. Pass -SourceUrl explicitly with the URL this workspace originated from."
     }
-    $SourceUrl = $originUrl.Output
-    Write-Verbose "Detected source template URL from origin: $SourceUrl"
+
+    if ([string]::IsNullOrWhiteSpace($TemplateRepositoryUrl)) {
+        Write-Warning "Resolved the source template URL from 'origin' ($SourceUrl). If this repository was created via 'Use this template', 'origin' is your own repo, not the source -- re-run with -SourceUrl (or -TemplateRepositoryUrl) set to the true source."
+    }
+    else {
+        Write-Verbose "Resolved the source template URL from the template relationship: $SourceUrl"
+    }
 }
 
 $normalizedSource = Get-NormalizedRepoUrl -Url $SourceUrl

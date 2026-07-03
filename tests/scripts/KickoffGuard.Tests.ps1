@@ -139,3 +139,25 @@ Describe 'Get-KickoffPrePushHookContent' {
             Should -Throw -ExpectedMessage '*normalized to an empty value*'
     }
 }
+
+Describe 'Resolve-KickoffSourceUrl' {
+
+    It 'prefers the template relationship over origin (Use-this-template case)' {
+        Resolve-KickoffSourceUrl -OriginUrl $script:ConsumerUrl -TemplateRepositoryUrl $script:SourceHttps |
+            Should -Be $script:SourceHttps
+    }
+
+    It 'falls back to origin when there is no template relationship (clone case)' {
+        Resolve-KickoffSourceUrl -OriginUrl $script:SourceHttps -TemplateRepositoryUrl '' |
+            Should -Be $script:SourceHttps
+    }
+
+    It 'returns empty when neither is provided' {
+        Resolve-KickoffSourceUrl -OriginUrl '' -TemplateRepositoryUrl '' | Should -Be ''
+    }
+
+    It 'trims surrounding whitespace on the resolved value' {
+        Resolve-KickoffSourceUrl -OriginUrl "  $($script:SourceHttps)  " -TemplateRepositoryUrl '' |
+            Should -Be $script:SourceHttps
+    }
+}
