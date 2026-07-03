@@ -14,6 +14,8 @@
 
 Declarative, version-controlled configuration of a Microsoft Purview environment for a single tenant. Both the Azure resource (control plane) and the catalog contents (data plane) are expressed as code and deployed by GitHub Actions.
 
+> **Template repository.** This repo is enabled as a [GitHub template](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template) — click **Use this template** to create your own copy. A template-generated repo starts with a clean history and cannot open a pull request back to this source, which is the preferred spin-off path in [ADR 0045](docs/adr/0045-template-kickoff-spinoff-model.md).
+
 > **Target account (placeholder):** `contoso-lab` Microsoft Purview account (tenant `contoso.onmicrosoft.com`).
 
 ## Quick start

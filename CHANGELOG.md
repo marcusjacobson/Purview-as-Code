@@ -24,6 +24,7 @@ To add an entry:
 
 ### Changed
 
+- **repo:** mark the source repository as a GitHub template so consumers use "Use this template" for spin-off copies (#9)
 - **docs:** add ADR 0045 — template kickoff and spin-off consumption model with a no-push-back guard (#4)
 
 ### Fixed
