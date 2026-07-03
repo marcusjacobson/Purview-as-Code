@@ -48,6 +48,7 @@ If any gate fails, post the blocked-output format (see below) to the issue as a 
 - `infra/**`
 - `data-plane/**`
 - `scripts/**`
+- `tests/**` — Pester unit tests paired with `scripts/**` helpers (one `*.Tests.ps1` per script under test, per [`tests.instructions.md`](../instructions/tests.instructions.md)).
 - `.github/**`
 - `CHANGELOG.md` — repo-root changelog; every state-changing PR updates it (see Step 2 → "Update the changelog").
 
