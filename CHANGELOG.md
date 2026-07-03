@@ -22,6 +22,10 @@ To add an entry:
 
 - **docs:** add ADR 0045 — template kickoff and spin-off consumption model with a no-push-back guard (#4)
 
+### Documentation
+
+- **docs:** add ADR 0045 implementation tracking plan sequencing the follow-on tasks #6–#9 (#10)
+
 ## 2026-06-21
 
 ### Added
