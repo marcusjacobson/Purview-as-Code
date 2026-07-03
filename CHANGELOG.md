@@ -18,6 +18,10 @@ To add an entry:
 
 ## 2026-07-03
 
+### Added
+
+- **scripts:** add the `@operator-kickoff` kickoff agent and the no-push-back guard (`scripts/modules/KickoffGuard.psm1`, `Set-KickoffGuard.ps1`, `Test-KickoffGuard.ps1`) that severs a template copy from the source repository, with Pester coverage (#7)
+
 ### Changed
 
 - **docs:** add ADR 0045 — template kickoff and spin-off consumption model with a no-push-back guard (#4)

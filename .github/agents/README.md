@@ -48,7 +48,8 @@ The Squad delivery framework agents (retrofitted from [bradygaster/squad](https:
 
 | Agent | Purpose |
 |---|---|
-| [`operator-tenant`](operator-tenant.agent.md) | **Tenant Intake.** Runs once per clone of this generic template. Interviews the owner for tenant values, writes `infra/parameters` and the identity-boundary statements, validates, and prints the GitHub-Secrets / OIDC checklist. Never stores a secret or real identifier, never deploys. Run this first on a fresh clone, before any lifecycle work. |
+| [`operator-kickoff`](operator-kickoff.agent.md) | **Kickoff.** Runs first on a fresh copy of the template. Lets the owner choose a local-only workspace or a spin-off GitHub repository, installs the [ADR 0045](../../docs/adr/0045-template-kickoff-spinoff-model.md) no-push-back guard so the copy can never contribute content back to the source template repository, verifies it, then hands off to `@operator-tenant`. Never deploys, never pushes. |
+| [`operator-tenant`](operator-tenant.agent.md) | **Tenant Intake.** Runs once per copy, after `@operator-kickoff`. Interviews the owner for tenant values, writes `infra/parameters` and the identity-boundary statements, validates, and prints the GitHub-Secrets / OIDC checklist. Never stores a secret or real identifier, never deploys. |
 
 Persona definitions and charters live under [`../../.squad/`](../../.squad/). The Squad framework conventions are documented in [`../../.squad/README.md`](../../.squad/README.md) and [`../../.squad/team.md`](../../.squad/team.md).
 
