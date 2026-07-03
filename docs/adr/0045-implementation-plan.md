@@ -20,7 +20,7 @@ citations, CHANGELOG entry) plus the per-domain gates named in its row below.
 
 | Order | Status | Issue | Task | Depends on | Key gates |
 |---|:---:|---|---|---|---|
-| 0 | ☐ | #6 | Tailor `pr-auto-merge.yml` owner gate per tenant (prerequisite — unblocks auto-merge) | — | github-actions pre-commit; `@operator-tenant` edit; CHANGELOG |
+| 0 | ☐ | #6 | Make `pr-auto-merge.yml` owner gate data-driven via the `OWNER_APPROVAL_LOGIN` repo variable (prerequisite — unblocks auto-merge) | — | github-actions pre-commit; docs; CHANGELOG |
 | 1 | ☐ | #7 | Add `@operator-kickoff` agent + four-layer no-push-back guard | ADR 0045 (#4) | agents rules; `Invoke-ScriptAnalyzer` + `-WhatIf`; Pester; secrets-scan; CHANGELOG |
 | 2 | ☐ | #8 | Rewrite onboarding (README, tenant-onboarding, agents index) for the kickoff flow | #7 | markdown rules; docs-freshness; CHANGELOG |
 | 3 | ☐ | #9 | Mark the source repository as a GitHub template | #7 | repo-setting verify (`isTemplate`); markdown; CHANGELOG |
@@ -29,12 +29,12 @@ Tick a row's status when its issue's exit criteria are verified and its PR is me
 
 ## Task detail
 
-### Task 0 — #6 — tailor the auto-merge owner gate
+### Task 0 — #6 — data-driven auto-merge owner gate
 
-`pr-auto-merge.yml` hardcodes the owner login as `contoso`, and `@operator-tenant`'s Step-5
-tailoring list omits the workflow, so auto-merge fails on any real clone (this blocked PR #5).
-Add the workflow to the tailoring surface and document it — the committed template keeps the
-`contoso` placeholder; only the tailoring changes. Recommended prerequisite because broken
+`pr-auto-merge.yml` hardcoded the owner login as `contoso`, so auto-merge failed on any real clone
+(this blocked PR #5 and PR #11). The gate now reads the `OWNER_APPROVAL_LOGIN` repository variable
+instead — no owner login in source, and a consumer sets the variable once (no per-clone source
+edit), aligning with the identifier-boundary principle. Recommended prerequisite because broken
 auto-merge affects every later task's merge.
 
 ### Task 1 — #7 — `@operator-kickoff` agent and guard

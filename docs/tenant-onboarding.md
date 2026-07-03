@@ -103,6 +103,13 @@ Follow [Getting started §1–§2](getting-started.md) for the exact `az ad app`
    [Access control in Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions).
 3. In **Settings → Environments → `<env>`**, set secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
    `AZURE_SUBSCRIPTION_ID` and variable `PURVIEW_ACCOUNT_NAME`.
+4. In **Settings → Secrets and variables → Actions → Variables**, set the repository variable
+   `OWNER_APPROVAL_LOGIN` to your GitHub login. The
+   [`pr-auto-merge.yml`](../.github/workflows/pr-auto-merge.yml) workflow only enables auto-merge
+   when the `owner-approved` label is applied by this login; if it is unset, auto-merge fails with a
+   configuration error. It is a repository variable (not environment-scoped) because that workflow
+   runs without an `environment:`. See
+   [Store information in variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables).
 
 > Never commit any of these values. They live only in GitHub secrets and in your local
 > `az account set` context.

@@ -13,13 +13,24 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.label.name == 'owner-approved'
     steps:
+      # Owner identity is data-driven via the OWNER_APPROVAL_LOGIN repository variable
+      # (Settings → Secrets and variables → Actions → Variables), so no owner login is
+      # hardcoded in source. github.event.sender.login flows through env: and is referenced
+      # as $ACTOR_LOGIN in the shell, keeping interpolation outside the shell-quoting
+      # boundary per script-injection hardening.
+      # Reference: https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables
       - name: Verify owner identity
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR_LOGIN: ${{ github.event.sender.login }}
+          OWNER_LOGIN: ${{ vars.OWNER_APPROVAL_LOGIN }}
         run: |
-          ACTOR="${{ github.event.sender.login }}"
-          if [ "$ACTOR" != "contoso" ]; then
-            echo "::error::Gate failed: 'owner-approved' label was applied by '$ACTOR', not the lab owner 'contoso'."
+          if [ -z "$OWNER_LOGIN" ]; then
+            echo "::error::Configuration error: the 'OWNER_APPROVAL_LOGIN' repository variable is not set. Set it under Settings → Secrets and variables → Actions → Variables to the lab owner's GitHub login."
+            exit 1
+          fi
+          if [ "$ACTOR_LOGIN" != "$OWNER_LOGIN" ]; then
+            echo "::error::Gate failed: 'owner-approved' label was applied by '$ACTOR_LOGIN', not the lab owner ('$OWNER_LOGIN' per the OWNER_APPROVAL_LOGIN variable)."
             exit 1
           fi
 

@@ -22,6 +22,10 @@ To add an entry:
 
 - **docs:** add ADR 0045 — template kickoff and spin-off consumption model with a no-push-back guard (#4)
 
+### Fixed
+
+- **ci:** make the pr-auto-merge owner gate data-driven via the `OWNER_APPROVAL_LOGIN` repository variable, removing the hardcoded owner login (#6)
+
 ### Documentation
 
 - **docs:** add ADR 0045 implementation tracking plan sequencing the follow-on tasks #6–#9 (#10)
