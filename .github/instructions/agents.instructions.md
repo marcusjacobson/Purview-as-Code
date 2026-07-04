@@ -46,6 +46,7 @@ Optional fields from the [VS Code schema](https://code.visualstudio.com/docs/cop
   - Real tenant / subscription / object IDs — use the zero-GUID placeholder per the "Environment and identifier boundaries" section.
   - Real customer, person, or production resource names — use the synthetic substitutes from [`sample-data.instructions.md`](sample-data.instructions.md).
 - Body may reference other instruction files and prompt files via relative Markdown links so rules stay single-sourced.
+- **Interactive menu / choice labels must be ASCII-only.** When the body presents a selectable menu per [`INTERACTION-MENUS.md`](../agents/INTERACTION-MENUS.md), the bracketed label text must not contain em-dashes (`—`), en-dashes (`–`), ellipsis (`…`), or smart quotes — some menu hosts render them as literal escapes (e.g. `\u2014`). Use `:`, `-`, `(` `)`, or `...`. See the "Label character set" rule in [`INTERACTION-MENUS.md`](../agents/INTERACTION-MENUS.md).
 
 ## Naming
 

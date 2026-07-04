@@ -16,6 +16,26 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself.
 
+## 2026-07-04
+
+### Added
+
+- **instructions:** add tenant placeholder manifest (`.github/agents/tenant-placeholders.yaml`) — ordered longest-match-first tokens, the authoritative tenant-surface edit list, the intentional-sample allowlist, and de-template markers — for deterministic, corruption-safe template tailoring (#24)
+
+### Changed
+
+- **instructions:** wire `@operator-tenant` to the placeholder manifest — ordered replacement, intentional-sample-scoped residual scan, diff-scoped secrets scan, targeted functional-workflow scan, and a de-template step; add custom-domain, missing-origin, and harness-portability notes (#24)
+- **instructions:** fix `@operator-kickoff` `isTemplate` false-positive (a template clone no longer reads as the canonical template), flag local-workspace mode as a CI/CD dead-end, and reconcile `origin` removal with `@operator-tenant`'s org/repo defaults (#24)
+- **instructions:** ban em-dashes / ellipsis / smart quotes in interactive menu labels (INTERACTION-MENUS.md + agents.instructions.md) and convert existing agent menu labels to ASCII (#24)
+
+### Fixed
+
+- **docs:** correct getting-started OIDC identity setup to the per-plane app trio (`gh-oidc-purview-control-plane` / `-data-plane` / `-kv-unlock`) with `:environment:<env>` federated-credential subjects — the previous single-app `gh-Purview-as-Code-Generic` with a `:ref:refs/heads/main` subject would fail `azure/login` (#24)
+
+### Documentation
+
+- **docs:** add ADR 0046 — tenant placeholder manifest for template tailoring (#24)
+
 ## 2026-07-03
 
 ### Added

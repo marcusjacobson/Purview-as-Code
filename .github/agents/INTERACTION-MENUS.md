@@ -20,7 +20,9 @@ User-facing guide: [`docs/agent-interaction-guide.md`](../../docs/agent-interact
 
 **Primary (interactive surfaces):** present a native selectable choice list using the host session's prompt affordance. No new tool token is required — do not invent a prompt tool or change any agent `tools:` frontmatter; interactive prompting is a host affordance, not a repo-defined tool.
 
-**Fallback (non-interactive / cloud agent surfaces):** print a numbered text menu where each line is `[n] <label> — <typed alias / invocation>`, accepting the digit, the alias, or the full invocation. Option content is identical across surfaces; only rendering differs.
+**Fallback (non-interactive / cloud agent surfaces):** print a numbered text menu where each line is `[n] <label> (<typed alias / invocation>)`, accepting the digit, the alias, or the full invocation. Option content is identical across surfaces; only rendering differs.
+
+**Label character set (all surfaces):** interactive menu / choice **labels** (the bracketed selectable text and its rendered separators) must be **ASCII-only**. Do not use em-dashes (`—`), en-dashes (`–`), ellipsis (`…`), or smart quotes inside a label — some interactive menu hosts render them as literal escapes (e.g. `\u2014`), which is meaningless to the user. Use `:`, `-`, `(` `)`, or `...` instead. This applies to labels only; ordinary prose elsewhere may use normal punctuation.
 
 ---
 
@@ -31,7 +33,7 @@ User-facing guide: [`docs/agent-interaction-guide.md`](../../docs/agent-interact
 Print the preview block (unchanged). Then present a menu ordered:
 
 1. `[affirmative that names the concrete effect]` (typed alias)
-2. `[Revise…]` (describe the change in a reply)
+2. `[Revise...]` (describe the change in a reply)
 3. `[Cancel]` (type `cancel` or just don't reply)
 
 Affirmative selection → run the mutation exactly as the typed phrase would. Revise → apply edits and re-present preview + menu. Cancel / any non-affirmative → do nothing, state nothing changed, stop. Any sanity re-checks an agent already runs between preview and mutation are preserved.
@@ -57,8 +59,8 @@ On any surface where a native selectable list is unavailable (e.g., a cloud codi
 Example rendering for a Pattern-A gate:
 
 ```text
-[1] File it — create the branch and file the issue  (file it / yes)
-[2] Revise… — describe the change in a reply
+[1] File it: create the branch and file the issue  (file it / yes)
+[2] Revise...: describe the change in a reply
 [3] Cancel  (cancel)
 ```
 
@@ -71,6 +73,7 @@ When editing or adding an agent:
 - **KEEP** its preview / report block.
 - **Replace** any `"Reply with one of: …"` block with `"Present a selectable menu per INTERACTION-MENUS.md (Pattern A/B/C/D), options: …"` plus the agent's specific option set.
 - **Keep** the typed-phrase aliases listed alongside each option.
+- **Keep labels ASCII-only** — no em-dash / en-dash / ellipsis / smart quotes inside a bracketed label or its separator (see "Label character set" under Mechanism). Use `:`, `-`, `(` `)`, or `...`.
 - **Never weaken a gate** — affirmative selection has the same enforcement weight as a typed phrase.
 
 ---

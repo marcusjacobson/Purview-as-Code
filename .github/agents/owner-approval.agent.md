@@ -67,8 +67,8 @@ All gates passed.
 
 Then present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern A), options:
 
-1. `[Approve — apply the owner-approved label]` (typed alias: `approve` / `approved` / `yes` / `y` / `confirm`)
-2. `[Revise…]` (describe the change in a reply)
+1. `[Approve: apply the owner-approved label]` (typed alias: `approve` / `approved` / `yes` / `y` / `confirm`)
+2. `[Revise...]` (describe the change in a reply)
 3. `[Cancel]` (type `cancel` or don''t reply)
 
 If any gate fails, report the failure and stop:
@@ -178,7 +178,7 @@ This is a session-memory file, not a `.squad/memory/` file. Do not modify [`.squ
 
 Present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern B), options:
 
-1. `[Start the next item — open @idea-intake]` (typed alias: `@idea-intake`)
+1. `[Start the next item: open @idea-intake]` (typed alias: `@idea-intake`)
 2. `[Stop here]` — print "`@idea-intake` is the entry point for the next item when you''re ready" and stop
 
 ---
