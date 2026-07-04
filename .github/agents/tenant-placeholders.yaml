@@ -1,0 +1,291 @@
+# Tenant placeholder manifest — single-source contract for template tailoring
+#
+# This file is the machine-readable companion to the two operator agents:
+#   - .github/agents/operator-kickoff.agent.md (reads `deTemplate` to detect an
+#     un-tailored copy and to strip template banners after tailoring).
+#   - .github/agents/operator-tenant.agent.md (reads `tokens`, `tenantSurfaces`,
+#     and `intentionalSamples` to build the Step 3 plan, apply the Step 5
+#     edits in a safe order, and scope the Step 6 residual scan).
+#
+# Ratified by docs/adr/0046-tenant-placeholder-manifest.md. When this manifest
+# and the ADR disagree, the ADR wins and this file must be corrected.
+#
+# Why this exists: `contoso-lab` is overloaded — it is the owner/workload slug
+# (`tags.owner`), it is embedded in the account name (`purview-contoso-lab`),
+# the Key Vault (`kv-contoso-lab-01`), and Log Analytics (`log-contoso-lab`),
+# and it appears in prose. A naive global find/replace corrupts these. This
+# manifest encodes (a) a longest-match-first token order so replacements never
+# corrupt each other, (b) the exact set of files that are tenant surfaces
+# (must be replaced), and (c) the set of paths that intentionally keep
+# Microsoft's fictitious identifiers (`contoso` / `fabrikam` / `adatum`) as
+# sample data and must be excluded from the residual scan.
+#
+# Identifier boundaries this manifest upholds:
+#   .github/copilot-instructions.md — "Environment and identifier boundaries".
+#   .github/instructions/sample-data.instructions.md — synthetic-data rule.
+#
+# This file contains ONLY Microsoft-documented fictitious placeholders and
+# interview-field references. It never contains a real tenant value.
+
+schemaVersion: 1
+
+# -----------------------------------------------------------------------------
+# tokens — ordered longest-match-first. The operator MUST apply replacements in
+# this order within any tenant surface so a shorter token can never corrupt a
+# longer one (e.g. replacing `contoso` before `purview-contoso-lab` would
+# mangle the account name). `replaceWith` names the Step 1 interview field that
+# supplies the real value; the operator never writes a literal real value here.
+# -----------------------------------------------------------------------------
+tokens:
+  - id: purviewAccountName
+    placeholder: purview-contoso-lab
+    order: 1
+    replaceWith: purviewAccountName          # Step 1 Q8
+    note: >-
+      Compound token. Must be replaced before `contoso-lab` and `contoso`.
+      Also the root collection name (data-plane/collections/collections.yaml
+      rootCollection), which is intentional sample content — see
+      intentionalSamples — so the operator only rewrites it in the tenant
+      surfaces listed below, never globally.
+
+  - id: keyVaultName
+    placeholder: kv-contoso-lab-01
+    order: 2
+    replaceWith: keyVaultName                # Step 1 Q9
+
+  - id: logAnalyticsName
+    placeholder: log-contoso-lab
+    order: 3
+    replaceWith: logAnalyticsName            # Step 1 Q10
+
+  - id: tenantDomain
+    placeholder: contoso.onmicrosoft.com
+    order: 4
+    replaceWith: tenantDomain                # Step 1 Q5
+
+  - id: resourceGroupName
+    placeholder: rg-purview-lab
+    order: 5
+    replaceWith: resourceGroupName           # Step 1 Q7
+
+  - id: ownerSlug
+    placeholder: contoso-lab
+    order: 6
+    replaceWith: ownerSlug                   # Step 1 Q6
+    note: >-
+      The overloaded slug. Only replace occurrences that remain AFTER the
+      compound tokens above have been applied (tags.owner, tenant tag,
+      naming examples). Never touch the hyphenless `contosolab` variant in
+      data-plane sample resource names — that is intentional sample data.
+
+  - id: githubRepo
+    placeholder: Purview-as-Code-Generic
+    order: 7
+    replaceWith: githubRepo                  # Step 1 Q4
+
+  - id: githubOrg
+    placeholder: contoso
+    order: 8
+    replaceWith: githubOrg                   # Step 1 Q3
+    note: >-
+      The bare org token. Highest corruption risk — it is a substring of every
+      token above and is ALSO Microsoft's documented fictitious org name kept
+      throughout the intentional-sample paths. Apply it LAST, and ONLY inside
+      the tenant surfaces listed below (githubOrg field, README title/target
+      line, CODEOWNERS, the getting-started OIDC subject org segment). Never
+      run a repository-wide replace of `contoso`.
+
+  - id: codeownersHandle
+    placeholder: "@OWNER-PLACEHOLDER"
+    order: 9
+    replaceWith: codeownersHandle            # Step 1 Q13
+
+# -----------------------------------------------------------------------------
+# tenantSurfaces — the authoritative Step 5 edit list. Every file here MUST have
+# its placeholders replaced for the copy to deploy against a real tenant. Each
+# entry documents which tokens apply and, for MIXED files, which block to edit
+# (so the operator never blind-replaces a file that also holds sample data).
+# -----------------------------------------------------------------------------
+tenantSurfaces:
+  # --- Control plane -----------------------------------------------------------
+  - path: infra/parameters/lab.yaml
+    tokens: [purviewAccountName, keyVaultName, logAnalyticsName, tenantDomain, resourceGroupName, ownerSlug, githubRepo, githubOrg]
+    note: >-
+      Single source of truth. Also set environment, location, the OIDC app
+      displayNames, and the content-explorer wrapper-group displayName/zero-GUID
+      from Step 1. The TEMPLATE header comment block is stripped in deTemplate.
+
+  - path: infra/main.bicepparam
+    tokens: [purviewAccountName, tenantDomain, keyVaultName, ownerSlug]
+    note: purviewAccountName, location, keyVaultName, tags.owner, tags.tenant, and the header comment.
+
+  - path: infra/parameters/README.md
+    tokens: [purviewAccountName, keyVaultName, logAnalyticsName, ownerSlug, resourceGroupName]
+    note: >-
+      Doc that mirrors lab.yaml's example resource names (contoso-lab,
+      log-contoso-lab, kv-contoso-lab-01). Update so the doc matches the
+      tailored values. Low-risk (documentation), but listed so the residual
+      scan reaches zero.
+
+  - path: infra/main.bicep
+    tokens: [ownerSlug]
+    note: >-
+      The `owner: 'contoso-lab'` default tag (currently ~line 39) and the
+      header comment. Missed by the pre-manifest Step 5 list.
+
+  - path: infra/modules/law.bicep
+    tokens: [ownerSlug, logAnalyticsName]
+    note: >-
+      The `owner: 'contoso-lab'` default tag and the naming @description that
+      cites `log-contoso-lab`. Module tag defaults are tenant surfaces until
+      lab.yaml drives them (see lab.yaml `tags` comment). Missed pre-manifest.
+
+  - path: infra/modules/keyvault.bicep
+    tokens: [ownerSlug, keyVaultName]
+    note: >-
+      The `owner: 'contoso-lab'` default tag and the naming @description that
+      cites `kv-contoso-lab-01`. Missed pre-manifest.
+
+  - path: infra/main.json
+    tokens: [ownerSlug]
+    regenerate: true
+    note: >-
+      Compiled ARM artifact — do NOT hand-edit. It is regenerated by
+      `az bicep build --file infra/main.bicep` (the Step 6 validation gate).
+      After editing the .bicep surfaces above, rebuild it so its baked-in
+      `owner` tag matches. Deploy uses main.bicep, not main.json.
+
+  # --- Meta / identity boundary ------------------------------------------------
+  - path: .github/copilot-instructions.md
+    tokens: [purviewAccountName, tenantDomain, resourceGroupName, ownerSlug]
+    block: "Environment and identifier boundaries"
+    mixed: true
+    note: >-
+      Replace ONLY the env-boundary values (account name, tenant domain,
+      resource group, region, env name). The identifier-placeholder TABLE in
+      the same file intentionally keeps `contoso` / `fabrikam` / `adatum` /
+      zero-GUID as the documented convention — never rewrite those.
+
+  - path: README.md
+    tokens: [purviewAccountName, tenantDomain, githubOrg]
+    mixed: true
+    note: >-
+      Replace the title and the "Target account (placeholder)" line. The
+      tenant-neutral banner and the "Template repository" note are stripped in
+      deTemplate, not value-replaced.
+
+  - path: .github/CODEOWNERS
+    tokens: [codeownersHandle]
+
+  - path: .github/instructions/naming.instructions.md
+    tokens: [ownerSlug, purviewAccountName, keyVaultName, logAnalyticsName]
+    block: "the <workload> prefix and the example table"
+    mixed: true
+    note: >-
+      Replace the worked examples that use the contoso-lab resource names.
+      Prose that documents `contoso` as the fictitious-org convention stays.
+
+  - path: docs/getting-started.md
+    tokens: [githubOrg, githubRepo, tenantDomain]
+    block: "the OIDC federated-credential subject and az commands"
+    mixed: true
+    note: >-
+      Replace the org/repo in the federated-credential subject and the account
+      name in the deploy examples. Keep the per-plane app model and the
+      :environment:<env> subject shape (ADR 0010).
+
+  - path: .github/workflows/**
+    tokens: [keyVaultName, tenantDomain, githubOrg]
+    functionalOnly: true
+    note: >-
+      Workflows carry a FEW functional tenant values that MUST be replaced
+      (missed by the pre-manifest edit list, ADR 0046). Replace only these:
+        * `KEY_VAULT_NAME: kv-contoso-lab-01` (env: in deploy-data-plane.yml,
+          kv-temp-unlock.yml, validate-oidc-auth.yml).
+        * `TENANT_DOMAIN: contoso.onmicrosoft.com` (env: in validate-oidc-auth.yml).
+        * The owner-login gate `if: github.event.issue.user.login == 'contoso'`
+          (idea-intake-autoadd.yml) — set to the owner's GitHub login (this is
+          the same class as the OWNER_APPROVAL_LOGIN variable pr-auto-merge.yml
+          already uses; consider migrating it to a variable in a follow-up).
+      Every OTHER `contoso` in workflows is COSMETIC (issue-body prose, doc-link
+      URLs, `--title` strings). Updating those is optional and not deploy-breaking,
+      so the broad residual scan excludes .github/workflows; use the targeted
+      `functionalWorkflowScan` below to verify the functional values instead.
+
+  # --- Optional (owner opt-in) -------------------------------------------------
+  - path: .squad/team.md
+    tokens: [ownerSlug]
+    optional: true
+    note: >-
+      Only if the owner wants the "(contoso-lab)" persona identity string
+      renamed. .squad/memory/** is Scribe-owned — never edit it here
+      (.github/instructions/squad-memory.instructions.md).
+
+# -----------------------------------------------------------------------------
+# intentionalSamples — git pathspecs that legitimately retain Microsoft's
+# fictitious identifiers as sample/example/convention content. The Step 6
+# residual scan EXCLUDES these so a leftover match anywhere else is a genuine
+# missed tenant surface, not sample-data noise. Expressed as git pathspecs for
+# `git grep -- <pathspec>` (":!" = exclude).
+# -----------------------------------------------------------------------------
+intentionalSamples:
+  - ":!docs/adr"                 # decision records quote the placeholders verbatim
+  - ":!CHANGELOG.md"             # historical entries reference the placeholders
+  - ":!data-plane"               # sample catalog content (stcontosolabblob, sql-contosolab-demo, sample UPNs)
+  - ":!tests"                    # Pester fixtures assert against synthetic identifiers
+  - ":!docs/runbooks"            # illustrative end-to-end examples
+  - ":!docs/solutions"           # solution guides use synthetic examples
+  - ":!docs/governance"          # governance docs use synthetic examples
+  - ":!docs/architecture.md"
+  - ":!docs/scripts-reference.md"
+  - ":!docs/tenant-onboarding.md"  # template onboarding guide stays generic (<your-org>/<your-repo>)
+  - ":!docs/kickoff-guide.md"     # template kickoff guide stays generic
+  - ":!.github/instructions"     # rule docs document `contoso` as the convention
+  - ":!.github/prompts"          # prompt templates use synthetic examples
+  - ":!.github/skills"           # skill docs document the placeholder convention
+  - ":!.github/copilot-automations"
+  - ":!.github/agents"           # agent bodies use `contoso` as example (persona rename is opt-in)
+  - ":!.squad"                   # persona identity + Scribe-owned memory
+  - ":!index.html"               # generated landing page
+  - ":!scripts"                  # .EXAMPLE blocks, .PARAMETER text, and the RedactedIdentityPattern legitimately use contoso/fabrikam/adatum (sample-data.instructions.md); scripts read tenant values from lab.yaml at runtime, not hardcoded
+  - ":!.github/workflows"        # dominated by cosmetic prose/doc-links; the FEW functional values are verified by functionalWorkflowScan below, not this broad scan
+
+# Residual scan the operator runs in Step 6 (see operator-tenant.agent.md):
+#   git --no-pager grep -nEi 'contoso|onmicrosoft\.com|OWNER-PLACEHOLDER' -- <intentionalSamples pathspecs>
+# Any remaining match after that exclusion is a tenant surface that was missed
+# or a value the owner deliberately kept — the operator lists each for the owner
+# to confirm, one line at a time. MIXED tenant surfaces (copilot-instructions.md,
+# README.md, getting-started.md; and naming.instructions.md, which lives under the
+# excluded .github/instructions) legitimately keep the `contoso`/`fabrikam`/`adatum`
+# CONVENTION prose after tailoring — they are edited per the explicit tenantSurfaces
+# list, and their remaining matches are expected convention text, not misses.
+
+# -----------------------------------------------------------------------------
+# functionalWorkflowScan — the FEW functional tenant values in .github/workflows
+# (excluded from the broad residual scan above because cosmetic prose dominates).
+# Run this precise scan in Step 6 to confirm they were replaced:
+#   git --no-pager grep -nE 'KEY_VAULT_NAME:.*contoso|TENANT_DOMAIN:.*contoso|user\.login == .contoso' -- .github/workflows/
+# Any match here IS a functional miss (a deploy would target the wrong Key Vault
+# / tenant, or the auto-add gate would never match the real owner). Zero expected
+# after tailoring.
+# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# deTemplate — literal banner/comment blocks that become misleading on a
+# tailored repo. The operator strips these in Step 5 (after value replacement),
+# and operator-kickoff uses their PRESENCE to confirm a copy is still an
+# un-tailored template.
+# -----------------------------------------------------------------------------
+deTemplate:
+  - path: README.md
+    marker: "This is a tenant-neutral template"
+    action: >-
+      Remove the tenant-neutral banner blockquote and the "Template
+      repository. This repo is enabled as a GitHub template" note once the
+      copy is tailored. Keep the Quick start steps.
+  - path: infra/parameters/lab.yaml
+    marker: "TEMPLATE — replace the placeholder values below"
+    action: >-
+      Remove the "TEMPLATE — replace the placeholder values below" header
+      comment block (the fenced Values-to-replace list) after the values are
+      written. Keep the design-rationale header above it.

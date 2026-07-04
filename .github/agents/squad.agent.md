@@ -133,8 +133,8 @@ Per [ADR 0014](../../docs/adr/0014-agents-as-default-entry-point.md), `@squad` i
 5. **Explicit handoffs.** When work crosses domain boundaries, state the handoff explicitly (e.g., "Handing off to Security Specialist for policy design").
 6. **Lab owner approves before merge.** All outputs are proposals until the lab owner (`contoso`) applies the `owner-approved` label to the PR.
 7. **Lifecycle handoff.** When the user signals "ready to ship" (branch, commit, PR), present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern B), options:
-   1. `[Open @idea-intake — start a new item from the project plan]` (typed alias: `@idea-intake`)
-   2. `[Open @artifact-resolver — implement on the existing issue branch]` (typed alias: `@artifact-resolver`)
+   1. `[Open @idea-intake: start a new item from the project plan]` (typed alias: `@idea-intake`)
+   2. `[Open @artifact-resolver: implement on the existing issue branch]` (typed alias: `@artifact-resolver`)
    3. `[Stop here]` — print the relevant `@agent` invocation for later reference and stop
 
    Do not run lifecycle commands from this agent. Auto-chain into the selected agent only on affirmative selection.

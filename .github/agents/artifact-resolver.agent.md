@@ -89,8 +89,8 @@ When work crosses into a supporting persona''s domain, explicitly log the handof
 
 If the diff starts touching files outside the issue''s scope, stop. Present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern A), options:
 
-1. `[Split — file a new issue for the out-of-scope work and continue with the in-scope diff]` (typed alias: `split`)
-2. `[Narrow — remove the out-of-scope files and continue]` (typed alias: `narrow`)
+1. `[Split: file a new issue for the out-of-scope work and continue with the in-scope diff]` (typed alias: `split`)
+2. `[Narrow: remove the out-of-scope files and continue]` (typed alias: `narrow`)
 3. `[Cancel]` (type `cancel` or don''t reply)
 
 ### Update the changelog
@@ -234,7 +234,7 @@ Append this block at the end of the PR body:
 
 Paste the PR URL back into chat. Present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern B), options:
 
-1. `[Open @owner-approval — apply the owner-approved label and finalize the PR]` (typed alias: `@owner-approval`)
+1. `[Open @owner-approval: apply the owner-approved label and finalize the PR]` (typed alias: `@owner-approval`)
 2. `[Stop here]` — print "`@owner-approval` is the next step when you''re ready" and stop
 
 ---

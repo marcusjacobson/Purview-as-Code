@@ -55,4 +55,6 @@ Persona definitions and charters live under [`../../.squad/`](../../.squad/). Th
 
 The selectable-menu contract for every agent confirmation gate and handoff is defined in [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md). The lab-owner-facing guide is [`../../docs/agent-interaction-guide.md`](../../docs/agent-interaction-guide.md).
 
+The tenant-tailoring contract consumed by `@operator-kickoff` and `@operator-tenant` is defined in [`tenant-placeholders.yaml`](tenant-placeholders.yaml) — the ordered placeholder tokens, the authoritative tenant-surface edit list, the intentional-sample allowlist for the residual scan, and the de-template markers. Ratified by [ADR 0046](../../docs/adr/0046-tenant-placeholder-manifest.md).
+
 Reference: [Custom agents in VS Code](https://code.visualstudio.com/docs/copilot/customization/custom-chat-modes).

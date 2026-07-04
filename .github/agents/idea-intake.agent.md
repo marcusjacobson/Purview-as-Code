@@ -43,7 +43,7 @@ Run the §6 dependency-matrix and §8 ADR gates inline. The branch must not be c
 Present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern A), options:
 
 1. `[Start the ADR item instead]` (typed alias: `yes`)
-2. `[Revise…]` (describe the change in a reply)
+2. `[Revise...]` (describe the change in a reply)
 3. `[Cancel]` (type `cancel` or don't reply)
 
 Affirmative selection → restart this agent with the ADR item as the scope.
@@ -55,7 +55,7 @@ Affirmative selection → restart this agent with the ADR item as the scope.
 Present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern A), options:
 
 1. `[Start the prerequisite item instead]` (typed alias: `yes`)
-2. `[Revise…]` (describe the change in a reply)
+2. `[Revise...]` (describe the change in a reply)
 3. `[Cancel]` (type `cancel` or don't reply)
 
 Affirmative selection → restart this agent with the prerequisite item as the scope.
@@ -157,8 +157,8 @@ Examples:
 
 Present the draft issue, proposed labels, and branch name to the lab owner. Then present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern A), options:
 
-1. `[File it — create the branch and file the issue]` (typed alias: `file it` / `yes`)
-2. `[Revise…]` (describe the change in a reply)
+1. `[File it: create the branch and file the issue]` (typed alias: `file it` / `yes`)
+2. `[Revise...]` (describe the change in a reply)
 3. `[Cancel]` (type `cancel` or don't reply)
 
 **Do not file the issue or create the branch until the lab owner explicitly confirms.**
@@ -199,7 +199,7 @@ File the issue via `gh issue create` with the drafted body and labels. Report th
 
 Present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern B), options:
 
-1. `[Open @artifact-resolver — implement the artifact on this branch]` (typed alias: `@artifact-resolver`)
+1. `[Open @artifact-resolver: implement the artifact on this branch]` (typed alias: `@artifact-resolver`)
 2. `[Stop here]` — print "`@artifact-resolver` is the next step when you're ready" and stop
 
 ---
