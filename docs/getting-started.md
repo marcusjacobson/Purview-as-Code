@@ -91,15 +91,45 @@ The `contoso-lab` account already exists, so the control-plane deploy will recon
 
 ## 4. First deploy
 
-```bash
-# Optional local dry run
+> [!IMPORTANT]
+> The `contoso-lab` account already holds live state — collections, glossary terms, classifications, and possibly data sources and scans. **Export that state into the YAML before you reconcile.** A first `-WhatIf` against the shipped sample YAML reports every existing object as an `Orphan`, and a later apply with `-PruneMissing` would delete them. Leading with the export is the mandatory first-run contract in [`.github/instructions/powershell.instructions.md`](../.github/instructions/powershell.instructions.md#first-run-against-an-existing-tenant-contract).
+
+### 4a. Export the live tenant into the YAML (bootstrap, once per domain)
+
+This first-deploy flow covers the five classic Data Map domains below (it does not touch the `data-plane/unified-catalog/**` manifests, which are out of scope for `/deploy-datamap`). Hydrate each domain's YAML from the live account — the export **writes to disk only, never to Purview**:
+
+```pwsh
 az login
-pwsh ./scripts/Deploy-Collections.ps1     -AccountName purview-contoso-lab -WhatIf
-pwsh ./scripts/Deploy-Glossary.ps1        -AccountName purview-contoso-lab -WhatIf
-pwsh ./scripts/Deploy-Classifications.ps1 -AccountName purview-contoso-lab -WhatIf
+pwsh ./scripts/Deploy-Collections.ps1     -AccountName purview-contoso-lab -ExportCurrentState -Force
+pwsh ./scripts/Deploy-Glossary.ps1        -AccountName purview-contoso-lab -ExportCurrentState -Force
+pwsh ./scripts/Deploy-Classifications.ps1 -AccountName purview-contoso-lab -ExportCurrentState -Force
+pwsh ./scripts/Deploy-DataSources.ps1     -AccountName purview-contoso-lab -ExportCurrentState -Force
+pwsh ./scripts/Deploy-Scans.ps1           -AccountName purview-contoso-lab -ExportCurrentState -Force
 ```
 
-Then push to `main` — `deploy-infra` runs first, followed by `deploy-data-plane`.
+`-Force` is required on the first export because the repo ships each YAML with a **sample** hierarchy (for example the placeholder collection tree in [`data-plane/collections/collections.yaml`](../data-plane/collections/collections.yaml)); without it the export refuses to overwrite a non-empty file. On the export path `-Force` only permits overwriting that local sample file with live tenant state — it has no effect on the apply path and never authorizes a write to Purview.
+
+The export replaces each YAML body (including the `rootCollection` value) with live state, so on an existing tenant this supersedes the sample content you would otherwise hand-curate — the `collections.yaml` edit in §3 matters only if you skip the export against an empty tenant.
+
+Review the resulting diff, open it as a pull request, and merge. The committed YAML now describes the tenant, so the first reconciler run is a no-op instead of a mass delete.
+
+### 4b. Reconcile per domain (`-WhatIf` → confirm → apply)
+
+Only after the bootstrap PR merges, validate desired-state changes per domain in dependency order — Collections → Glossary → Classifications → DataSources → Scans. For each domain, run `-WhatIf` and inspect the drift report:
+
+```pwsh
+pwsh ./scripts/Deploy-Collections.ps1 -AccountName purview-contoso-lab -WhatIf
+```
+
+Read the `Create` / `Update` / `NoChange` / `Orphan` / `Conflict` counts. **Stop on any `Orphan` or `Conflict` row** — do not pass `-PruneMissing` or `-Force` to clear them; deletions and portal-overwrites require a `destructive`-labeled PR and a typed confirmation. If only `Create` / `Update` / `NoChange` appear, apply the domain:
+
+```pwsh
+pwsh ./scripts/Deploy-Collections.ps1 -AccountName purview-contoso-lab
+```
+
+The [`/deploy-datamap`](../.github/prompts/deploy-datamap.prompt.md) prompt automates this exact guarded cycle for all five domains and enforces the stop-on-`Orphan`/`Conflict` rule for you — prefer it over running the scripts by hand.
+
+The normal day-2 path is to commit desired-state edits and let CI apply them: open a PR, merge to `main`, and the deploy workflow for whichever plane changed runs the reconcile (`deploy-infra` first when `infra/` changed, then `deploy-data-plane`). Run a local apply only when you deliberately deploy from your workstation — there is then no follow-up CI apply to expect.
 
 ## 5. Day-2 workflow
 

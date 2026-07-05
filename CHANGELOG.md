@@ -30,6 +30,7 @@ To add an entry:
 
 ### Documentation
 
+- **docs:** rewrite `getting-started.md` §4 to lead with the export-first onboarding bootstrap (`-ExportCurrentState -Force`, per domain) before reconciling with `-WhatIf`/apply, so a first run against a pre-existing account no longer surfaces every live object as `Orphan` drift; cross-link the `/deploy-datamap` prompt (now with a first-run precondition) and name export-first onboarding as `@operator-tenant`'s post-tailoring next step (#30)
 - **docs:** add a "Teardown / re-run" section to the kickoff guide — rebuilding requires manual GitHub-UI repo deletion because the automation token lacks the `delete_repo` scope by design (#27)
 - **docs:** record the prompt-decoupling and closed-tenant-surface decisions in ADR 0046 (#27)
 

@@ -18,6 +18,7 @@ Follow these steps in order. Each domain has its own `-WhatIf` → confirm → a
 2. Read the target Purview account (`purviewAccountName`) from [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml). Echo the value but do not echo full resource IDs.
 3. Confirm the active branch is a feature branch (not `main`).
 4. Acquire a data-plane token once via `./scripts/Connect-Purview.ps1 -AccountName <purviewAccountName>` and keep it in memory. Do not write the token to disk. Do not echo it.
+5. **First run against an existing tenant?** If the account already holds live state and the `data-plane/**` YAML has not yet been bootstrapped, stop and run the export-first step first: `./scripts/Deploy-<Domain>.ps1 -AccountName <purviewAccountName> -ExportCurrentState -Force` for each domain (the `-Force` overwrites the shipped sample YAML on disk only — never Purview), then review, PR, and merge that diff. Skipping this surfaces every live object as an `Orphan`. See [`docs/getting-started.md` §4a](../../docs/getting-started.md#4a-export-the-live-tenant-into-the-yaml-bootstrap-once-per-domain) and the [first-run contract](../instructions/powershell.instructions.md#first-run-against-an-existing-tenant-contract).
 
 ## Domain order
 

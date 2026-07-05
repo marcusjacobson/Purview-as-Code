@@ -282,6 +282,8 @@ Present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pa
 1. `[Hand off to @artifact-resolver: commit the tailoring and open a PR]` (typed alias: `@artifact-resolver`)
 2. `[Stop here]` — print "Review the diff, then commit when ready" and stop.
 
+Whichever the owner picks, state the next step after this tailoring merges: **data-plane onboarding via export-first** — run `./scripts/Deploy-<Domain>.ps1 -ExportCurrentState -Force` for each domain to hydrate the `data-plane/**` YAML from the live tenant (the `-Force` overwrites the shipped sample YAML on disk only, never Purview), PR that diff, and only then reconcile with `-WhatIf`/apply. This is the mandatory first-run contract; skipping it surfaces every live object as `Orphan` drift. See [`docs/getting-started.md` §4](../../docs/getting-started.md#4-first-deploy) and the [`/deploy-datamap`](../prompts/deploy-datamap.prompt.md) prompt.
+
 You never commit, push, or deploy yourself.
 
 ---
