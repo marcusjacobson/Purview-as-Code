@@ -107,6 +107,26 @@ entry point.
   login live in GitHub secrets/variables, never in committed files.
 - **Least privilege and OIDC everywhere.** No long-lived client secrets in CI.
 
+## Teardown / re-run
+
+Rebuilding from scratch — to re-run the kickoff → tailor flow on a clean copy — means deleting the
+spin-off repository first, and **that is a manual step in the GitHub UI**. The `gh` CLI and the
+automation token used here are deliberately *not* granted the `delete_repo` OAuth scope (least
+privilege), so `gh repo delete` fails with an insufficient-scope error by design — this is expected,
+not a bug.
+
+To tear down a **spin-off GitHub repository**:
+
+1. Open the repository on GitHub → **Settings** → scroll to the **Danger Zone** at the bottom →
+   **Delete this repository**, and complete the typed-confirmation prompt. See
+   [Deleting a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/deleting-a-repository).
+2. Re-create the copy from the template (step 1 of [The journey](#the-journey)), then re-run
+   [`@operator-kickoff`](../.github/agents/operator-kickoff.agent.md) and
+   [`@operator-tenant`](../.github/agents/operator-tenant.agent.md).
+
+A **local-workspace** copy needs no GitHub deletion — delete the local folder and re-clone (or re-run
+"Use this template").
+
 ## References
 
 - **[Creating a repository from a template](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template)**

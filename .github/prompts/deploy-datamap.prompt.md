@@ -7,12 +7,17 @@ mode: agent
 
 Follow these steps in order. Each domain has its own `-WhatIf` → confirm → apply cycle. Do not batch the confirmations.
 
+> **The Purview account name comes from [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml)**
+> — the single source of truth per [ADR 0012](../../docs/adr/0012-environment-parameters-file.md).
+> Read `purviewAccountName` from that file and substitute it for the `<purviewAccountName>` token
+> below. Never hardcode a tenant-specific account name in this prompt — a tailored copy changes it.
+
 ## Preconditions
 
 1. Confirm the user is logged in: `az account show`.
-2. Confirm the target Purview account: `purview-contoso-lab`. Echo the value but do not echo full resource IDs.
+2. Read the target Purview account (`purviewAccountName`) from [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml). Echo the value but do not echo full resource IDs.
 3. Confirm the active branch is a feature branch (not `main`).
-4. Acquire a data-plane token once via `./scripts/Connect-Purview.ps1 -AccountName purview-contoso-lab` and keep it in memory. Do not write the token to disk. Do not echo it.
+4. Acquire a data-plane token once via `./scripts/Connect-Purview.ps1 -AccountName <purviewAccountName>` and keep it in memory. Do not write the token to disk. Do not echo it.
 
 ## Domain order
 
@@ -29,7 +34,7 @@ The domains must run in this order — each depends on the previous:
 For each of the five domains, run:
 
 ```pwsh
-./scripts/Deploy-<Domain>.ps1 -AccountName purview-contoso-lab -WhatIf
+./scripts/Deploy-<Domain>.ps1 -AccountName <purviewAccountName> -WhatIf
 ```
 
 Then:
@@ -42,7 +47,7 @@ Then:
 Only after confirmation, run the apply:
 
 ```pwsh
-./scripts/Deploy-<Domain>.ps1 -AccountName purview-contoso-lab
+./scripts/Deploy-<Domain>.ps1 -AccountName <purviewAccountName>
 ```
 
 Capture `provisioningState` / HTTP status per object and report the summary in the chat. Do not proceed to the next domain until the previous domain reports zero failures.

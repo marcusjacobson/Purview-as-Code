@@ -168,9 +168,15 @@ Only after explicit confirmation, apply the tailoring driven by
      with `az bicep build` so its baked-in `owner` tag matches.
    - **MIXED files** (`.github/copilot-instructions.md`, `README.md`,
      `.github/instructions/naming.instructions.md`, `docs/getting-started.md`) — replace only the
-     tenant-surface block named in the manifest entry; **never** rewrite the identifier-placeholder
+     tenant-surface block(s) named in the manifest entry; **never** rewrite the identifier-placeholder
      convention prose (`contoso` / `fabrikam` / `adatum` / zero-GUID stay as the documented convention).
-   - **`.github/CODEOWNERS`** — replace every `@OWNER-PLACEHOLDER` with the Step-1 handle.
+     For `.github/copilot-instructions.md` this means BOTH the "Environment and identifier boundaries"
+     values AND the bare `contoso` in the Squad hard-rules bullet ("applied by the lab owner identity
+     `contoso`", githubOrg) — that bullet sits OUTSIDE the env-boundary block, so do not skip it
+     ([ADR 0046](../../docs/adr/0046-tenant-placeholder-manifest.md)).
+   - **`.github/CODEOWNERS`** — replace every `@OWNER-PLACEHOLDER` with the Step-1 handle
+     (codeownersHandle), and the `(contoso-lab)` slug in the line-1 header comment with the owner slug
+     (ownerSlug). The repo name `Purview-as-Code` in the header is not a tenant token; leave it.
    - **`.github/workflows/**`** — replace only the **functional** tenant values (missed pre-manifest,
      [ADR 0046](../../docs/adr/0046-tenant-placeholder-manifest.md)): the `KEY_VAULT_NAME:` env
      default in `deploy-data-plane.yml` / `kv-temp-unlock.yml` / `validate-oidc-auth.yml`, the

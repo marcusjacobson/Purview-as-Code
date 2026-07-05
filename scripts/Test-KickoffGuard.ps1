@@ -16,9 +16,11 @@
       * any retained 'upstream' remote's push URL does not resolve to the
         source template repository (it is disabled with a sentinel).
 
-    Writes a human-readable result and returns a status object. Sets a
-    non-zero exit code on failure so it can gate automation. Read-only: it
-    never mutates git config, never writes files, never pushes.
+    Writes a human-readable result and emits the status object. Sets the
+    process exit code explicitly (0 on pass, 1 on fail) so it can gate
+    automation on the exit code — callers do `Test-KickoffGuard.ps1; if
+    ($LASTEXITCODE) { fail }`. Read-only: it never mutates git config, never
+    writes files, never pushes.
 
     The -OriginUrl and -UpstreamPushUrl parameters exist so a caller (or a
     unit test) can supply state directly; when omitted they are read from
@@ -94,6 +96,12 @@ $status = Get-KickoffGuardStatus -SourceUrl $SourceUrl -OriginUrl $OriginUrl -Up
 
 if ($status.Passed) {
     Write-Information "PASS: no-push-back guard verified. This workspace cannot push to $SourceUrl." -InformationAction Continue
+    # Emit the status object first so a caller that captures the result
+    # (`$s = ./Test-KickoffGuard.ps1`) still receives it, then exit 0. Without
+    # the explicit exit the script leaked $LASTEXITCODE from the last internal
+    # git call (observed as 2) and broke exit-code gating on a passing guard.
+    $status
+    exit 0
 }
 else {
     Write-Information "FAIL: no-push-back guard is NOT satisfied:" -InformationAction Continue
@@ -101,7 +109,6 @@ else {
         Write-Information "  - $f" -InformationAction Continue
     }
     Write-Error "Kickoff guard verification failed for source '$SourceUrl'." -ErrorAction Continue
+    $status
     exit 1
 }
-
-return $status

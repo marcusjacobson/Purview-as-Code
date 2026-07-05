@@ -21,7 +21,7 @@ The build loop is gated. Each gate carries a stable identifier (G0–G5) so ever
 | G1 | Implement | Only the files named by the chosen item are produced; Microsoft Learn cited inline; synthetic identifiers only | [Step A — Implement or iterate](#step-a--implement-or-iterate) |
 | G2 | Lint / build | `az bicep lint` + `az bicep build` (infra); `yamllint` (data plane); `Invoke-ScriptAnalyzer` (scripts); `actionlint` (workflows); markdownlint / visual review (docs) | [Step B — Local validation](#step-b--local-validation) |
 | G3 | Unit test | [`./tests/Run-Pester.ps1`](../../tests/Run-Pester.ps1) over `tests/**` for any `scripts/**` change | [Step B — Local validation](#step-b--local-validation) |
-| G4 | Lab smoke | Item exit-criteria verification against `contoso.onmicrosoft.com`; docs-only items skip | [Step C — Lab smoke test](#step-c--lab-smoke-test) |
+| G4 | Lab smoke | Item exit-criteria verification against `<tenantDomain>` (read from `infra/parameters/lab.yaml`); docs-only items skip | [Step C — Lab smoke test](#step-c--lab-smoke-test) |
 | G5 | Evidence | Per-domain pre-commit output + lab-smoke output + secrets-scan captured for the PR body | [Step D — Decide](#step-d--decide) → `@artifact-resolver` PR body |
 
 ## Precondition check
@@ -76,7 +76,7 @@ If any lint / analyzer / test emits an error or warning, stop and fix it. Do not
 
 This step is gate **G4 (Lab smoke)**.
 
-Deploy to the `contoso.onmicrosoft.com` lab and run the item's exit-criteria verification (from the Exit criteria block on the GitHub issue linked from the [`docs/project-plan.md`](../../docs/project-plan.md) Progress checklist row). Examples:
+Deploy to the lab tenant `<tenantDomain>` — read `automation.tenantDomain` from [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml) (the single source of truth per [ADR 0012](../../docs/adr/0012-environment-parameters-file.md)); never hardcode a tenant domain here — and run the item's exit-criteria verification (from the Exit criteria block on the GitHub issue linked from the [`docs/project-plan.md`](../../docs/project-plan.md) Progress checklist row). Examples:
 
 - Unified audit log row → `Get-AdminAuditLogConfig`
 - Sensitivity labels row → `Get-Label`

@@ -69,7 +69,7 @@ Before either file is modified, paste the full YAML blocks you're about to appen
 
 ## Post-write
 
-- Remind the user to run `./scripts/Deploy-DataSources.ps1 -AccountName purview-contoso-lab -WhatIf` followed by `./scripts/Deploy-Scans.ps1 -AccountName purview-contoso-lab -WhatIf` and paste both drift reports into the PR.
+- Remind the user to run `./scripts/Deploy-DataSources.ps1 -AccountName <purviewAccountName> -WhatIf` followed by `./scripts/Deploy-Scans.ps1 -AccountName <purviewAccountName> -WhatIf` (reading `purviewAccountName` from [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml), never a hardcoded account name) and paste both drift reports into the PR.
 - Remind the user that if the authentication method is not `ManagedIdentity`, the PR description must explain why, per [`data-plane-yaml.instructions.md`](../instructions/data-plane-yaml.instructions.md).
 
 ## Rules for the agent

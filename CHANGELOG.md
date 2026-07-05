@@ -16,6 +16,19 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself.
 
+## 2026-07-05
+
+### Fixed
+
+- **scripts:** `Test-KickoffGuard.ps1` exits `0` on a passing guard instead of leaking a non-zero `$LASTEXITCODE` from the last internal `git` call, restoring exit-code gating; add Pester coverage of the exit-code contract (#27)
+- **instructions:** operational deploy/add prompts (`deploy-infra`, `deploy-datamap`, `add-classification`, `add-data-source`, `build-item`) read the resource group, region, Purview account, and tenant domain from `infra/parameters/lab.yaml` instead of embedding tenant literals that break on a tailored copy (#27)
+- **instructions:** `tenant-placeholders.yaml` closes two scan-only tenant surfaces — the `.github/CODEOWNERS` header slug (`ownerSlug`) and the `.github/copilot-instructions.md` Squad owner-identity line (`githubOrg`) — and `@operator-tenant` Step 5 is synced (#27)
+
+### Documentation
+
+- **docs:** add a "Teardown / re-run" section to the kickoff guide — rebuilding requires manual GitHub-UI repo deletion because the automation token lacks the `delete_repo` scope by design (#27)
+- **docs:** record the prompt-decoupling and closed-tenant-surface decisions in ADR 0046 (#27)
+
 ## 2026-07-04
 
 ### Added
