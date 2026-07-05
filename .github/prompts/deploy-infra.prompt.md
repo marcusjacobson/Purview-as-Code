@@ -7,10 +7,16 @@ mode: agent
 
 Follow these steps in order. Do not skip steps. Do not proceed past a step that emits an error or a warning.
 
+> **Tenant values come from [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml)** — the
+> single source of truth per [ADR 0012](../../docs/adr/0012-environment-parameters-file.md). Read
+> the resource group (`resourceGroupName`) and region (`location`) from that file and substitute them
+> for the `<resourceGroupName>` / `<location>` tokens below. Never hardcode a tenant-specific resource
+> group or region in this prompt — a tailored copy changes those values.
+
 ## Preconditions
 
 1. Confirm the user is logged in: run `az account show` and echo the `name` and `id` (redact the subscription ID per the "Environment and identifier boundaries" rule — show only the first 8 characters).
-2. Confirm the target resource group: `rg-purview-lab` in `eastus`. If `az group show -n rg-purview-lab` returns 404, ask whether to create it; do not create it silently.
+2. Read `resourceGroupName` and `location` from [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml). Confirm the target resource group exists: if `az group show -n <resourceGroupName>` returns 404, ask whether to create it (in `<location>`); do not create it silently.
 3. Confirm the active branch is a feature branch (not `main`). If it is `main`, stop and ask the user to create a feature branch.
 
 ## Step 1 — Lint
@@ -33,7 +39,7 @@ If exit code is non-zero, stop. The emitted `infra/main.json` is a build artifac
 
 ```pwsh
 az deployment group what-if `
-  -g rg-purview-lab `
+  -g <resourceGroupName> `
   -f infra/main.bicep `
   -p infra/main.bicepparam
 ```
@@ -47,7 +53,7 @@ az deployment group what-if `
 
 ```pwsh
 az deployment group create `
-  -g rg-purview-lab `
+  -g <resourceGroupName> `
   -f infra/main.bicep `
   -p infra/main.bicepparam
 ```

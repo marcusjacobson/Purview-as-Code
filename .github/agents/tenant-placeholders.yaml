@@ -157,14 +157,19 @@ tenantSurfaces:
 
   # --- Meta / identity boundary ------------------------------------------------
   - path: .github/copilot-instructions.md
-    tokens: [purviewAccountName, tenantDomain, resourceGroupName, ownerSlug]
-    block: "Environment and identifier boundaries"
+    tokens: [purviewAccountName, tenantDomain, resourceGroupName, ownerSlug, githubOrg]
+    block: "Environment and identifier boundaries; and the Squad hard-rules lab-owner-identity line"
     mixed: true
     note: >-
-      Replace ONLY the env-boundary values (account name, tenant domain,
-      resource group, region, env name). The identifier-placeholder TABLE in
-      the same file intentionally keeps `contoso` / `fabrikam` / `adatum` /
-      zero-GUID as the documented convention — never rewrite those.
+      Replace ONLY (a) the env-boundary values in the "Environment and
+      identifier boundaries" section (account name, tenant domain, resource
+      group, region, env name) and (b) the bare `contoso` in the Squad
+      hard-rules bullet ("applied by the lab owner identity `contoso`") with the
+      owner's githubOrg. That bullet is OUTSIDE the env-boundary block, so the
+      residual scan caught it — Step 5 must own it (ADR 0046). The
+      identifier-placeholder TABLE in the same file intentionally keeps
+      `contoso` / `fabrikam` / `adatum` / zero-GUID as the documented
+      convention — never rewrite those.
 
   - path: README.md
     tokens: [purviewAccountName, tenantDomain, githubOrg]
@@ -175,7 +180,14 @@ tenantSurfaces:
       deTemplate, not value-replaced.
 
   - path: .github/CODEOWNERS
-    tokens: [codeownersHandle]
+    tokens: [codeownersHandle, ownerSlug]
+    note: >-
+      Replace every `@OWNER-PLACEHOLDER` in the ownership rules
+      (codeownersHandle) AND the `(contoso-lab)` slug in the line-1 header
+      comment `# CODEOWNERS for Purview-as-Code (contoso-lab)` (ownerSlug). The
+      header slug was missed by the pre-manifest edit list — the residual scan
+      caught it, so Step 5 must own it (ADR 0046). The repo name `Purview-as-Code`
+      in the header is not a tenant token; leave it.
 
   - path: .github/instructions/naming.instructions.md
     tokens: [ownerSlug, purviewAccountName, keyVaultName, logAnalyticsName]
@@ -241,7 +253,7 @@ intentionalSamples:
   - ":!docs/tenant-onboarding.md"  # template onboarding guide stays generic (<your-org>/<your-repo>)
   - ":!docs/kickoff-guide.md"     # template kickoff guide stays generic
   - ":!.github/instructions"     # rule docs document `contoso` as the convention
-  - ":!.github/prompts"          # prompt templates use synthetic examples
+  - ":!.github/prompts"          # prompt templates use synthetic examples; functional deploy values (account/RG/region/tenant-domain) are read from infra/parameters/lab.yaml at runtime, not embedded (ADR 0046)
   - ":!.github/skills"           # skill docs document the placeholder convention
   - ":!.github/copilot-automations"
   - ":!.github/agents"           # agent bodies use `contoso` as example (persona rename is opt-in)

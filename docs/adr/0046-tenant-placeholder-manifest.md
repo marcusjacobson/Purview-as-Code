@@ -19,6 +19,11 @@ A dev-tenant dry run of the operators surfaced three coupled problems that all t
 
 The template also leaves misleading banners after tailoring: the README "tenant-neutral template" blockquote and the `infra/parameters/lab.yaml` "TEMPLATE — replace the placeholder values below" header comment both remain, now false on a tailored repo.
 
+A follow-up dev-tenant dry run surfaced three further coupled defects the first pass missed:
+
+- **Operational prompts embedded functional tenant literals.** [`deploy-infra.prompt.md`](../../.github/prompts/deploy-infra.prompt.md), [`deploy-datamap.prompt.md`](../../.github/prompts/deploy-datamap.prompt.md), [`add-classification.prompt.md`](../../.github/prompts/add-classification.prompt.md), [`add-data-source.prompt.md`](../../.github/prompts/add-data-source.prompt.md), and [`build-item.prompt.md`](../../.github/prompts/build-item.prompt.md) are excluded from tailoring as `intentionalSamples`, yet they carried copy-paste operational commands with a hardcoded resource group, region, Purview account name, and tenant domain — wrong on any tailored copy.
+- **Two tenant surfaces only the residual scan caught.** The [`.github/CODEOWNERS`](../../.github/CODEOWNERS) line-1 header slug `(contoso-lab)` (the entry listed only `codeownersHandle`), and the bare `contoso` in the [`.github/copilot-instructions.md`](../../.github/copilot-instructions.md) Squad hard-rules "lab owner identity" bullet (which sits outside the declared env-boundary `block`), were absent from the Step 5 edit list — so an operator following only Step 5 (not the Step 6 scan) would ship them unreplaced.
+
 ## Decision
 
 We will add a single-source, machine-readable **tenant placeholder manifest** at [`.github/agents/tenant-placeholders.yaml`](../../.github/agents/tenant-placeholders.yaml), co-located with the operators and the [`INTERACTION-MENUS.md`](../../.github/agents/INTERACTION-MENUS.md) contract it resembles. Both operators consume it. Specifically:
@@ -30,6 +35,10 @@ We will add a single-source, machine-readable **tenant placeholder manifest** at
 3. **`intentionalSamples`** — git pathspec excludes for the Step 6 residual scan. Scanning everything *except* these paths means any remaining match is a genuine missed tenant surface, not sample-data noise. `scripts/**` is excluded (its `contoso` refs are `.EXAMPLE` blocks, `.PARAMETER` text, and the intentional `RedactedIdentityPattern`); `.github/workflows/**` is excluded from the *broad* scan because cosmetic prose dominates, and its few functional values are verified by a separate targeted `functionalWorkflowScan` instead.
 
 4. **`deTemplate`** — the literal banner/comment markers that become misleading on a tailored repo. [`operator-tenant`](../../.github/agents/operator-tenant.agent.md) strips them in Step 5; [`operator-kickoff`](../../.github/agents/operator-kickoff.agent.md) uses their *presence* to confirm a copy is still an un-tailored template (replacing the fragile "grep for `contoso`" heuristic).
+
+5. **Operational prompts read functional tenant values from [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml).** Rather than embed a resource group, region, account name, or tenant domain, the deploy/add prompts instruct the reader to read `resourceGroupName`, `location`, `purviewAccountName`, and `automation.tenantDomain` from the single source of truth ([ADR 0012](0012-environment-parameters-file.md)) and substitute a `<token>`. This keeps `.github/prompts/**` a genuine `intentionalSamples` exclusion: after this change the prompts hold only synthetic examples, so **no** `functionalPromptScan` is needed — in contrast to the `.github/workflows/**` surface, which legitimately retains functional literals and is therefore covered by the targeted `functionalWorkflowScan`.
+
+6. **`tenantSurfaces` closes the two scan-only surfaces.** The [`.github/CODEOWNERS`](../../.github/CODEOWNERS) entry gains `ownerSlug` (the line-1 header slug), and the [`.github/copilot-instructions.md`](../../.github/copilot-instructions.md) entry gains `githubOrg` with its `block` widened to name the Squad hard-rules owner-identity line. Step 5 and the Step 6 residual scan now agree — after tailoring, the only expected `copilot-instructions.md` matches are the intentional identifier-convention-table rows.
 
 The manifest contains only fictitious placeholders and interview-field references — never a real tenant value — so it is safe to commit and upholds the no-real-identifiers rule.
 
