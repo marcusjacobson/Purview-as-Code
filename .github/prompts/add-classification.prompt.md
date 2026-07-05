@@ -51,7 +51,7 @@ Before the file is modified, paste the full YAML block you're about to append in
 
 ## Post-write
 
-- Remind the user to run `./scripts/Deploy-Classifications.ps1 -AccountName purview-contoso-lab -WhatIf` and paste the drift report into the PR.
+- Remind the user to run `./scripts/Deploy-Classifications.ps1 -AccountName <purviewAccountName> -WhatIf` (reading `purviewAccountName` from [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml), never a hardcoded account name) and paste the drift report into the PR.
 - Remind the user to cite the Learn page in the PR description per the pull-request instructions.
 
 ## Rules for the agent
