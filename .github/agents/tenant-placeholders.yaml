@@ -43,6 +43,13 @@ tokens:
     replaceWith: purviewAccountName          # Step 1 Q8
     note: >-
       Compound token. Must be replaced before `contoso-lab` and `contoso`.
+      Discover-then-confirm per ADR 0048: Step 1a runs read-only discovery
+      (scripts/Find-PurviewAccount.ps1, or az account list + per-subscription
+      az resource list) and the owner confirms the target before this value is
+      written. If the target is unconfirmed (not found in ARM, a PAYG meter, a
+      unified-only account, or not yet created), leave the purview-contoso-lab
+      placeholder and add an "account unconfirmed — owner action required" note
+      — never write a guessed name (docs/adr/0048-purview-account-discovery-gate.md).
       Also the root collection name (data-plane/collections/collections.yaml
       rootCollection), which is intentional sample content — see
       intentionalSamples — so the operator only rewrites it in the tenant

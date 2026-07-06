@@ -20,6 +20,7 @@ To add an entry:
 
 ### Added
 
+- **instructions:** turn `@operator-tenant` Step 1 Q8 into a discover-then-confirm gate (new Step 1a) implementing ADR 0048 — run read-only discovery (`Find-PurviewAccount.ps1`, or `az account list` + per-subscription `az resource list`) across every visible subscription, present each hit with the verbatim pay-as-you-go-metering warning, handle "not found in ARM" (unified / other-subscription / not-yet-created) as first-class, record and route on classic-vs-unified, and leave the `purview-contoso-lab` placeholder with an "account unconfirmed — owner action required" note rather than write a guessed name; `tenant-placeholders.yaml` `purviewAccountName` note updated to reference the gate (#37)
 - **scripts:** add read-only `Find-PurviewAccount.ps1` discovery helper implementing the ADR 0048 gate — enumerate `Microsoft.Purview/accounts` across every visible subscription (`az account list` → per-subscription `az resource list`), return one structured object per hit (name, resource group, region, sku) with a `RequiresOwnerConfirmation` classification and the pay-as-you-go-metering warning, and emit a first-class "not found in ARM" result rather than an error; Pester coverage of the shaping and `az`-wrapping functions (#36)
 
 ### Documentation
