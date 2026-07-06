@@ -99,7 +99,7 @@ removed it), in which case skip the derived default for Q3/Q4 and ask them as fr
 5. **Tenant primary domain** — free text, must match `*.onmicrosoft.com` or a verified custom domain. Used by `Connect-IPPSSession -Organization`. **Caveat:** `Connect-IPPSSession -Organization` is most reliable against the tenant's `*.onmicrosoft.com` **initial** domain; a custom/vanity domain (e.g. `contoso.com`) may be accepted here but can fail the Security & Compliance PowerShell connection during data-plane deploys. If the owner enters a custom domain, note this and suggest they verify it, or use the `*.onmicrosoft.com` initial domain. Reference: [Connect-IPPSSession](https://learn.microsoft.com/en-us/powershell/module/exchange/connect-ippssession).
 6. **Owner / workload slug** — free text, lowercase kebab-case. Drives Key Vault, Log Analytics, and tag names. Example `contoso-lab`.
 7. **Resource group name** — free text. Default `rg-purview-<env>` `(recommended)`. Must already exist before the first deploy (the deploy identity is RG-scoped per ADR 0010).
-8. **Purview account name** — free text. The existing or to-be-created account. Also the root collection name.
+8. **Purview account name** — **discover-then-confirm, not free-text-guess** (see **Step 1a**). Do not accept a typed name as a verified default: Step 1a runs read-only discovery first, and a hand-typed name is accepted only as an owner override confirmed against the discovery result. The confirmed value is also the root collection name. If the target stays unconfirmed, Step 1a keeps the `purview-contoso-lab` placeholder — never write a guessed name.
 9. **Key Vault name** — free text. Default `kv-<slug>-01` `(recommended)`.
 10. **Log Analytics workspace name** — free text. Default `log-<slug>` `(recommended)`.
 11. **OIDC app display names** — free text trio. Defaults `gh-oidc-purview-control-plane`, `gh-oidc-purview-data-plane`, `gh-oidc-purview-kv-unlock` `(recommended)`.
@@ -108,6 +108,120 @@ removed it), in which case skip the derived default for Q3/Q4 and ask them as fr
 14. **Content-Explorer wrapper-group identity** — optional. Accept a **displayName** (resolved at deploy per [ADR 0023](../../docs/adr/0023-identifier-resolution.md)) — never paste a raw object ID into chat. If skipped, leave the zero-GUID placeholder (unset).
 
 **Never collected into any file:** Azure subscription ID, tenant ID, app client IDs, certificate values. These live only in GitHub Secrets / `az account set`. If the owner pastes one, redact it and remind them it belongs in a secret (Step 7).
+
+---
+
+## Step 1a — Purview account discovery-and-confirmation gate (ADR 0048)
+
+Q8 does **not** accept a typed name as a verified default. Before any `purviewAccountName` value is
+carried into the Step 3 plan, run this read-only discover-then-confirm gate, ratified by
+[ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md). It never deploys, never writes,
+and never commits a guessed name. The read-only-default of the
+[MCP and tool-usage policy](../instructions/mcp-tool-usage.instructions.md) and the Step-4 write
+confirmation both hold throughout — this gate introduces no new write, deploy, or tool surface.
+
+### 1a.1 — Enumerate (read-only, across every visible subscription)
+
+Discovery enumerates the subscriptions the signed-in identity can see, then lists every
+`Microsoft.Purview/accounts` resource in each — **not just the default subscription**. Prefer the
+shipped read-only helper, which wraps exactly this enumeration with identifier redaction and a
+conservative classification:
+
+```pwsh
+./scripts/Find-PurviewAccount.ps1
+```
+
+It returns one object per hit (`Name`, `ResourceGroup`, `Location`, `Sku`, `SubscriptionName`,
+`Classification`, `Note`); the real `SubscriptionId` stays the zero-GUID placeholder unless the
+caller explicitly opts in. If the helper cannot run (a minimal harness with no `pwsh` / `az`), fall
+back to the raw GA, read-only Azure CLI commands it wraps — never guess:
+
+```pwsh
+# Enumerate subscription NAMES only — never echo the real subscription ID into
+# chat or any file (identifier redaction, below):
+az account list --query "[].name" -o tsv
+# then, per subscription the sign-in can see (the subscription ID is passed to
+# --subscription for targeting but must not be pasted anywhere a human reads):
+az resource list --subscription <subscription-id> --resource-type Microsoft.Purview/accounts `
+  --query "[].{name:name, rg:resourceGroup, region:location, sku:sku.name}" -o table
+```
+
+References: [az account list](https://learn.microsoft.com/en-us/cli/azure/account#az-account-list),
+[az resource list](https://learn.microsoft.com/en-us/cli/azure/resource#az-resource-list). The exact
+per-subscription iteration mechanism (`--subscription` vs `az account set`) is an implementation
+choice ([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 2).
+
+**Redaction:** echo discovery output into chat or any file only after redacting real subscription /
+tenant / resource IDs to the zero-GUID placeholder, per the "Environment and identifier boundaries"
+section of [`copilot-instructions.md`](../copilot-instructions.md). Confirm the target with the owner
+by `SubscriptionName` and account name, never by a GUID.
+
+### 1a.2 — Present each hit; warn that a PAYG meter is not a governance target
+
+For every discovered `Microsoft.Purview/accounts` hit, present **name, resource group, region, and
+`sku`**, and state this warning **verbatim**:
+
+> A pay-as-you-go metering resource is **not** a governance target and must not be selected as
+> `purviewAccountName`.
+
+Microsoft Learn documents no property under `Microsoft.Purview/accounts` that reliably distinguishes
+a governance account from a pay-as-you-go metering resource as of 2026-07-06 — the
+[ARM schema](https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts) exposes
+`sku.name` and `tenantEndpointState` but no billing-meter discriminator. Classification therefore
+**falls back to explicit owner confirmation**; do not invent a heuristic from `sku` or name shape
+([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 3). A hand-typed
+name is accepted **only** as an owner override confirmed against the discovery result — never as an
+unverified default (§Decision item 1).
+
+### 1a.3 — Handle "not found in ARM" as a first-class outcome, not an error
+
+When enumeration returns no governance account (or only a metering resource), **do not fail and do
+not guess.** Ask the owner (Pattern-D, single-select) which situation applies, and record the answer:
+
+- (a) the tenant-level **Unified Catalog** at `purview.microsoft.com` — a SaaS single-tenant
+  experience that Learn does **not** document as a `Microsoft.Purview/accounts` ARM resource
+  ([data governance overview](https://learn.microsoft.com/en-us/purview/data-governance-overview));
+- (b) a **classic account in another subscription or tenant** the current sign-in can't enumerate;
+- (c) **not yet created.**
+
+The answer drives 1a.4 (routing) and 1a.5 (the placeholder decision)
+([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 4).
+
+### 1a.4 — Record account type and route (classic vs unified)
+
+Once the target is identified, record whether it is **classic** or **unified** and route:
+
+- **Classic** (answers on the Atlas Data Map host `{account}.purview.azure.com`) → proceed; the
+  shipped `Deploy-*.ps1` reconcilers and the [`/deploy-datamap`](../prompts/deploy-datamap.prompt.md)
+  export-first onboarding apply.
+- **Unified** (tenant-level, or a new account exposing only the unified data plane) → **flag that
+  classic `Deploy-*.ps1` onboarding is blocked** pending the
+  [ADR 0047](../../docs/adr/0047-unified-catalog-preview-api-coexistence.md) unified reconcilers, and
+  do not imply the `/deploy-datamap` export-first flow will work against it.
+
+Learn documents no procedure for programmatically detecting classic vs unified as of 2026-07-06, so
+this is an **owner-confirmed** determination (or, later, probe-assisted once the ADR 0047
+reconcile-time account-shape probe ships) — never inferred from a host string
+([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 5).
+
+### 1a.5 — Never write a guessed name
+
+Carry a `purviewAccountName` value into Step 3 **only** when the target is confirmed. Apply this
+outcome matrix ([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 6):
+
+| Discovery outcome | `purviewAccountName` in the plan | Also record |
+|---|---|---|
+| Confirmed classic governance account | Write the confirmed name to all surfaces | Proceed with classic `Deploy-*.ps1` / `/deploy-datamap` |
+| Confirmed classic account in a sub/tenant the sign-in can't enumerate | Write the owner-confirmed name | Deploy precondition: the deploy identity must reach that sub/tenant first |
+| Confirmed unified (tenant-level, or unified-only account) | **Leave the placeholder**; do not write a classic name | Classic `Deploy-*.ps1` blocked pending ADR 0047 reconcilers |
+| Only a pay-as-you-go metering resource discovered | Treat as not-found; **leave the placeholder** | Never select the meter |
+| Not yet created | **Leave the placeholder** | Owner action: create the account, then re-run discovery |
+
+When the target is unconfirmed, keep the shipped `purview-contoso-lab` placeholder at every
+`purviewAccountName` surface and add a clearly-marked **"account unconfirmed — owner action
+required"** note there, rather than committing a name that resolves to nothing or to the meter. This
+is the account-target analogue of the zero-GUID "unset" convention the manifest already uses for
+unresolved principals. Step 3's plan and Step 4's confirmation gate then run as normal.
 
 ---
 
@@ -159,7 +273,11 @@ Only after explicit confirmation, apply the tailoring driven by
      `resources.logAnalytics.name`, `resources.keyVault.name`, `automation.githubOrg`,
      `automation.githubRepo`, `automation.githubEnvironment`, `automation.tenantDomain`,
      `automation.apps.*.displayName`, the `Purview-<Env>-KV-Firewall-Toggler` role name, and the
-     content-explorer membership (displayName note or zero-GUID).
+     content-explorer membership (displayName note or zero-GUID). **If Step 1a left the Purview
+     account target unconfirmed**, keep the `purview-contoso-lab` placeholder for `purviewAccountName`
+     (here, in `main.bicepparam`, and the `collections.yaml` `rootCollection`) and add the "account
+     unconfirmed — owner action required" note — never write a guessed name
+     ([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 6).
    - **`infra/main.bicepparam`** — `purviewAccountName`, `location`, `keyVaultName`, `tags` (incl. `tenant`).
    - **`infra/main.bicep`, `infra/modules/law.bicep`, `infra/modules/keyvault.bicep`** — the
      `owner: 'contoso-lab'` default tags and the naming `@description` examples. **These module
@@ -298,6 +416,7 @@ You never commit, push, or deploy yourself.
 6. **Never paste a raw object ID** for the content-explorer group — accept a displayName and resolve at deploy per [ADR 0023](../../docs/adr/0023-identifier-resolution.md).
 7. **Never blind-replace across the tree.** Apply the [`tenant-placeholders.yaml`](tenant-placeholders.yaml) `tokens` in `order` (longest-match-first), edit only the `tenantSurfaces`, and leave the `intentionalSamples` untouched. `contoso` / `fabrikam` / `adatum` in sample data, rule docs, and template guides stay.
 8. **Never leave `docs/getting-started.md` with the broken OIDC shape.** The repo model is a per-plane app trio with `:environment:<env>` subjects ([ADR 0010](../../docs/adr/0010-automation-identity-subject-model.md)) — not a single app, not a `:ref:refs/heads/main` subject. Fix the shape if present; do not merely swap the org name into a broken example.
+9. **Never write a guessed Purview account name.** Q8 is discover-then-confirm (Step 1a): a name reaches `purviewAccountName` only when the owner confirms it against read-only discovery. An unconfirmed target — not-found-in-ARM, a PAYG meter, a unified-only account, or "not yet created" — leaves the `purview-contoso-lab` placeholder plus the "account unconfirmed — owner action required" note ([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md)).
 
 ## References
 
@@ -305,7 +424,12 @@ You never commit, push, or deploy yourself.
 - [Bicep parameter files](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/parameter-files)
 - [Connect-IPPSSession](https://learn.microsoft.com/en-us/powershell/module/exchange/connect-ippssession)
 - [Microsoft.Purview/accounts (Bicep)](https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts)
+- [az account list](https://learn.microsoft.com/en-us/cli/azure/account#az-account-list)
+- [az resource list](https://learn.microsoft.com/en-us/cli/azure/resource#az-resource-list)
+- [Learn about data governance with Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-governance-overview)
 - [Access control in Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions)
+- [ADR 0048 — Purview account discovery-and-confirmation gate](../../docs/adr/0048-purview-account-discovery-gate.md)
+- [ADR 0047 — Unified Catalog preview API coexistence](../../docs/adr/0047-unified-catalog-preview-api-coexistence.md)
 - [ADR 0046 — Tenant placeholder manifest](../../docs/adr/0046-tenant-placeholder-manifest.md)
 - [ADR 0010 — Automation identity subject model](../../docs/adr/0010-automation-identity-subject-model.md)
 - [Custom agents in VS Code](https://code.visualstudio.com/docs/copilot/customization/custom-chat-modes)
