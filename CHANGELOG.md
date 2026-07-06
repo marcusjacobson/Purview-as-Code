@@ -20,6 +20,7 @@ To add an entry:
 
 ### Documentation
 
+- **docs:** add ADR 0048 requiring `@operator-tenant` to run a read-only discovery-and-confirmation gate for the Purview account target — enumerate `Microsoft.Purview/accounts` across every visible subscription, distinguish a governance account from a pay-as-you-go metering decoy, handle the "not found in ARM" (unified / other subscription / not-yet-created) case as first-class, route on classic-vs-unified, and never write a guessed account name — complementing ADR 0047's reconcile-time routing
 - **docs:** record the Microsoft Purview Unified Catalog preview-REST-API coexistence decision in ADR 0047, superseding ADR 0037 after its watch-list trigger #1 fired (#32)
 
 ## 2026-07-05
