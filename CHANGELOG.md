@@ -18,6 +18,10 @@ To add an entry:
 
 ## 2026-07-06
 
+### Added
+
+- **scripts:** add read-only `Find-PurviewAccount.ps1` discovery helper implementing the ADR 0048 gate — enumerate `Microsoft.Purview/accounts` across every visible subscription (`az account list` → per-subscription `az resource list`), return one structured object per hit (name, resource group, region, sku) with a `RequiresOwnerConfirmation` classification and the pay-as-you-go-metering warning, and emit a first-class "not found in ARM" result rather than an error; Pester coverage of the shaping and `az`-wrapping functions (#36)
+
 ### Documentation
 
 - **docs:** add ADR 0048 requiring `@operator-tenant` to run a read-only discovery-and-confirmation gate for the Purview account target — enumerate `Microsoft.Purview/accounts` across every visible subscription, distinguish a governance account from a pay-as-you-go metering decoy, handle the "not found in ARM" (unified / other subscription / not-yet-created) case as first-class, route on classic-vs-unified, and never write a guessed account name — complementing ADR 0047's reconcile-time routing
