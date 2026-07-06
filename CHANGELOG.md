@@ -16,6 +16,12 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself.
 
+## 2026-07-06
+
+### Documentation
+
+- **docs:** record the Microsoft Purview Unified Catalog preview-REST-API coexistence decision in ADR 0047, superseding ADR 0037 after its watch-list trigger #1 fired (#32)
+
 ## 2026-07-05
 
 ### Changed

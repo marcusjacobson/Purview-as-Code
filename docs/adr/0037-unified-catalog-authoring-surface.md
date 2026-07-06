@@ -1,6 +1,6 @@
 # 0037 — Microsoft Purview Unified Catalog authoring surface: no programmatic API; keep Wave 4b placeholder, defer the live reconciler
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR 0047](0047-unified-catalog-preview-api-coexistence.md)
 - **Date:** 2026-06-15
 - **Gates:** Resolves §8 open-question Q13 in [`docs/project-plan.md`](../project-plan.md#8-open-question-adrs). Governs the desired-state shape of `data-plane/unified-catalog/**` and the Create / Update / Remove branches of [`scripts/Deploy-UnifiedCatalog.ps1`](../../scripts/Deploy-UnifiedCatalog.ps1). Closes #638 and watch-list-defers §5.6 row 1 ([#375](../../issues/375)).
 - **Deciders:** @contoso
