@@ -30,7 +30,7 @@
                 "domain": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Parent governance domain name. Must match an entry in governance-domains.yaml."
+                    "description": "Parent business domain name. Must match an entry in business-domains.yaml."
                 },
                 "type": {
                     "type": "string",

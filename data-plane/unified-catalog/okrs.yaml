@@ -1,6 +1,6 @@
 # Microsoft Purview Unified Catalog — Objectives & Key Results (desired state)
 #
-# OKRs declare measurable goals tied to a governance domain. Each
+# OKRs declare measurable goals tied to a business domain. Each
 # objective contains one or more key results with a target value and
 # due date. OKRs surface in the Unified Catalog UI alongside the
 # domain's data products and critical data elements.
@@ -17,7 +17,7 @@
 # Field shape (validated against okrs.schema.json):
 #   name         (required, string)   Objective display name. Unique across file.
 #   description  (optional, string)   Short prose describing the objective.
-#   domain       (required, string)   Parent governance domain name.
+#   domain       (required, string)   Parent business domain name.
 #   targetDate   (optional, string)   ISO-8601 date (YYYY-MM-DD).
 #   owners       (optional, string[]) Entra group display names.
 #   status       (optional, string)   One of: Draft, Published, Expired.

@@ -107,8 +107,13 @@ $ErrorActionPreference = 'Stop'
 # Draft-07 schema and the singular noun used in plan-table output. Keep this
 # in sync with `data-plane/unified-catalog/`; adding a sixth concept is a
 # separate PR that updates this table and ships the matching schema.
+# NOTE: glossary-terms.yaml and data-access-policies.yaml (added per ADR
+# 0047 Decision item 5) are intentionally NOT in this table yet. This
+# placeholder script performs schema-validation-only scaffolding; wiring
+# new concepts into the live plan ships with the follow-up reconciler
+# items ("(b)" for terms, "(c)" for policies) in ADR 0047 Decision item 10.
 $script:UnifiedCatalogConcepts = @(
-    @{ Concept = 'GovernanceDomain'    ; Yaml = 'governance-domains.yaml'    ; Schema = 'governance-domains.schema.json' },
+    @{ Concept = 'BusinessDomain'      ; Yaml = 'business-domains.yaml'      ; Schema = 'business-domains.schema.json' },
     @{ Concept = 'DataProduct'         ; Yaml = 'data-products.yaml'         ; Schema = 'data-products.schema.json' },
     @{ Concept = 'CriticalDataElement' ; Yaml = 'critical-data-elements.yaml'; Schema = 'critical-data-elements.schema.json' },
     @{ Concept = 'HealthControl'       ; Yaml = 'health-controls.yaml'       ; Schema = 'health-controls.schema.json' },

@@ -1,7 +1,7 @@
-# Microsoft Purview Unified Catalog — Governance domains (desired state)
+# Microsoft Purview Unified Catalog — Business domains (desired state)
 #
-# A governance domain is the top-level boundary inside which data products,
-# OKRs, critical data elements, and health controls are organized. One
+# A business domain is the top-level boundary inside which data products,
+# OKRs, critical data elements, and glossary terms are organized. One
 # domain typically maps to a business unit, regulatory scope, functional
 # area, or project. This file is the central source of truth: add /
 # rename / remove flows through this file, and the reconciler
@@ -10,18 +10,27 @@
 #
 # Default steady state is an empty list (`items: []`) — no-op safe on
 # first run. Populating this file with real domain content is tracked
-# separately as a content-onboarding issue and depends on #340 shipping
-# first.
+# separately as a content-onboarding issue.
+#
+# Renamed from governance-domains.yaml per ADR 0047 §Decision item 5 to
+# match the preview API's "Business Domain" operation-group term. The
+# concept is unchanged; only the file name and API-facing label changed.
 #
 # Decision context:
 #   docs/adr/0024-unified-catalog-folder-placement.md
 #     (folder placement + per-concept YAML split decided 2026-05-24;
 #      authoring-surface ADR deferred to follow-up research)
+#   docs/adr/0037-unified-catalog-authoring-surface.md
+#     (2026-06-15 — confirmed no documented authoring API existed yet)
+#   docs/adr/0047-unified-catalog-preview-api-coexistence.md
+#     (2026-07-06 — adopted the 2026-03-20-preview Unified Catalog API;
+#      renamed this file to match the "Business Domain" operation group)
 #
 # Learn references (Microsoft, authoritative):
 #   https://learn.microsoft.com/en-us/purview/unified-catalog
+#   https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/get
 #
-# Field shape (validated against governance-domains.schema.json):
+# Field shape (validated against business-domains.schema.json):
 #   name         (required, string)  Display name. Unique across the file.
 #   description  (optional, string)  Short prose describing the domain.
 #   type         (optional, string)  One of: Regulatory, BusinessUnit,

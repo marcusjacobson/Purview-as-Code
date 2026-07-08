@@ -57,16 +57,16 @@ BeforeAll {
 }
 
 Describe 'Get-DesiredItem (schema validation)' {
-    It 'accepts an empty items list against the governance-domains schema' {
+    It 'accepts an empty items list against the business-domains schema' {
         $yaml = Join-Path $TestDrive 'gov-empty.yaml'
         Set-Content -LiteralPath $yaml -Value "items: []`n"
-        $schema = Join-Path $script:RepoUcRoot 'governance-domains.schema.json'
+        $schema = Join-Path $script:RepoUcRoot 'business-domains.schema.json'
 
         $result = @(Get-DesiredItem -YamlPath $yaml -SchemaPath $schema)
         $result.Count | Should -Be 0
     }
 
-    It 'accepts a well-formed governance domain' {
+    It 'accepts a well-formed business domain' {
         $yaml = Join-Path $TestDrive 'gov-one.yaml'
         Set-Content -LiteralPath $yaml -Value @"
 items:
@@ -74,7 +74,7 @@ items:
     type: BusinessUnit
     status: Draft
 "@
-        $schema = Join-Path $script:RepoUcRoot 'governance-domains.schema.json'
+        $schema = Join-Path $script:RepoUcRoot 'business-domains.schema.json'
 
         $result = @(Get-DesiredItem -YamlPath $yaml -SchemaPath $schema)
         $result.Count | Should -Be 1
@@ -88,7 +88,7 @@ items:
   - name: Finance
     type: Bogus
 "@
-        $schema = Join-Path $script:RepoUcRoot 'governance-domains.schema.json'
+        $schema = Join-Path $script:RepoUcRoot 'business-domains.schema.json'
 
         { Get-DesiredItem -YamlPath $yaml -SchemaPath $schema } | Should -Throw
     }
@@ -99,14 +99,14 @@ items:
 items:
   - type: BusinessUnit
 "@
-        $schema = Join-Path $script:RepoUcRoot 'governance-domains.schema.json'
+        $schema = Join-Path $script:RepoUcRoot 'business-domains.schema.json'
 
         { Get-DesiredItem -YamlPath $yaml -SchemaPath $schema } | Should -Throw
     }
 
     It 'throws when the YAML file is missing' {
         $yaml = Join-Path $TestDrive 'does-not-exist.yaml'
-        $schema = Join-Path $script:RepoUcRoot 'governance-domains.schema.json'
+        $schema = Join-Path $script:RepoUcRoot 'business-domains.schema.json'
 
         { Get-DesiredItem -YamlPath $yaml -SchemaPath $schema } |
             Should -Throw -ExpectedMessage "*not found*"
@@ -124,7 +124,7 @@ items:
     It 'throws when the YAML is missing the top-level items key' {
         $yaml = Join-Path $TestDrive 'gov-no-items.yaml'
         Set-Content -LiteralPath $yaml -Value "other: []`n"
-        $schema = Join-Path $script:RepoUcRoot 'governance-domains.schema.json'
+        $schema = Join-Path $script:RepoUcRoot 'business-domains.schema.json'
 
         { Get-DesiredItem -YamlPath $yaml -SchemaPath $schema } | Should -Throw
     }
@@ -161,11 +161,13 @@ Describe 'Get-ConceptPlan (empty-baseline plan emission)' {
 Describe 'Repository unified-catalog YAMLs (smoke against shipped schemas)' {
     It 'validates every committed unified-catalog YAML against its schema' {
         $pairs = @(
-            @{ Yaml = 'governance-domains.yaml'    ; Schema = 'governance-domains.schema.json' },
+            @{ Yaml = 'business-domains.yaml'      ; Schema = 'business-domains.schema.json' },
             @{ Yaml = 'data-products.yaml'         ; Schema = 'data-products.schema.json' },
             @{ Yaml = 'critical-data-elements.yaml'; Schema = 'critical-data-elements.schema.json' },
             @{ Yaml = 'health-controls.yaml'       ; Schema = 'health-controls.schema.json' },
-            @{ Yaml = 'okrs.yaml'                  ; Schema = 'okrs.schema.json' }
+            @{ Yaml = 'okrs.yaml'                  ; Schema = 'okrs.schema.json' },
+            @{ Yaml = 'glossary-terms.yaml'        ; Schema = 'glossary-terms.schema.json' },
+            @{ Yaml = 'data-access-policies.yaml'  ; Schema = 'data-access-policies.schema.json' }
         )
         foreach ($p in $pairs) {
             $yamlPath   = Join-Path $script:RepoUcRoot $p.Yaml

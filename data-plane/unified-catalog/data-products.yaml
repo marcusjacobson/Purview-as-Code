@@ -19,7 +19,7 @@
 #   name         (required, string)  Display name. Unique across the file.
 #   description  (optional, string)  Short prose describing the product.
 #   domain       (required, string)  Name of the parent governance domain.
-#                                    Must match an entry in governance-domains.yaml.
+#                                    Must match an entry in business-domains.yaml.
 #   type         (optional, string)  One of: Dataset, Dashboard, MLModel,
 #                                    Operational, MasterData, Reference,
 #                                    Other.

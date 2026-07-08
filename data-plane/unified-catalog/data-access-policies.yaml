@@ -1,0 +1,80 @@
+# Microsoft Purview Unified Catalog — Data access policies (desired state)
+#
+# IMPORTANT — schema-only scaffolding. This file ships with `items: []`
+# and NO reconciler reads or writes it yet. The live Policies operation
+# group (learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/policies/update,
+# fetched 2026-07-08) only exposes List and Update — policies are
+# built-in per-domain/per-catalog objects, not created from scratch — and
+# each Update replaces a complex attribute-based-access-control (ABAC)
+# `decisionRules` / `attributeRules` document keyed by raw Entra object
+# IDs. That raw shape is not something a human should hand-author in
+# source control.
+#
+# This file instead declares a simplified, human-authorable projection:
+# "which built-in Purview data governance role does which principal hold,
+# scoped to which business domain (or tenant-wide for global roles)".
+# The mapping from this projection to the raw decisionRules/
+# attributeRules document is reconciler logic and is explicitly deferred
+# to Deploy-UnifiedCatalogPolicies.ps1 ("(c)" in ADR 0047 §Decision item
+# 10), which per §Decision item 9 must treat every policy Create/Update
+# as a destructive-equivalent, grant/revoke-aware change — never folded
+# into the lower-risk domain/product/OKR/CDE/term reconciler.
+#
+# Default steady state is `items: []` — no-op safe on first run.
+#
+# Decision context:
+#   docs/adr/0023-identifier-resolution.md
+#     (principal displayName resolution — applies to `principals` below)
+#   docs/adr/0047-unified-catalog-preview-api-coexistence.md
+#     (§Decision item 5 adds this file; §Decision item 9 defers the
+#      grant/revoke-aware reconciler to its own item and its own PR)
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/policies/update
+#   (fetched 2026-07-08; enumerates the built-in role catalog below)
+#
+# Field shape (validated against data-access-policies.schema.json):
+#   domain      (optional, string)   Business domain name scoping this
+#                                    role assignment. Required for
+#                                    domain-scoped roles (BusinessDomain,
+#                                    DataQuality); omit for tenant-wide
+#                                    Data Governance roles. Must match an
+#                                    entry in business-domains.yaml when
+#                                    present.
+#   role        (required, string)  One of the built-in Purview data
+#                                    governance roles enumerated on the
+#                                    Policies — Update Learn page:
+#                                      Governance Domain Owner
+#                                      Governance Domain Reader
+#                                      Data Product Owner
+#                                      Data Steward
+#                                      Data Quality Reader
+#                                      Data Quality Metadata Reader
+#                                      Data Profile Steward
+#                                      Data Profile Reader
+#                                      Data Governance Administrator
+#                                      Data Health Reader
+#                                      Data Health Owner
+#                                      Governance Domain Creator
+#                                      Global Asset Curator
+#                                      Global Catalog Reader
+#   principals  (required, string[]) Entra group or user display names
+#                                    granted this role. Resolved at
+#                                    deploy time per ADR 0023 — never an
+#                                    inline object ID.
+#   description (optional, string)   Short prose explaining why this
+#                                    assignment exists (audit context).
+#   status      (optional, string)   One of: Draft, Published, Expired.
+#                                    Authoring-only lifecycle marker;
+#                                    the live reconciler (item c) defines
+#                                    how it maps to the ABAC document.
+#
+# Example (commented-out; do not uncomment on main):
+#   - domain: Finance
+#     role: Governance Domain Owner
+#     principals:
+#       - sg-purview-finance-domain-owners
+#     description: Finance domain stewardship team.
+#     status: Draft
+
+items: []

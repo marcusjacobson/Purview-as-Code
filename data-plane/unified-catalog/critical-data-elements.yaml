@@ -16,7 +16,7 @@
 # Field shape (validated against critical-data-elements.schema.json):
 #   name         (required, string)   Display name. Unique across the file.
 #   description  (optional, string)   Short prose describing the element.
-#   domain       (required, string)   Parent governance domain name.
+#   domain       (required, string)   Parent business domain name.
 #   dataType     (optional, string)   One of: String, Number, Date,
 #                                     Boolean, Identifier, Other.
 #   owners       (optional, string[]) Entra group display names.

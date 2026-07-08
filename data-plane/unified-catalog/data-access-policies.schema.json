@@ -1,0 +1,65 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/data-access-policies.schema.json",
+    "title": "Microsoft Purview Unified Catalog — data access policies",
+    "description": "Desired state for a simplified, human-authorable projection of Unified Catalog role assignments: which built-in Purview data governance role a principal holds, scoped to a business domain (or tenant-wide for global roles). This is NOT a passthrough of the raw Policies Update ABAC decisionRules/attributeRules document. Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/policies/update (fetched 2026-07-08). Added per ADR 0047 §Decision item 5. No reconciler consumes this file yet; the grant/revoke-aware mapping to the live ABAC document is deferred to Deploy-UnifiedCatalogPolicies.ps1 per ADR 0047 §Decision item 9.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "items" ],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/dataAccessPolicy" },
+            "description": "List of role assignments. Default state is the empty list."
+        }
+    },
+    "definitions": {
+        "dataAccessPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "role", "principals" ],
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Business domain name scoping this role assignment. Required for domain-scoped roles; omit for tenant-wide Data Governance roles. Must match an entry in business-domains.yaml when present."
+                },
+                "role": {
+                    "type": "string",
+                    "enum": [
+                        "Governance Domain Owner",
+                        "Governance Domain Reader",
+                        "Data Product Owner",
+                        "Data Steward",
+                        "Data Quality Reader",
+                        "Data Quality Metadata Reader",
+                        "Data Profile Steward",
+                        "Data Profile Reader",
+                        "Data Governance Administrator",
+                        "Data Health Reader",
+                        "Data Health Owner",
+                        "Governance Domain Creator",
+                        "Global Asset Curator",
+                        "Global Catalog Reader"
+                    ],
+                    "description": "Built-in Purview data governance role, per the Policies — Update Learn page's enumerated role catalog."
+                },
+                "principals": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "Entra group or user display names granted this role. Resolved at deploy time per ADR 0023 — never an inline object ID."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short prose explaining why this assignment exists (audit context)."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [ "Draft", "Published", "Expired" ],
+                    "description": "Authoring-only lifecycle marker. The live reconciler (item c) defines how it maps to the ABAC document."
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,67 @@
+# Microsoft Purview Unified Catalog — Glossary terms (desired state)
+#
+# A Unified Catalog glossary term is a business-friendly definition scoped
+# to a business domain. This is a distinct product surface from the
+# classic Data Map business glossary under data-plane/glossary/ — the two
+# do not share storage, and this file does not replace that one.
+#
+# Added per ADR 0047 §Decision item 5 (the preview API's "Terms" operation
+# group had no Wave 4b equivalent). No reconciler logic ships with this
+# file; live create/update/delete lands with the follow-up reconciler
+# item ("(b)" in ADR 0047 §Decision item 10).
+#
+# Default steady state is `items: []` — no-op safe on first run.
+#
+# Decision context:
+#   docs/adr/0023-identifier-resolution.md
+#     (principal displayName resolution — applies to owners/experts/
+#      databaseAdmins below)
+#   docs/adr/0024-unified-catalog-folder-placement.md
+#   docs/adr/0047-unified-catalog-preview-api-coexistence.md
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/terms/create
+#   (fetched 2026-07-08; field names below mirror the Terms — Create
+#   request body, minus server-managed fields: id, systemData)
+#
+# Field shape (validated against glossary-terms.schema.json):
+#   name             (required, string)   Display name. Unique within domain.
+#   domain           (required, string)   Parent business domain name. Must
+#                                         match an entry in business-domains.yaml.
+#                                         Resolved to the domain's UUID at
+#                                         deploy time.
+#   description      (optional, string)   Short prose defining the term.
+#   status           (optional, string)   One of: Draft, Published, Expired.
+#   acronyms         (optional, string[]) Short-form acronyms for the term.
+#   isLeaf           (optional, boolean)  Whether this term is a leaf node
+#                                         in the term hierarchy.
+#   parentTerm       (optional, string)   Name of the parent term. Resolved
+#                                         to parentId at deploy time.
+#   owners           (optional, string[]) Entra principal display names
+#                                         mapped to contacts.owner. Resolved
+#                                         at deploy time per ADR 0023.
+#   experts          (optional, string[]) Entra principal display names
+#                                         mapped to contacts.expert.
+#   databaseAdmins   (optional, string[]) Entra principal display names
+#                                         mapped to contacts.databaseAdmin.
+#   resources        (optional, object[]) Related links: { name, url }.
+#   managedAttributes (optional, object[]) Custom attributes: { name }.
+#                                         Value support is deferred until
+#                                         the live reconciler item confirms
+#                                         the full CatalogModelManagedAttribute
+#                                         shape against the Swagger spec.
+#
+# Example (commented-out; do not uncomment on main):
+#   - name: Global Revenue
+#     domain: Finance
+#     description: Total recognized revenue across all business units.
+#     status: Draft
+#     acronyms:
+#       - GR
+#     owners:
+#       - sg-purview-finance-domain-owners
+#     resources:
+#       - name: Revenue recognition policy
+#         url: https://contoso.com/policies/revenue-recognition
+
+items: []

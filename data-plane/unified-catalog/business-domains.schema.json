@@ -1,20 +1,20 @@
 {
     "$schema": "http://json-schema.org/draft-07/schema#",
-    "$id": "https://purview-as-code.contoso-lab/governance-domains.schema.json",
-    "title": "Microsoft Purview Unified Catalog — governance domains",
-    "description": "Desired state for Unified Catalog governance domains consumed by scripts/Deploy-UnifiedCatalog.ps1 (tracked in #340). Reference: https://learn.microsoft.com/en-us/purview/unified-catalog. Per ADR 0024, Microsoft Learn does not yet document the Unified Catalog REST data-plane surface; the field shape below reflects the concept-page model and will be tightened when the authoring-surface ADR lands.",
+    "$id": "https://purview-as-code.contoso-lab/business-domains.schema.json",
+    "title": "Microsoft Purview Unified Catalog — business domains",
+    "description": "Desired state for Unified Catalog business domains consumed by scripts/Deploy-UnifiedCatalog.ps1 (tracked in #340). Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/get. Renamed from governance-domains.schema.json per ADR 0047 §Decision item 5 to match the 2026-03-20-preview API's Business Domain operation group; the concept is unchanged.",
     "type": "object",
     "additionalProperties": false,
     "required": [ "items" ],
     "properties": {
         "items": {
             "type": "array",
-            "items": { "$ref": "#/definitions/governanceDomain" },
-            "description": "List of governance domains. Default state is the empty list."
+            "items": { "$ref": "#/definitions/businessDomain" },
+            "description": "List of business domains. Default state is the empty list."
         }
     },
     "definitions": {
-        "governanceDomain": {
+        "businessDomain": {
             "type": "object",
             "additionalProperties": false,
             "required": [ "name" ],

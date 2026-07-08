@@ -1,0 +1,100 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/glossary-terms.schema.json",
+    "title": "Microsoft Purview Unified Catalog — glossary terms",
+    "description": "Desired state for Unified Catalog glossary terms. Distinct from the classic Data Map glossary (data-plane/glossary/). Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/terms/create (fetched 2026-07-08). Added per ADR 0047 §Decision item 5. Field shape mirrors the Terms — Create request body, minus server-managed fields (id, systemData). No reconciler ships with this schema; see docs/adr/0047-unified-catalog-preview-api-coexistence.md §Decision item 10.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [ "items" ],
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/glossaryTerm" },
+            "description": "List of glossary terms. Default state is the empty list."
+        }
+    },
+    "definitions": {
+        "glossaryTerm": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "domain" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Display name. Unique within the parent domain."
+                },
+                "domain": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Parent business domain name. Must match an entry in business-domains.yaml. Resolved to the domain's UUID at deploy time."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Short prose defining the term."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": [ "Draft", "Published", "Expired" ],
+                    "description": "Lifecycle status. Maps to the API's CatalogModelStatus."
+                },
+                "acronyms": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "Short-form acronyms for the term."
+                },
+                "isLeaf": {
+                    "type": "boolean",
+                    "description": "Whether this term is a leaf node in the term hierarchy."
+                },
+                "parentTerm": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Name of the parent term. Resolved to parentId at deploy time."
+                },
+                "owners": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "Entra principal display names mapped to contacts.owner. Resolved at deploy time per ADR 0023."
+                },
+                "experts": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "Entra principal display names mapped to contacts.expert. Resolved at deploy time per ADR 0023."
+                },
+                "databaseAdmins": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "description": "Entra principal display names mapped to contacts.databaseAdmin. Resolved at deploy time per ADR 0023."
+                },
+                "resources": {
+                    "type": "array",
+                    "items": { "$ref": "#/definitions/termResource" },
+                    "description": "Related links for the term."
+                },
+                "managedAttributes": {
+                    "type": "array",
+                    "items": { "$ref": "#/definitions/managedAttribute" },
+                    "description": "Custom attributes. Value support deferred until the live reconciler item confirms the full CatalogModelManagedAttribute shape against the Swagger spec."
+                }
+            }
+        },
+        "termResource": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "url" ],
+            "properties": {
+                "name": { "type": "string", "minLength": 1 },
+                "url": { "type": "string", "minLength": 1, "format": "uri" }
+            }
+        },
+        "managedAttribute": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name" ],
+            "properties": {
+                "name": { "type": "string", "minLength": 1 }
+            }
+        }
+    }
+}
