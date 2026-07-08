@@ -29,7 +29,14 @@ BeforeAll {
     $script:Ast = [System.Management.Automation.Language.Parser]::ParseFile(
         $script:ScriptPath, [ref]$tokens, [ref]$errors)
 
-    foreach ($fnName in @('ConvertTo-PurviewAccountResult', 'Get-PurviewVisibleSubscription', 'Get-PurviewAccountResource')) {
+    foreach ($fnName in @(
+            'ConvertTo-PurviewAccountResult',
+            'Get-PurviewVisibleSubscription',
+            'Get-PurviewAccountResource',
+            'Invoke-PurviewUnifiedCatalogProbe',
+            'Get-PurviewUnifiedCatalogClassification',
+            'ConvertTo-PurviewUnifiedCatalogDiagnostic'
+        )) {
         $fnAst = $script:Ast.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -244,6 +251,124 @@ Describe 'Get-PurviewAccountResource' {
     }
 }
 
+Describe 'Get-PurviewUnifiedCatalogClassification' {
+
+    It 'classifies HTTP 200 as UnifiedCatalogTenantReachable' {
+        Get-PurviewUnifiedCatalogClassification -TokenAcquired $true -Succeeded $true -StatusCode 200 |
+            Should -Be 'UnifiedCatalogTenantReachable'
+    }
+
+    It 'classifies HTTP 401 as UnifiedCatalogUnauthorized' {
+        Get-PurviewUnifiedCatalogClassification -TokenAcquired $true -Succeeded $false -StatusCode 401 |
+            Should -Be 'UnifiedCatalogUnauthorized'
+    }
+
+    It 'classifies HTTP 403 as UnifiedCatalogUnauthorized' {
+        Get-PurviewUnifiedCatalogClassification -TokenAcquired $true -Succeeded $false -StatusCode 403 |
+            Should -Be 'UnifiedCatalogUnauthorized'
+    }
+
+    It 'classifies HTTP 429 as UnifiedCatalogProbeIndeterminate' {
+        Get-PurviewUnifiedCatalogClassification -TokenAcquired $true -Succeeded $false -StatusCode 429 |
+            Should -Be 'UnifiedCatalogProbeIndeterminate'
+    }
+
+    It 'classifies HTTP 503 as UnifiedCatalogProbeIndeterminate' {
+        Get-PurviewUnifiedCatalogClassification -TokenAcquired $true -Succeeded $false -StatusCode 503 |
+            Should -Be 'UnifiedCatalogProbeIndeterminate'
+    }
+
+    It 'classifies an unrecognized status code as UnifiedCatalogUnreachable' {
+        Get-PurviewUnifiedCatalogClassification -TokenAcquired $true -Succeeded $false -StatusCode 404 |
+            Should -Be 'UnifiedCatalogUnreachable'
+    }
+
+    It 'classifies a null status code with no success as UnifiedCatalogUnreachable' {
+        Get-PurviewUnifiedCatalogClassification -TokenAcquired $true -Succeeded $false -StatusCode $null |
+            Should -Be 'UnifiedCatalogUnreachable'
+    }
+
+    It 'classifies no token acquired as UnifiedCatalogProbeSkipped regardless of other inputs' {
+        Get-PurviewUnifiedCatalogClassification -TokenAcquired $false -Succeeded $false -StatusCode $null |
+            Should -Be 'UnifiedCatalogProbeSkipped'
+    }
+}
+
+Describe 'ConvertTo-PurviewUnifiedCatalogDiagnostic' {
+
+    It 'shapes UnifiedCatalogTenantReachable with the never-write-purviewAccountName warning' {
+        $result = ConvertTo-PurviewUnifiedCatalogDiagnostic -Classification 'UnifiedCatalogTenantReachable'
+
+        $result.Name             | Should -Be 'unified-catalog (tenant default)'
+        $result.SubscriptionId   | Should -Be '00000000-0000-0000-0000-000000000000'
+        $result.Classification   | Should -Be 'UnifiedCatalogTenantReachable'
+        $result.Note             | Should -Match 'NOT proof'
+        $result.Note             | Should -Match 'NEVER be written to purviewAccountName'
+        $result.Note             | Should -Match 'ADR 0047'
+    }
+
+    It 'shapes UnifiedCatalogUnauthorized without claiming reachability' {
+        $result = ConvertTo-PurviewUnifiedCatalogDiagnostic -Classification 'UnifiedCatalogUnauthorized'
+
+        $result.Classification | Should -Be 'UnifiedCatalogUnauthorized'
+        $result.Note           | Should -Match 'neither confirms nor rules out'
+    }
+
+    It 'shapes UnifiedCatalogProbeSkipped as not a reachability signal' {
+        $result = ConvertTo-PurviewUnifiedCatalogDiagnostic -Classification 'UnifiedCatalogProbeSkipped'
+
+        $result.Classification | Should -Be 'UnifiedCatalogProbeSkipped'
+        $result.Note           | Should -Match 'not a reachability signal'
+    }
+
+    It 'rejects an unrecognized classification' {
+        { ConvertTo-PurviewUnifiedCatalogDiagnostic -Classification 'NotARealClassification' } |
+            Should -Throw
+    }
+}
+
+Describe 'Invoke-PurviewUnifiedCatalogProbe' {
+
+    BeforeEach {
+        $script:AzInvocations = New-Object System.Collections.Generic.List[object]
+    }
+
+    It 'returns TokenAcquired=$false when az account get-access-token fails' {
+        function az {
+            $script:AzInvocations.Add(@($args))
+            $script:LASTEXITCODE = 1
+            $global:LASTEXITCODE = 1
+            return ''
+        }
+
+        $result = Invoke-PurviewUnifiedCatalogProbe
+
+        $result.TokenAcquired | Should -Be $false
+        $result.Succeeded     | Should -Be $false
+        $result.StatusCode    | Should -BeNullOrEmpty
+    }
+
+    It 'returns Succeeded=$true, StatusCode=200 when the probe reaches the endpoint' {
+        function az {
+            $script:AzInvocations.Add(@($args))
+            $script:LASTEXITCODE = 0
+            $global:LASTEXITCODE = 0
+            return (@{ accessToken = 'stub-token-not-real' } | ConvertTo-Json)
+        }
+
+        Mock Invoke-RestMethod { return @{ value = @() } }
+
+        $result = Invoke-PurviewUnifiedCatalogProbe
+
+        $result.TokenAcquired | Should -Be $true
+        $result.Succeeded     | Should -Be $true
+        $result.StatusCode    | Should -Be 200
+        Should -Invoke Invoke-RestMethod -Times 1 -ParameterFilter {
+            $Uri -match 'businessdomains' -and $Uri -match 'api-version=2026-03-20-preview'
+        }
+    }
+}
+
 Describe 'Find-PurviewAccount (Get-PurviewAccountDiscovery orchestration)' {
 
     BeforeAll {
@@ -272,6 +397,12 @@ Describe 'Find-PurviewAccount (Get-PurviewAccountDiscovery orchestration)' {
             }
             return @()
         }
+
+        # Stub the az/HTTP-backed probe caller only. Get-PurviewUnifiedCatalogClassification
+        # and ConvertTo-PurviewUnifiedCatalogDiagnostic resolve to the real functions
+        # dot-sourced in the top-level BeforeAll, so classification + shaping are
+        # exercised for real end-to-end.
+        function Invoke-PurviewUnifiedCatalogProbe { $script:StubProbeResult }
     }
 
     BeforeEach {
@@ -284,6 +415,7 @@ Describe 'Find-PurviewAccount (Get-PurviewAccountDiscovery orchestration)' {
             '00000000-0000-0000-0000-000000000050' = [pscustomobject]@{ name = 'purview-contoso-lab'; resourceGroup = 'rg-purview-lab'; location = 'eastus'; sku = [pscustomobject]@{ name = 'Standard' } }
             '00000000-0000-0000-0000-000000000052' = [pscustomobject]@{ name = 'purview-sandbox'; resourceGroup = 'rg-sandbox'; location = 'westus'; sku = $null }
         }
+        $script:StubProbeResult = [pscustomobject]@{ TokenAcquired = $true; Succeeded = $true; StatusCode = 200 }
     }
 
     It 'aggregates one hit per visible subscription and scans each once' {
@@ -339,5 +471,48 @@ Describe 'Find-PurviewAccount (Get-PurviewAccountDiscovery orchestration)' {
         $result = @(Get-PurviewAccountDiscovery -InformationAction SilentlyContinue)
 
         $result.Count | Should -Be 0
+    }
+
+    It 'does not run the Unified Catalog probe when -ProbeUnifiedCatalog is not set, even when ARM finds nothing' {
+        $script:StubAccountsBySub = @{}
+        $probeCalled = $false
+        function Invoke-PurviewUnifiedCatalogProbe { $script:probeCalled = $true; $script:StubProbeResult }
+
+        $result = @(Get-PurviewAccountDiscovery -InformationAction SilentlyContinue)
+
+        $result.Count | Should -Be 0
+        $probeCalled | Should -Be $false
+    }
+
+    It 'runs the probe and returns a diagnostic object when ARM finds nothing and -ProbeUnifiedCatalog is set' {
+        $script:StubAccountsBySub = @{}
+        $script:StubProbeResult = [pscustomobject]@{ TokenAcquired = $true; Succeeded = $true; StatusCode = 200 }
+
+        $result = @(Get-PurviewAccountDiscovery -ProbeUnifiedCatalog -InformationAction SilentlyContinue)
+
+        $result.Count | Should -Be 1
+        $result[0].Name           | Should -Be 'unified-catalog (tenant default)'
+        $result[0].Classification | Should -Be 'UnifiedCatalogTenantReachable'
+        $result[0].Note           | Should -Match 'NEVER be written to purviewAccountName'
+    }
+
+    It 'does not run the probe when ARM discovers a governance account, even with -ProbeUnifiedCatalog set' {
+        $probeCalled = $false
+        function Invoke-PurviewUnifiedCatalogProbe { $script:probeCalled = $true; $script:StubProbeResult }
+
+        $result = @(Get-PurviewAccountDiscovery -ProbeUnifiedCatalog -InformationAction SilentlyContinue)
+
+        $result.Count | Should -Be 2
+        $probeCalled | Should -Be $false
+    }
+
+    It 'surfaces UnifiedCatalogProbeSkipped when the probe cannot acquire a token' {
+        $script:StubAccountsBySub = @{}
+        $script:StubProbeResult = [pscustomobject]@{ TokenAcquired = $false; Succeeded = $false; StatusCode = $null }
+
+        $result = @(Get-PurviewAccountDiscovery -ProbeUnifiedCatalog -InformationAction SilentlyContinue)
+
+        $result.Count | Should -Be 1
+        $result[0].Classification | Should -Be 'UnifiedCatalogProbeSkipped'
     }
 }

@@ -93,6 +93,24 @@ fail and do not guess.** Ask the owner (single-select) which situation applies, 
 - (b) a **classic account in another subscription or tenant** the current sign-in can't enumerate;
 - (c) **not yet created.**
 
+**Optional confirmation for (a):** offer to run the read-only, opt-in Unified Catalog tenant-reachability probe:
+
+```pwsh
+./scripts/Find-PurviewAccount.ps1 -ProbeUnifiedCatalog
+```
+
+This runs a single GET against the Unified Catalog preview data-plane `businessdomains` enumerate endpoint
+([Business Domain - Enumerate](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate)).
+It is tenant-scoped (no `-Name`/`-SubscriptionId` effect) and returns a `Classification` of
+`UnifiedCatalogTenantReachable`, `UnifiedCatalogUnauthorized`, `UnifiedCatalogProbeIndeterminate`,
+`UnifiedCatalogUnreachable`, or `UnifiedCatalogProbeSkipped`. `UnifiedCatalogTenantReachable` (HTTP 200) is a
+**diagnostic reachability signal only** — it confirms the tenant exposes a reachable unified data plane, but it
+is **not** proof that a specific account is unified, **not** proof that no classic account exists elsewhere, and
+**not** the [ADR 0047](../../docs/adr/0047-unified-catalog-preview-api-coexistence.md) reconcile-time routing
+decision. Its emitted `Name` (`unified-catalog (tenant default)`) must **never** be written to
+`purviewAccountName`. Use the result to corroborate the owner's answer to (a), not to replace their confirmation
+(ADR 0048 Addendum, 2026-07-08).
+
 The answer drives Step 4 (routing) and the Step 5 stop decision
 ([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 4).
 
@@ -140,6 +158,9 @@ On any **Stop** outcome, surface the matching owner-action guidance above and **
   confirm the target by `SubscriptionName` and account name.
 - Never invent a governance-vs-metering or classic-vs-unified determination. Both are owner-confirmed
   (ADR 0048 §Decision items 3 and 5).
+- If `-ProbeUnifiedCatalog` is run, never write its `unified-catalog (tenant default)` diagnostic label to
+  `purviewAccountName` — it is a tenant-level reachability signal, not a confirmed account name (ADR 0048
+  Addendum, 2026-07-08).
 - On a **Stop** outcome, do not proceed to onboarding, even if asked to "continue" — the owner must resolve the
   target first.
 
@@ -147,4 +168,5 @@ Reference: [ADR 0048 — Purview account discovery-and-confirmation gate](../../
 [Microsoft.Purview/accounts](https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts),
 [az account list](https://learn.microsoft.com/en-us/cli/azure/account#az-account-list),
 [az resource list](https://learn.microsoft.com/en-us/cli/azure/resource#az-resource-list),
-[Learn about data governance with Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-governance-overview).
+[Learn about data governance with Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-governance-overview),
+[Business Domain - Enumerate](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate).

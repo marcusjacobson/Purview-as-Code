@@ -16,6 +16,17 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself.
 
+## 2026-07-08
+
+### Added
+
+- **scripts:** add an opt-in, read-only `-ProbeUnifiedCatalog` switch to `Find-PurviewAccount.ps1` — when ARM enumeration finds no `Microsoft.Purview/accounts` resource, runs a single tenant-scoped GET against the Unified Catalog preview data-plane `businessdomains` enumerate endpoint (`2026-03-20-preview`) and returns a diagnostic classification (`UnifiedCatalogTenantReachable`, `UnifiedCatalogUnauthorized`, `UnifiedCatalogProbeIndeterminate`, `UnifiedCatalogUnreachable`, `UnifiedCatalogProbeSkipped`) instead of an empty array; default off, never writes, never prints the token, and its diagnostic label must never be written to `purviewAccountName`; Pester coverage of the classification, shaping, and probe-calling functions (#41)
+- **instructions:** wire the opt-in Unified Catalog tenant-reachability probe into the ADR 0048 operator flow — `@operator-tenant` Step 1a.3 and the `/discover-purview-account` prompt Step 3 now offer `Find-PurviewAccount.ps1 -ProbeUnifiedCatalog` to corroborate the "tenant-level Unified Catalog" hypothesis in the "not found in ARM" branch, with an explicit never-write-to-`purviewAccountName` rule (#41)
+
+### Documentation
+
+- **docs:** add an ADR 0048 addendum grounding the opt-in Unified Catalog tenant-reachability probe in the Learn-documented `businessdomains` enumerate operation, framed conservatively as a tenant-level reachability signal that neither confirms a specific account's type nor reopens item 5's classic-vs-unified caveat (#41)
+
 ## 2026-07-06
 
 ### Added

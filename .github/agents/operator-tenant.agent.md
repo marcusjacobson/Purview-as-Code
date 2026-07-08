@@ -184,6 +184,22 @@ not guess.** Ask the owner (Pattern-D, single-select) which situation applies, a
 - (b) a **classic account in another subscription or tenant** the current sign-in can't enumerate;
 - (c) **not yet created.**
 
+**Optional confirmation for (a):** offer to run the read-only, opt-in Unified Catalog
+tenant-reachability probe:
+
+```pwsh
+./scripts/Find-PurviewAccount.ps1 -ProbeUnifiedCatalog
+```
+
+This is a single, tenant-scoped GET against the Unified Catalog preview data-plane `businessdomains`
+enumerate endpoint ([Business Domain - Enumerate](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate)).
+A `Classification` of `UnifiedCatalogTenantReachable` (HTTP 200) is a **diagnostic reachability
+signal only** — it is not proof that a specific account is unified, not proof that no classic
+account exists elsewhere, and not the ADR 0047 reconcile-time routing decision. Its emitted `Name`
+(`unified-catalog (tenant default)`) must **never** be written to `purviewAccountName`. Use it to
+corroborate the owner's answer to (a), never to replace their confirmation
+([ADR 0048 Addendum, 2026-07-08](../../docs/adr/0048-purview-account-discovery-gate.md)).
+
 The answer drives 1a.4 (routing) and 1a.5 (the placeholder decision)
 ([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 4).
 
@@ -417,6 +433,7 @@ You never commit, push, or deploy yourself.
 7. **Never blind-replace across the tree.** Apply the [`tenant-placeholders.yaml`](tenant-placeholders.yaml) `tokens` in `order` (longest-match-first), edit only the `tenantSurfaces`, and leave the `intentionalSamples` untouched. `contoso` / `fabrikam` / `adatum` in sample data, rule docs, and template guides stay.
 8. **Never leave `docs/getting-started.md` with the broken OIDC shape.** The repo model is a per-plane app trio with `:environment:<env>` subjects ([ADR 0010](../../docs/adr/0010-automation-identity-subject-model.md)) — not a single app, not a `:ref:refs/heads/main` subject. Fix the shape if present; do not merely swap the org name into a broken example.
 9. **Never write a guessed Purview account name.** Q8 is discover-then-confirm (Step 1a): a name reaches `purviewAccountName` only when the owner confirms it against read-only discovery. An unconfirmed target — not-found-in-ARM, a PAYG meter, a unified-only account, or "not yet created" — leaves the `purview-contoso-lab` placeholder plus the "account unconfirmed — owner action required" note ([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md)).
+10. **Never write the Unified Catalog probe's diagnostic label to `purviewAccountName`.** `Find-PurviewAccount.ps1 -ProbeUnifiedCatalog`'s `unified-catalog (tenant default)` result is a tenant-level reachability signal, not a confirmed account name — it corroborates the owner's Step 1a.3 answer, it never replaces it ([ADR 0048 Addendum, 2026-07-08](../../docs/adr/0048-purview-account-discovery-gate.md)).
 
 ## References
 
@@ -427,6 +444,7 @@ You never commit, push, or deploy yourself.
 - [az account list](https://learn.microsoft.com/en-us/cli/azure/account#az-account-list)
 - [az resource list](https://learn.microsoft.com/en-us/cli/azure/resource#az-resource-list)
 - [Learn about data governance with Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-governance-overview)
+- [Business Domain - Enumerate](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate)
 - [Access control in Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions)
 - [ADR 0048 — Purview account discovery-and-confirmation gate](../../docs/adr/0048-purview-account-discovery-gate.md)
 - [ADR 0047 — Unified Catalog preview API coexistence](../../docs/adr/0047-unified-catalog-preview-api-coexistence.md)

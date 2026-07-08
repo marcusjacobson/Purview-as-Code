@@ -34,6 +34,16 @@
     account in another subscription or tenant the sign-in can't see / not yet
     created).
 
+    When ARM enumeration finds nothing, an operator can additionally pass
+    `-ProbeUnifiedCatalog` to run a read-only, opt-in reachability check
+    against the Unified Catalog preview data plane (a single GET against the
+    tenant-scoped `businessdomains` enumerate endpoint). An HTTP 200 confirms
+    the tenant exposes a reachable unified data plane — a diagnostic signal
+    for ADR 0048 §Decision item 4 scenario (a), NOT proof that any specific
+    account is unified, NOT proof that no classic account exists elsewhere,
+    and NOT the ADR 0047 reconcile-time routing decision. The probe is
+    OFF by default and never changes the ARM-only discovery path's behavior.
+
     References:
       Azure CLI - az account list:
         https://learn.microsoft.com/en-us/cli/azure/account#az-account-list
@@ -43,6 +53,8 @@
         https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts
       Learn about data governance with Microsoft Purview:
         https://learn.microsoft.com/en-us/purview/data-governance-overview
+      Business Domain - Enumerate (Unified Catalog preview data plane):
+        https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate
       ADR 0048 (this script's contract):
         docs/adr/0048-purview-account-discovery-gate.md
 
@@ -66,11 +78,32 @@
     the target with the owner. When this switch is set, the caller owns the
     redaction obligation before echoing the value anywhere.
 
+.PARAMETER ProbeUnifiedCatalog
+    Optional. OFF by default — no change to the existing ARM-only path. When
+    set, and only after ARM enumeration finds no Microsoft.Purview/accounts
+    resource (across every visible subscription, ignoring -Name and
+    -SubscriptionId), runs a single read-only GET against the Unified Catalog
+    preview data-plane tenant-scoped `businessdomains` enumerate endpoint
+    (https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate).
+    An HTTP 200 means the tenant exposes a reachable unified data plane — a
+    diagnostic reachability signal for ADR 0048 §Decision item 4 scenario (a),
+    not proof that a specific account is unified, not proof that no classic
+    account exists, and not the ADR 0047 reconcile-time routing decision. The
+    result is emitted as a single diagnostic object whose Name is the literal
+    string 'unified-catalog (tenant default)'; this value must never be
+    written to `purviewAccountName`. Never prints the bearer token; redacts
+    `az` stderr.
+
 .OUTPUTS
     [pscustomobject] with properties: Name, ResourceGroup, Location, Sku,
     SubscriptionName, SubscriptionId, Classification, Note. Zero objects are
-    emitted when nothing is discovered. SubscriptionId is the zero-GUID
-    placeholder unless -IncludeSubscriptionId is set.
+    emitted when nothing is discovered and -ProbeUnifiedCatalog is not set.
+    SubscriptionId is the zero-GUID placeholder unless -IncludeSubscriptionId
+    is set. When -ProbeUnifiedCatalog is set and ARM enumeration finds
+    nothing, a single diagnostic object is emitted instead of an empty array;
+    its Classification is one of UnifiedCatalogTenantReachable,
+    UnifiedCatalogUnauthorized, UnifiedCatalogProbeIndeterminate,
+    UnifiedCatalogUnreachable, or UnifiedCatalogProbeSkipped.
 
 .NOTES
     Identifier redaction: per ADR 0048 §Decision item 2 and the "Environment
@@ -93,6 +126,13 @@
 
     Check whether the candidate account name resolves to a discoverable
     account. An empty result means the name does not resolve in ARM.
+
+.EXAMPLE
+    ./scripts/Find-PurviewAccount.ps1 -ProbeUnifiedCatalog
+
+    When no Microsoft.Purview/accounts resource is discovered in ARM, also run
+    the opt-in, read-only Unified Catalog tenant-reachability probe and return
+    its diagnostic classification instead of an empty array.
 #>
 [CmdletBinding()]
 [OutputType([pscustomobject])]
@@ -106,7 +146,10 @@ param(
     [string[]]$SubscriptionId,
 
     [Parameter()]
-    [switch]$IncludeSubscriptionId
+    [switch]$IncludeSubscriptionId,
+
+    [Parameter()]
+    [switch]$ProbeUnifiedCatalog
 )
 
 $ErrorActionPreference = 'Stop'
@@ -163,6 +206,154 @@ function Get-PurviewAccountResource {
     }
 
     @(($raw | ConvertFrom-Json))
+}
+
+function Invoke-PurviewUnifiedCatalogProbe {
+    <#
+        Opt-in, read-only reachability probe against the Unified Catalog
+        preview data plane. Runs one GET, tenant-scoped (ignores -Name and
+        -SubscriptionId — there is no {account} segment; the tenant in the
+        bearer token selects the account per Learn's URI parameter table).
+        Never writes, never prints the token, redacts az stderr.
+
+        # api-version justification: Unified Catalog data-plane API is
+        # preview-only as of 2026-07-06 (ADR 0047 §Decision item 4). Pinned to
+        # the single latest preview version for this endpoint family.
+        Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param()
+
+    $apiVersion = '2026-03-20-preview'
+    $endpoint = 'https://api.purview-service.microsoft.com'
+    $uri = "$endpoint/datagovernance/catalog/businessdomains?api-version=$apiVersion"
+
+    $tokenRaw = az account get-access-token --resource 'https://purview.azure.net' --only-show-errors -o json 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tokenRaw)) {
+        return [pscustomobject]@{ TokenAcquired = $false; Succeeded = $false; StatusCode = $null }
+    }
+
+    $token = $null
+    try {
+        $token = ($tokenRaw | ConvertFrom-Json).accessToken
+    } catch {
+        $token = $null
+    }
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        return [pscustomobject]@{ TokenAcquired = $false; Succeeded = $false; StatusCode = $null }
+    }
+
+    try {
+        $headers = @{ Authorization = "Bearer $token" }
+        $null = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
+        return [pscustomobject]@{ TokenAcquired = $true; Succeeded = $true; StatusCode = 200 }
+    } catch {
+        $statusCode = $null
+        if ($_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+        }
+        return [pscustomobject]@{ TokenAcquired = $true; Succeeded = $false; StatusCode = $statusCode }
+    } finally {
+        # Never leave the token resident longer than needed; never print it.
+        $token = $null
+        $headers = $null
+    }
+}
+
+function Get-PurviewUnifiedCatalogClassification {
+    <#
+        Pure classification function for the opt-in Unified Catalog
+        tenant-reachability probe. No az call, no HTTP — unit-testable
+        without a tenant. Deliberately conservative: an HTTP 200 is a
+        tenant-level diagnostic reachability signal only. It is NOT proof
+        that a specific account is unified, NOT proof that no classic
+        account exists elsewhere, and NOT the ADR 0047 reconcile-time
+        routing decision.
+        Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [bool]$TokenAcquired,
+
+        [Parameter()]
+        [bool]$Succeeded,
+
+        [Parameter()]
+        [AllowNull()]
+        [Nullable[int]]$StatusCode
+    )
+
+    if (-not $TokenAcquired) {
+        return 'UnifiedCatalogProbeSkipped'
+    }
+
+    if ($Succeeded -and $StatusCode -eq 200) {
+        return 'UnifiedCatalogTenantReachable'
+    }
+
+    if ($null -ne $StatusCode -and ($StatusCode -eq 401 -or $StatusCode -eq 403)) {
+        return 'UnifiedCatalogUnauthorized'
+    }
+
+    if ($null -ne $StatusCode -and ($StatusCode -eq 429 -or ($StatusCode -ge 500 -and $StatusCode -le 599))) {
+        return 'UnifiedCatalogProbeIndeterminate'
+    }
+
+    return 'UnifiedCatalogUnreachable'
+}
+
+function ConvertTo-PurviewUnifiedCatalogDiagnostic {
+    <#
+        Pure shaping function: map a probe classification to the same result
+        surface ConvertTo-PurviewAccountResult emits, so callers can treat the
+        diagnostic object like any other discovery hit. No az call, no HTTP —
+        unit-testable without a tenant.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            'UnifiedCatalogTenantReachable',
+            'UnifiedCatalogUnauthorized',
+            'UnifiedCatalogProbeIndeterminate',
+            'UnifiedCatalogUnreachable',
+            'UnifiedCatalogProbeSkipped'
+        )]
+        [string]$Classification
+    )
+
+    $note = switch ($Classification) {
+        'UnifiedCatalogTenantReachable' {
+            'The tenant exposes a reachable Unified Catalog data plane (HTTP 200 from the businessdomains enumerate endpoint). This is a diagnostic reachability signal only (ADR 0048 §Decision item 4 scenario (a)) — it is NOT proof that a specific account is unified, NOT proof that no classic account exists elsewhere, and NOT the ADR 0047 reconcile-time routing decision. This label must NEVER be written to purviewAccountName: classic Deploy-*.ps1 reconcilers cannot drive this plane, and unified reconcilers are the ADR 0047 follow-up.'
+        }
+        'UnifiedCatalogUnauthorized' {
+            'The Unified Catalog data-plane endpoint responded, but the signed-in identity lacks consent or permission (401/403). This neither confirms nor rules out tenant reachability; confirm access with the owner before drawing any conclusion.'
+        }
+        'UnifiedCatalogProbeIndeterminate' {
+            'The probe received a transient response (429 or 5xx). Retry before concluding anything about tenant reachability.'
+        }
+        'UnifiedCatalogUnreachable' {
+            'The probe received no successful response and no recognized error status. This does not confirm the tenant lacks a Unified Catalog data plane — only that this probe could not reach it.'
+        }
+        'UnifiedCatalogProbeSkipped' {
+            'No token was acquired for the probe (az account get-access-token failed or returned no token). The probe did not run; this is not a reachability signal.'
+        }
+    }
+
+    [pscustomobject]@{
+        Name             = 'unified-catalog (tenant default)'
+        ResourceGroup    = $null
+        Location         = $null
+        Sku              = $null
+        SubscriptionName = $null
+        SubscriptionId   = $script:ZeroGuid
+        Classification   = $Classification
+        Note             = $note
+    }
 }
 
 function ConvertTo-PurviewAccountResult {
@@ -228,7 +419,10 @@ function Get-PurviewAccountDiscovery {
         [string[]]$SubscriptionId,
 
         [Parameter()]
-        [switch]$IncludeSubscriptionId
+        [switch]$IncludeSubscriptionId,
+
+        [Parameter()]
+        [switch]$ProbeUnifiedCatalog
     )
 
     $subscriptions = @(Get-PurviewVisibleSubscription)
@@ -258,6 +452,16 @@ function Get-PurviewAccountDiscovery {
     if ($results.Count -eq 0) {
         $scope = if ($Name) { "matching name '$Name'" } else { 'in any visible subscription' }
         Write-Information "No Microsoft.Purview/accounts resource found $scope across $($subscriptions.Count) visible subscription(s). This is not an error (ADR 0048). The governance target may be: (a) the tenant-level Unified Catalog at purview.microsoft.com, which is not an ARM resource; (b) a classic account in a subscription or tenant this sign-in cannot see; or (c) not yet created. Confirm with the lab owner before writing purviewAccountName." -InformationAction Continue
+
+        if ($ProbeUnifiedCatalog) {
+            Write-Verbose 'Running opt-in Unified Catalog tenant-reachability probe (read-only; ignores -Name and -SubscriptionId).'
+            $probe = Invoke-PurviewUnifiedCatalogProbe
+            $classification = Get-PurviewUnifiedCatalogClassification -TokenAcquired $probe.TokenAcquired -Succeeded $probe.Succeeded -StatusCode $probe.StatusCode
+            $diagnostic = ConvertTo-PurviewUnifiedCatalogDiagnostic -Classification $classification
+            Write-Information "Unified Catalog tenant-reachability probe result: $classification. $($diagnostic.Note)" -InformationAction Continue
+            return @($diagnostic)
+        }
+
         return @()
     }
 
@@ -268,7 +472,10 @@ function Get-PurviewAccountDiscovery {
 
 # --- Main flow -------------------------------------------------------------
 
-$discoveryParams = @{ IncludeSubscriptionId = [bool]$IncludeSubscriptionId }
+$discoveryParams = @{
+    IncludeSubscriptionId = [bool]$IncludeSubscriptionId
+    ProbeUnifiedCatalog   = [bool]$ProbeUnifiedCatalog
+}
 if ($PSBoundParameters.ContainsKey('Name')) { $discoveryParams['Name'] = $Name }
 if ($PSBoundParameters.ContainsKey('SubscriptionId')) { $discoveryParams['SubscriptionId'] = $SubscriptionId }
 

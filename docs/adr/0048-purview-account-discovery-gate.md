@@ -56,6 +56,25 @@ We will **require `@operator-tenant` to run a read-only discovery-and-confirmati
 
 7. **Scaffolding is follow-up work, gated on this ADR being Accepted.** This ADR decides and enumerates only. The gate is delivered as separate `@idea-intake` items, one at a time: (a) the `@operator-tenant` discover-and-confirm step (revised Q8 + a discovery sub-step) and the matching updates to [`tenant-placeholders.yaml`](../../.github/agents/tenant-placeholders.yaml) notes; (b) a `/discover-purview-account` prompt, or a discovery **precondition** added to [`/deploy-datamap`](../../.github/prompts/deploy-datamap.prompt.md); (c) an optional read-only `scripts/Find-PurviewAccount.ps1` helper that wraps the item-2 enumeration and item-3 classification with identifier redaction. None branch before this ADR is Accepted, per the repo's "the ADR must ship as its own item first" rule.
 
+## Addendum (2026-07-08) — opt-in Unified Catalog tenant-reachability probe for item 4 scenario (a)
+
+Item 4 scenario (a) ("the tenant-level Unified Catalog at `purview.microsoft.com`, which is not an ARM resource") was, at ratification, a purely owner-confirmed hypothesis with no programmatic check. Microsoft Learn now documents the Unified Catalog preview data-plane API's `businessdomains` enumerate operation ([Business Domain - Enumerate](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate)), fetched and live-verified against the lab tenant on 2026-07-08: `GET {endpoint}/datagovernance/catalog/businessdomains?api-version=2026-03-20-preview` against `{endpoint}` = `https://api.purview-service.microsoft.com` returned HTTP 200. Because `{endpoint}` has no `{account}` path segment — the tenant in the bearer token selects the account, per Learn's own URI-parameter table — this is a **tenant-scoped** call, not an account-scoped one.
+
+`scripts/Find-PurviewAccount.ps1` therefore gained an opt-in `-ProbeUnifiedCatalog` switch (default **off**; no change to the existing ARM-only path). When ARM enumeration finds no `Microsoft.Purview/accounts` resource across every visible subscription and the switch is set, it runs this single read-only GET and returns a diagnostic classification instead of an empty array:
+
+| Classification | Meaning |
+|---|---|
+| `UnifiedCatalogTenantReachable` | HTTP 200 — the tenant exposes a reachable unified data plane. |
+| `UnifiedCatalogUnauthorized` | HTTP 401/403 — endpoint reachable, identity lacks consent/permission. |
+| `UnifiedCatalogProbeIndeterminate` | HTTP 429 or 5xx — transient; retry before concluding. |
+| `UnifiedCatalogUnreachable` | Any other response or no response. |
+| `UnifiedCatalogProbeSkipped` | No token was acquired; the probe did not run. |
+
+**This addendum does not reopen or weaken item 5.** A rubber-duck review of the original proposal caught an overclaim worth recording here explicitly: `UnifiedCatalogTenantReachable` is a **tenant-level reachability signal**, not proof that any specific candidate account is unified, and not proof that no classic account exists elsewhere in the tenant or in a subscription the sign-in can't enumerate. It is also **not** the [ADR 0047](0047-unified-catalog-preview-api-coexistence.md) reconcile-time account-shape routing decision — that probe, once it ships, answers a different, account-scoped question. The diagnostic label the script emits (`unified-catalog (tenant default)`) must **never** be written to `purviewAccountName`; classic `Deploy-*.ps1` reconcilers cannot drive this plane, and driving it is the ADR 0047 unified-reconciler follow-up.
+
+The practical effect is narrow but real: an operator who previously had "no programmatic next step" for scenario (a) now has a deterministic HTTP-200 signal to confirm the owner's hypothesis against, before recording "(a) tenant-level Unified Catalog" in the item-4 interview. `@operator-tenant` Step 1a.3 and the [`/discover-purview-account`](../../.github/prompts/discover-purview-account.prompt.md) prompt were updated in the same change to offer the probe at that decision point. This addendum amends items 4 and 7's Learn-grounding only; the rest of the Decision, and every other "Learn documents no procedure" caveat in this ADR (items 3 and 5), stands unchanged.
+
+
 ## Consequences
 
 **Easier**
@@ -96,6 +115,7 @@ We will **require `@operator-tenant` to run a read-only discovery-and-confirmati
 - [Microsoft.Purview/accounts — Bicep, ARM template & Terraform AzAPI reference](https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts) — fetched 2026-07-06. Documents `sku.name` (`Free` / `Standard`) and `tenantEndpointState` (`Disabled` / `Enabled` / `NotSpecified`) and exposes no governance-vs-metering discriminator; grounds the §Decision item 3 fall-back-to-owner-confirmation stance.
 - [Learn about data governance with Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-governance-overview) — fetched 2026-07-06. States Unified Catalog is "a software as a service (SaaS) experience based on a single-tenant model"; grounds the §Context statement that the tenant-level unified experience is not an ARM resource.
 - [ADR 0047 — Unified Catalog preview API coexistence](0047-unified-catalog-preview-api-coexistence.md) — the reconcile-time classic/unified routing decision this ADR complements; records that Learn documents no programmatic account-shape detection procedure as of 2026-07-06.
+- [Business Domain - Enumerate](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate) — fetched 2026-07-08. Documents the tenant-scoped `GET {endpoint}/datagovernance/catalog/businessdomains?api-version=2026-03-20-preview` request this ADR's addendum grounds the opt-in `-ProbeUnifiedCatalog` reachability probe on; `{endpoint}` has no `{account}` path segment.
 - [ADR 0012 — Environment parameters file](0012-environment-parameters-file.md) — establishes `infra/parameters/lab.yaml` as the single source of truth for `purviewAccountName`.
 - [ADR 0045 — Template kickoff and spin-off model](0045-template-kickoff-spinoff-model.md) and [ADR 0046 — Tenant placeholder manifest](0046-tenant-placeholder-manifest.md) — the `@operator-kickoff` → `@operator-tenant` tailoring flow and the manifest that maps `purviewAccountName` into its surfaces.
 - [`.github/instructions/mcp-tool-usage.instructions.md`](../../.github/instructions/mcp-tool-usage.instructions.md) — the read-only-default the discovery gate obeys.
@@ -115,3 +135,6 @@ We will **require `@operator-tenant` to run a read-only discovery-and-confirmati
 - **[Learn about data governance with Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-governance-overview)**
   Fetch date: 2026-07-06
   > "Unified Catalog is a searchable catalog of your scanned data … The catalog is a software as a service (SaaS) experience based on a single-tenant model."
+- **[Business Domain - Enumerate](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate)**
+  Fetch date: 2026-07-08
+  > "Enumerates business domains with optional continuation token and write-obligation filtering." Request: `GET {endpoint}/datagovernance/catalog/businessdomains?api-version=2026-03-20-preview`. `{endpoint}` — "The endpoint of the Purview Unified Catalog service. Example: https://api.purview-service.microsoft.com/".
