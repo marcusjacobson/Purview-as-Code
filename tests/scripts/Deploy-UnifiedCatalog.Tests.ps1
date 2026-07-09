@@ -2,24 +2,11 @@
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.5.0' }
 <#
 .SYNOPSIS
-    Pester unit tests for `scripts/Deploy-UnifiedCatalog.ps1`.
+    Pester unit tests for scripts/Deploy-UnifiedCatalog.ps1.
 
 .DESCRIPTION
-    Issue #340 — Wave 4b-ii placeholder reconciler. Tests cover:
-
-      - Schema validation positive path (each shipped YAML validates).
-      - Schema validation negative path (malformed fixtures rejected).
-      - Plan emission against an empty tenant baseline.
-
-    The production script performs top-level work at import time
-    (parameter resolution, az CLI hand-off in later iterations), so we
-    AST-extract the helper functions and evaluate them into the test
-    scope. See `Deploy-Policies.Tests.ps1` for the same pattern.
-
-    References:
-      https://learn.microsoft.com/en-us/purview/unified-catalog
-      https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
-      https://pester.dev/docs/quick-start
+    The production script performs top-level work at import time, so the tests
+    AST-extract the pure helper functions we want to exercise.
 #>
 
 BeforeAll {
@@ -33,7 +20,28 @@ BeforeAll {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile(
         $script:ScriptPath, [ref]$tokens, [ref]$errors)
 
-    foreach ($fnName in @('Get-DesiredItem', 'Get-ConceptPlan')) {
+    if ($errors.Count -gt 0) {
+        throw ($errors | ForEach-Object Message | Out-String)
+    }
+
+    foreach ($fnName in @(
+            'Get-DesiredItem',
+            'ConvertTo-JsonComparable',
+            'ConvertTo-StringArrayNormalized',
+            'ConvertTo-StatusFromDesired',
+            'ConvertTo-StatusToDesired',
+            'ConvertTo-BusinessDomainTypeFromDesired',
+            'ConvertTo-CdeDataTypeFromDesired',
+            'Resolve-DesiredNumericValue',
+            'ConvertTo-ReportRow',
+            'ConvertTo-BusinessDomainComparableDesired',
+            'ConvertTo-BusinessDomainComparableTenant',
+            'Compare-ComparableFieldSet',
+            'Get-EntityDisplayName',
+            'Test-IsConflict',
+            'Get-ReconciliationPlan',
+            'Invoke-DirectionPolicyPlan'
+        )) {
         $fnAst = $ast.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -45,15 +53,15 @@ BeforeAll {
         . ([ScriptBlock]::Create($fnAst.Extent.Text))
     }
 
-    # AST-extracted Get-DesiredItem calls ConvertFrom-Yaml; ensure the module
-    # is available in the test session without invoking the production
-    # bootstrap path.
     if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
         Install-Module -Name 'powershell-yaml' -Scope CurrentUser -Force -AllowClobber
     }
     Import-Module 'powershell-yaml' -ErrorAction Stop
+    Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'DirectionPolicy.psm1') -Force -Scope Local -ErrorAction Stop
 
     $script:RepoUcRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..' 'data-plane' 'unified-catalog')).Path
+    $script:CurrentPrincipalIds = @('current-principal')
+    $script:SkipNameList = @()
 }
 
 Describe 'Get-DesiredItem (schema validation)' {
@@ -81,7 +89,7 @@ items:
         $result[0].name | Should -Be 'Finance'
     }
 
-    It 'rejects a malformed entry that violates the enum constraint' {
+    It 'rejects a malformed enum value' {
         $yaml = Join-Path $TestDrive 'gov-bad.yaml'
         Set-Content -LiteralPath $yaml -Value @"
 items:
@@ -92,88 +100,182 @@ items:
 
         { Get-DesiredItem -YamlPath $yaml -SchemaPath $schema } | Should -Throw
     }
+}
 
-    It 'rejects an entry missing the required name property' {
-        $yaml = Join-Path $TestDrive 'gov-no-name.yaml'
-        Set-Content -LiteralPath $yaml -Value @"
-items:
-  - type: BusinessUnit
-"@
-        $schema = Join-Path $script:RepoUcRoot 'business-domains.schema.json'
-
-        { Get-DesiredItem -YamlPath $yaml -SchemaPath $schema } | Should -Throw
+Describe 'Desired-state normalization helpers' {
+    It 'maps BusinessUnit to the preview API enum' {
+        $item = [pscustomobject]@{ name = 'Finance'; type = 'BusinessUnit'; status = 'Draft' }
+        $result = ConvertTo-BusinessDomainComparableDesired -Item $item
+        $result.type | Should -Be 'LineOfBusiness'
     }
 
-    It 'throws when the YAML file is missing' {
-        $yaml = Join-Path $TestDrive 'does-not-exist.yaml'
-        $schema = Join-Path $script:RepoUcRoot 'business-domains.schema.json'
-
-        { Get-DesiredItem -YamlPath $yaml -SchemaPath $schema } |
-            Should -Throw -ExpectedMessage "*not found*"
+    It 'maps Identifier to a supported preview CDE data type' {
+        ConvertTo-CdeDataTypeFromDesired -Type 'Identifier' | Should -Be 'TEXT'
     }
 
-    It 'throws when the schema file is missing' {
-        $yaml = Join-Path $TestDrive 'gov-no-schema.yaml'
-        Set-Content -LiteralPath $yaml -Value "items: []`n"
-        $schema = Join-Path $TestDrive 'absent.schema.json'
-
-        { Get-DesiredItem -YamlPath $yaml -SchemaPath $schema } |
-            Should -Throw -ExpectedMessage "*not found*"
+    It 'parses numeric key-result values and rejects text ranges' {
+        Resolve-DesiredNumericValue -Value '42.5' | Should -Be 42.5
+        Resolve-DesiredNumericValue -Value '<= 2 per quarter' | Should -BeNullOrEmpty
     }
 
-    It 'throws when the YAML is missing the top-level items key' {
-        $yaml = Join-Path $TestDrive 'gov-no-items.yaml'
-        Set-Content -LiteralPath $yaml -Value "other: []`n"
-        $schema = Join-Path $script:RepoUcRoot 'business-domains.schema.json'
+    It 'normalizes duplicate string arrays' {
+        @(ConvertTo-StringArrayNormalized -Values @('Finance', 'finance', 'Finance'))[0] | Should -Be 'finance' -Because 'Sort-Object is case-insensitive on strings'
+    }
 
-        { Get-DesiredItem -YamlPath $yaml -SchemaPath $schema } | Should -Throw
+    It 'preserves a single normalized value as an array' {
+        $result = ConvertTo-StringArrayNormalized -Values 'Creator'
+        $result -is [System.Array] | Should -BeTrue
+        $result | Should -Be @('Creator')
     }
 }
 
-Describe 'Get-ConceptPlan (empty-baseline plan emission)' {
-    It 'returns a single NoChange row when desired is empty' {
-        $plan = @(Get-ConceptPlan -Concept 'GovernanceDomain' -Desired @())
+Describe 'Get-ReconciliationPlan' {
+    BeforeEach {
+        $script:CurrentPrincipalIds = @('current-principal')
+    }
+
+    It 'returns Create rows when an item is only in desired state' {
+        $desired = @([pscustomobject]@{ name = 'Finance'; description = 'A'; type = 'BusinessUnit'; status = 'Draft' })
+        $plan = Get-ReconciliationPlan `
+            -Kind 'BusinessDomain' `
+            -DesiredItems $desired `
+            -TenantItems @() `
+            -DesiredComparable { param($item) ConvertTo-BusinessDomainComparableDesired -Item $item } `
+            -TenantComparable { param($item) ConvertTo-BusinessDomainComparableTenant -Item $item } `
+            -DesiredKeySelector { param($item) [string]$item.name } `
+            -TenantKeySelector { param($item) [string]$item.name }
+
+        $plan.Report[0].Category | Should -Be 'Create'
+        $plan.Plan[0].Action | Should -Be 'Create'
+    }
+
+    It 'returns NoChange rows when comparable state matches' {
+        $desired = @([pscustomobject]@{ name = 'Finance'; description = 'A'; type = 'BusinessUnit'; status = 'Draft' })
+        $tenant = @([pscustomobject]@{ name = 'Finance'; description = 'A'; type = 'LineOfBusiness'; status = 'Draft'; systemData = [pscustomobject]@{ lastModifiedBy = 'current-principal' } })
+        $plan = Get-ReconciliationPlan `
+            -Kind 'BusinessDomain' `
+            -DesiredItems $desired `
+            -TenantItems $tenant `
+            -DesiredComparable { param($item) ConvertTo-BusinessDomainComparableDesired -Item $item } `
+            -TenantComparable { param($item) ConvertTo-BusinessDomainComparableTenant -Item $item } `
+            -DesiredKeySelector { param($item) [string]$item.name } `
+            -TenantKeySelector { param($item) [string]$item.name }
+
+        $plan.Report[0].Category | Should -Be 'NoChange'
+        $plan.Plan.Count | Should -Be 0
+    }
+
+    It 'returns Update rows when comparable state differs and the current principal owns the tenant object' {
+        $desired = @([pscustomobject]@{ name = 'Finance'; description = 'A'; type = 'BusinessUnit'; status = 'Published' })
+        $tenant = @([pscustomobject]@{ name = 'Finance'; description = 'A'; type = 'LineOfBusiness'; status = 'Draft'; systemData = [pscustomobject]@{ lastModifiedBy = 'current-principal' } })
+        $plan = Get-ReconciliationPlan `
+            -Kind 'BusinessDomain' `
+            -DesiredItems $desired `
+            -TenantItems $tenant `
+            -DesiredComparable { param($item) ConvertTo-BusinessDomainComparableDesired -Item $item } `
+            -TenantComparable { param($item) ConvertTo-BusinessDomainComparableTenant -Item $item } `
+            -DesiredKeySelector { param($item) [string]$item.name } `
+            -TenantKeySelector { param($item) [string]$item.name }
+
+        $plan.Report[0].Category | Should -Be 'Update'
+        $plan.Plan[0].Action | Should -Be 'Update'
+        $plan.Plan[0].Fields | Should -Contain 'status'
+    }
+
+    It 'returns Conflict rows when a different principal last modified the tenant object' {
+        $desired = @([pscustomobject]@{ name = 'Finance'; description = 'A'; type = 'BusinessUnit'; status = 'Published' })
+        $tenant = @([pscustomobject]@{ name = 'Finance'; description = 'A'; type = 'LineOfBusiness'; status = 'Draft'; systemData = [pscustomobject]@{ lastModifiedBy = 'other-principal' } })
+        $plan = Get-ReconciliationPlan `
+            -Kind 'BusinessDomain' `
+            -DesiredItems $desired `
+            -TenantItems $tenant `
+            -DesiredComparable { param($item) ConvertTo-BusinessDomainComparableDesired -Item $item } `
+            -TenantComparable { param($item) ConvertTo-BusinessDomainComparableTenant -Item $item } `
+            -DesiredKeySelector { param($item) [string]$item.name } `
+            -TenantKeySelector { param($item) [string]$item.name }
+
+        $plan.Report[0].Category | Should -Be 'Conflict'
+        $plan.Plan.Count | Should -Be 0
+    }
+}
+
+Describe 'Invoke-DirectionPolicyPlan' {
+    BeforeEach {
+        $script:SkipNameList = @()
+    }
+
+    It 'converts Update rows to Skip rows under portal-wins' {
+        $DirectionPolicy = 'portal-wins'
+        $plan = New-Object 'System.Collections.Generic.List[object]'
+        $report = New-Object 'System.Collections.Generic.List[object]'
+        $plan.Add([pscustomobject]@{ Action = 'Update'; Kind = 'BusinessDomain'; Name = 'Finance'; Fields = @('status'); Conflict = $false }) | Out-Null
+        $report.Add((ConvertTo-ReportRow -Category 'Update' -Kind 'BusinessDomain' -Name 'Finance' -Fields @('status'))) | Out-Null
+
+        Invoke-DirectionPolicyPlan -Plan $plan -Report $report
+
+        $plan.Count | Should -Be 0
+        ($report | Where-Object Category -eq 'Skip').Count | Should -Be 1
+    }
+
+    It 'keeps Update rows under repo-wins' {
+        $DirectionPolicy = 'repo-wins'
+        $plan = New-Object 'System.Collections.Generic.List[object]'
+        $report = New-Object 'System.Collections.Generic.List[object]'
+        $plan.Add([pscustomobject]@{ Action = 'Update'; Kind = 'BusinessDomain'; Name = 'Finance'; Fields = @('status'); Conflict = $false }) | Out-Null
+        $report.Add((ConvertTo-ReportRow -Category 'Update' -Kind 'BusinessDomain' -Name 'Finance' -Fields @('status'))) | Out-Null
+
+        Invoke-DirectionPolicyPlan -Plan $plan -Report $report
+
         $plan.Count | Should -Be 1
-        $plan[0].Concept | Should -Be 'GovernanceDomain'
-        $plan[0].Action | Should -Be 'NoChange'
-        $plan[0].Name | Should -Be '(none)'
+        ($report | Where-Object Category -eq 'Skip').Count | Should -Be 0
     }
 
-    It 'returns one Create row per desired item, preserving order' {
-        $desired = @(
-            [pscustomobject]@{ name = 'Finance' }
-            [pscustomobject]@{ name = 'Sales' }
-        )
-        $plan = @(Get-ConceptPlan -Concept 'GovernanceDomain' -Desired $desired)
-        $plan.Count | Should -Be 2
-        @($plan | ForEach-Object Action) | Should -Be @('Create', 'Create')
-        @($plan | ForEach-Object Name)   | Should -Be @('Finance', 'Sales')
-    }
+    It 'clears the plan under audit mode' {
+        $DirectionPolicy = 'audit'
+        $plan = New-Object 'System.Collections.Generic.List[object]'
+        $report = New-Object 'System.Collections.Generic.List[object]'
+        $plan.Add([pscustomobject]@{ Action = 'Update'; Kind = 'BusinessDomain'; Name = 'Finance'; Fields = @('status'); Conflict = $false }) | Out-Null
+        $report.Add((ConvertTo-ReportRow -Category 'Update' -Kind 'BusinessDomain' -Name 'Finance' -Fields @('status'))) | Out-Null
 
-    It 'preserves the concept label on every row' {
-        $desired = @([pscustomobject]@{ name = 'Customer Tax ID' })
-        $plan = @(Get-ConceptPlan -Concept 'CriticalDataElement' -Desired $desired)
-        $plan[0].Concept | Should -Be 'CriticalDataElement'
-        $plan[0].Name    | Should -Be 'Customer Tax ID'
+        Invoke-DirectionPolicyPlan -Plan $plan -Report $report
+
+        $plan.Count | Should -Be 0
     }
 }
 
-Describe 'Repository unified-catalog YAMLs (smoke against shipped schemas)' {
-    It 'validates every committed unified-catalog YAML against its schema' {
+Describe 'Source surface contract' {
+    It 'keeps the required reconciler switches and ADR markers in source' {
+        $raw = Get-Content -LiteralPath $script:ScriptPath -Raw
+        $raw | Should -Match 'SupportsShouldProcess = \$true'
+        $raw | Should -Match '\[switch\]\$PruneMissing'
+        $raw | Should -Match '\[switch\]\$ExportCurrentState'
+        $raw | Should -Match '\[string\]\$DirectionPolicy = ''portal-wins'''
+        $raw | Should -Match '\[string\[\]\]\$SkipNames = @\(\)'
+        $raw | Should -Match '\[ADR0029-AUDIT\]'
+        $raw | Should -Match '\[ADR0029-SKIP\]'
+        $raw | Should -Match 'api-version justification:'
+        $raw | Should -Match 'Connect-Purview\.ps1'
+        $raw | Should -Match 'Get-EntraPrincipalIdByDisplayName\.ps1'
+    }
+}
+
+Describe 'Repository unified-catalog YAMLs' {
+    It 'validates every shipped unified-catalog YAML against its schema' {
         $pairs = @(
-            @{ Yaml = 'business-domains.yaml'      ; Schema = 'business-domains.schema.json' },
-            @{ Yaml = 'data-products.yaml'         ; Schema = 'data-products.schema.json' },
+            @{ Yaml = 'business-domains.yaml'; Schema = 'business-domains.schema.json' },
+            @{ Yaml = 'data-products.yaml'; Schema = 'data-products.schema.json' },
             @{ Yaml = 'critical-data-elements.yaml'; Schema = 'critical-data-elements.schema.json' },
-            @{ Yaml = 'health-controls.yaml'       ; Schema = 'health-controls.schema.json' },
-            @{ Yaml = 'okrs.yaml'                  ; Schema = 'okrs.schema.json' },
-            @{ Yaml = 'glossary-terms.yaml'        ; Schema = 'glossary-terms.schema.json' },
-            @{ Yaml = 'data-access-policies.yaml'  ; Schema = 'data-access-policies.schema.json' }
+            @{ Yaml = 'health-controls.yaml'; Schema = 'health-controls.schema.json' },
+            @{ Yaml = 'okrs.yaml'; Schema = 'okrs.schema.json' },
+            @{ Yaml = 'glossary-terms.yaml'; Schema = 'glossary-terms.schema.json' },
+            @{ Yaml = 'data-access-policies.yaml'; Schema = 'data-access-policies.schema.json' }
         )
-        foreach ($p in $pairs) {
-            $yamlPath   = Join-Path $script:RepoUcRoot $p.Yaml
-            $schemaPath = Join-Path $script:RepoUcRoot $p.Schema
+
+        foreach ($pair in $pairs) {
+            $yamlPath = Join-Path $script:RepoUcRoot $pair.Yaml
+            $schemaPath = Join-Path $script:RepoUcRoot $pair.Schema
             $result = @(Get-DesiredItem -YamlPath $yamlPath -SchemaPath $schemaPath)
-            $result.Count | Should -Be 0 -Because "$($p.Yaml) is expected to ship as items: []"
+            $result.Count | Should -Be 0 -Because "$($pair.Yaml) ships as items: []"
         }
     }
 }

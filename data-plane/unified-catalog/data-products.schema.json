@@ -34,7 +34,27 @@
                 },
                 "type": {
                     "type": "string",
-                    "enum": [ "Dataset", "Dashboard", "MLModel", "Operational", "MasterData", "Reference", "Other" ]
+                    "enum": [
+                        "Dataset",
+                        "Dashboard",
+                        "MLModel",
+                        "Operational",
+                        "MasterData",
+                        "Reference",
+                        "Other",
+                        "Master",
+                        "Analytical",
+                        "AI",
+                        "MasterDataAndReferenceData",
+                        "BusinessSystemOrApplication",
+                        "ModelTypes",
+                        "DashboardsOrReports",
+                        "MLAITrainingDataSet",
+                        "MLAITestingDataSet",
+                        "TransactionalDataset",
+                        "AnalyticsModel",
+                        "SemanticModel"
+                    ]
                 },
                 "businessUse": {
                     "type": "string"

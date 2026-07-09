@@ -20,6 +20,7 @@ To add an entry:
 
 ### Added
 
+- **unified-catalog:** promote `Deploy-UnifiedCatalog.ps1` to a live full-circle reconciler for business domains, data products, OKRs, critical data elements, and glossary terms (#45)
 - **unified-catalog:** rename `data-plane/unified-catalog/governance-domains.{yaml,schema.json}` to `business-domains.{yaml,schema.json}` to match the `2026-03-20-preview` Unified Catalog API's Business Domain operation group, and add `glossary-terms.{yaml,schema.json}` (Terms operation group) and `data-access-policies.{yaml,schema.json}` (Policies operation group, modeled as a simplified role-assignment projection pending the dedicated grant/revoke-aware reconciler) — schema-only scaffolding per ADR 0047 §Decision item 5/10, item (a); no reconciler logic or live API calls added (#43)
 
 ### Documentation
