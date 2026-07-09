@@ -20,9 +20,11 @@
 #   description  (optional, string)  Short prose describing the product.
 #   domain       (required, string)  Name of the parent governance domain.
 #                                    Must match an entry in business-domains.yaml.
-#   type         (optional, string)  One of: Dataset, Dashboard, MLModel,
+#   type         (optional, string)  Accepts the repo-friendly aliases
+#                                    Dataset, Dashboard, MLModel,
 #                                    Operational, MasterData, Reference,
-#                                    Other.
+#                                    Other, plus the preview API enum names
+#                                    documented by Microsoft Learn.
 #   businessUse  (optional, string)  Short prose explaining intended use.
 #   owners       (optional, string[]) Entra group display names. Resolved
 #                                    at deploy time per ADR 0023.
