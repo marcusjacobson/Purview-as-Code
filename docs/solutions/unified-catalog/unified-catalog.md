@@ -3,7 +3,8 @@
 This guide covers the Microsoft Purview Unified Catalog reconcilers
 [`scripts/Deploy-UnifiedCatalog.ps1`](../../../scripts/Deploy-UnifiedCatalog.ps1) and
 [`scripts/Deploy-UnifiedCatalogPolicies.ps1`](../../../scripts/Deploy-UnifiedCatalogPolicies.ps1),
-plus the desired-state YAML under
+the read-only account-shape detector
+[`scripts/Get-PurviewAccountShape.ps1`](../../../scripts/Get-PurviewAccountShape.ps1), plus the desired-state YAML under
 [`data-plane/unified-catalog/`](../../../data-plane/unified-catalog/). The scripts drive the
 `2026-03-20-preview` Unified Catalog REST surface documented on Microsoft Learn, including the
 Policies operation group introduced for grant/revoke-aware data-access governance
@@ -93,6 +94,34 @@ manage content and policy state the same way.
 | `-DirectionPolicy` | `portal-wins` | Applies the shared ADR 0029 arbitration policy (`audit`, `portal-wins`, `repo-wins`). |
 | `-SkipNames` | empty list | Explicit skip list consumed by the direction-policy pass. |
 
+## Detect account shape before routing
+
+[`Get-PurviewAccountShape.ps1`](../../../scripts/Get-PurviewAccountShape.ps1) is the read-only
+operator primitive for ADR 0047 item 10(d). It probes both data-plane shapes the repo now cares
+about before a future prompt or operator chooses a reconciler track:
+
+- The classic Atlas Data Map typedefs endpoint
+  ([Type - List](https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/type/list?view=rest-purview-datamapdataplane-2023-09-01)).
+- The tenant-scoped Unified Catalog businessdomains enumerate endpoint
+  ([Business Domain - Enumerate](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate?view=rest-purview-purview-unified-catalog-2026-03-20-preview)).
+
+The script never writes. It returns one object with `Shape`, `ClassicProbeResult`,
+`UnifiedProbeResult`, and `Note`, where `Shape` is one of `Classic`, `Unified`, `Ambiguous`, or
+`Indeterminate`. `Indeterminate` is a fail-closed result and must never be silently treated as
+`Classic`.
+
+| Parameter | Default source | Live behavior |
+|---|---|---|
+| `-AccountName` / `-PurviewAccountName` | explicit CLI parameter, then `purviewAccountName:` in `-ParametersFile` | Purview account name used for the classic Atlas host probe. |
+| `-ParametersFile` | `infra/parameters/lab.yaml` | Supplies `purviewAccountName` when `-AccountName` is omitted, per ADR 0012. |
+| `-SubscriptionId` | Azure CLI current context | Optional Azure CLI subscription context for `az account get-access-token`. |
+
+Example:
+
+```pwsh
+./scripts/Get-PurviewAccountShape.ps1 -AccountName purview-contoso-lab
+```
+
 ## Manage Unified Catalog with this repo
 
 1. **Hydrate the content YAML from the tenant.**
@@ -152,6 +181,12 @@ manage content and policy state the same way.
 - **[Authenticate to Microsoft Purview APIs](https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane)**
   Fetch date: 2026-07-08
   > "All Azure APIs need a valid JWT access token in the authorization header of the request."
+- **[Type - List](https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/type/list?view=rest-purview-datamapdataplane-2023-09-01)**
+  Fetch date: 2026-07-08
+  > "GET {endpoint}/datamap/api/atlas/v2/types/typedefs"
+- **[Business Domain - Enumerate](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate?view=rest-purview-purview-unified-catalog-2026-03-20-preview)**
+  Fetch date: 2026-07-08
+  > "GET {endpoint}/datagovernance/catalog/businessdomains?api-version=2026-03-20-preview"
 - **[Policies - List](https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/policies/list?view=rest-purview-purview-unified-catalog-2026-03-20-preview)**
   Fetch date: 2026-07-08
   > "Lists policies with optional continuation token."

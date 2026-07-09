@@ -20,6 +20,7 @@ To add an entry:
 
 ### Added
 
+- **scripts:** add `Get-PurviewAccountShape.ps1` for read-only classic-vs-unified account-shape detection, plus Pester coverage and Unified Catalog guide updates (ADR 0047 item d) (#49)
 - **scripts:** add `Deploy-UnifiedCatalogPolicies.ps1` with grant/revoke-aware gating for Unified Catalog data-access policies, plus tests and guide updates (#47)
 
 ## 2026-07-08
