@@ -333,6 +333,16 @@ function Get-UnifiedCatalogPolicySet {
 }
 
 function Resolve-PrincipalIdByDisplayName {
+    # NOTE: this reconciler resolves every principal as an Entra Group
+    # (Get-EntraPrincipalIdByDisplayName.ps1 default Kind = 'Group'), and
+    # ConvertTo-PolicyUpdatePayload's default 'principal.microsoft.groups'
+    # attribute name for new grants assumes the same. data-access-policies
+    # .schema.json's "group or user" wording is therefore aspirational for
+    # `principals` today; a user-named principal will fail resolution with
+    # a "No Group found" error rather than succeeding as a user. Threading
+    # a per-principal Kind through resolution AND the attribute-rule
+    # builder (User needs 'principal.microsoft.id', not '.groups') is
+    # tracked as follow-up scope, not fixed in this pass.
     param([Parameter(Mandatory = $true)][string]$DisplayName)
     if ($script:PrincipalIdByDisplayName.ContainsKey($DisplayName)) {
         return [string]$script:PrincipalIdByDisplayName[$DisplayName]
@@ -1020,7 +1030,16 @@ function ConvertTo-PolicyUpdatePayload {
             continue
         }
         $existingAssignment = @($TenantAssignments | Where-Object { $_.RoleSlug -eq $slug } | Select-Object -First 1)[0]
-        $principalAttributeName = if ($existingAssignment) { [string]$existingAssignment.PrincipalAttributeName } else { 'principal.microsoft.id' }
+        # Resolve-PrincipalIdByDisplayName always resolves against the Groups
+        # collection (Get-EntraPrincipalIdByDisplayName.ps1 default Kind), so
+        # every principal ID this reconciler produces is a Group object ID.
+        # 'principal.microsoft.groups' is the attribute that matches a
+        # caller's group memberships; 'principal.microsoft.id' only matches
+        # an individual caller's own object ID and would never match here,
+        # silently granting access to nobody on a brand-new (Create) role
+        # assignment that has no pre-existing tenant rule to inherit the
+        # attribute name from.
+        $principalAttributeName = if ($existingAssignment) { [string]$existingAssignment.PrincipalAttributeName } else { 'principal.microsoft.groups' }
         $newManagedRules.Add((ConvertTo-ManagedAttributeRule -RoleSlug $slug -ScopeId $scopeId -PrincipalIds $principalIds -PrincipalAttributeName $principalAttributeName)) | Out-Null
     }
     $newManagedRules.Add((ConvertTo-ManagedPermissionRule -Family $family -ScopeId $scopeId -ManagedRoleSlugs @($managedRoles | ForEach-Object { [string]$_.RoleSlug }) -RoleAssignmentsBySlug $RoleAssignmentsBySlug)) | Out-Null

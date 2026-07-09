@@ -58,10 +58,14 @@
 #                                      Governance Domain Creator
 #                                      Global Asset Curator
 #                                      Global Catalog Reader
-#   principals  (required, string[]) Entra group or user display names
-#                                    granted this role. Resolved at
-#                                    deploy time per ADR 0023 — never an
-#                                    inline object ID.
+#   principals  (required, string[]) Entra group display names granted
+#                                    this role. Resolved at deploy time
+#                                    per ADR 0023 — never an inline
+#                                    object ID. Deploy-UnifiedCatalog
+#                                    Policies.ps1 (#47) resolves
+#                                    principals as Entra groups only
+#                                    today; user-principal support is
+#                                    tracked as follow-up scope.
 #   description (optional, string)   Short prose explaining why this
 #                                    assignment exists (audit context).
 #   status      (optional, string)   One of: Draft, Published, Expired.

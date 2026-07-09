@@ -263,6 +263,39 @@ Describe 'ConvertTo-PolicyUpdatePayload' {
         $permissionRule = @($payload.properties.attributeRules | Where-Object { $_['id'] -eq 'permission_dg:businessdomain_finance-id' })[0]
         $permissionRule['dnfCondition'].Count | Should -Be 2
     }
+
+    It 'defaults a brand-new grant (no pre-existing TenantAssignments entry) to the group attribute name' {
+        # Regression guard: a Create-case role assignment (business-domain-reader
+        # here has no matching row in $tenantAssignments) must resolve its
+        # attributeName to 'principal.microsoft.groups' -- every principal this
+        # reconciler resolves is an Entra group object ID (see
+        # Resolve-PrincipalIdByDisplayName), so falling back to
+        # 'principal.microsoft.id' would write a rule that can never match a
+        # real caller's token and silently grant access to nobody.
+        $policy = [pscustomobject]@{
+            id = 'policy-finance'
+            name = 'Finance Policy'
+            version = 7
+            properties = [pscustomobject]@{
+                entity = [pscustomobject]@{
+                    type = 'BusinessDomainReference'
+                    referenceName = 'finance-id'
+                }
+                description = 'Finance policy'
+                decisionRules = @()
+                attributeRules = @()
+            }
+        }
+        $tenantAssignments = @()
+        $roleAssignmentsBySlug = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+        $roleAssignmentsBySlug['business-domain-owner'] = @()
+        $roleAssignmentsBySlug['business-domain-reader'] = @('00000000-0000-0000-0000-000000000011')
+
+        $payload = ConvertTo-PolicyUpdatePayload -Policy $policy -TenantAssignments $tenantAssignments -RoleAssignmentsBySlug $roleAssignmentsBySlug
+
+        $readerRule = @($payload.properties.attributeRules | Where-Object { $_['id'] -eq 'purviewdatagovernancerole_builtin_business-domain-reader:finance-id' })[0]
+        $readerRule['dnfCondition'][0][0]['attributeName'] | Should -Be 'principal.microsoft.groups'
+    }
 }
 
 Describe 'Get-FinalRoleAssignmentsByPolicy' {
