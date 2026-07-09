@@ -1,0 +1,1199 @@
+#Requires -Version 7.4
+<#
+.SYNOPSIS
+    Reconcile Microsoft Purview Unified Catalog data access policies.
+
+.DESCRIPTION
+    Reconciles the simplified desired-state projection in
+    data-plane/unified-catalog/data-access-policies.yaml against the preview
+    Unified Catalog Policies REST API adopted by ADR 0047 item 9/10(c).
+
+    The Policies operation group exposes built-in policy objects that are
+    updated in place. The reconciler therefore plans and applies grant/revoke
+    changes at the role-assignment row level, then materializes each policy's
+    full decisionRules / attributeRules document for PUT.
+
+    Security-sensitive behavior:
+      * Every grant/revoke change is treated as destructive-equivalent.
+      * The per-row diff is always printed before any write.
+      * -Force suppresses interactive confirmation, never diff visibility.
+      * -PruneMissing is off by default and only enables explicit revokes.
+
+    References:
+      Unified Catalog auth for Purview data plane:
+        https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane
+      Policies - List:
+        https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/policies/list?view=rest-purview-purview-unified-catalog-2026-03-20-preview
+      Policies - Update:
+        https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/policies/update?view=rest-purview-purview-unified-catalog-2026-03-20-preview
+      Microsoft Graph directoryObject getByIds:
+        https://learn.microsoft.com/en-us/graph/api/directoryobject-getbyids?view=graph-rest-1.0
+      Test-Json:
+        https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
+      Everything about ShouldProcess:
+        https://learn.microsoft.com/en-us/powershell/scripting/learn/deep-dives/everything-about-shouldprocess
+      ADR 0012:
+        docs/adr/0012-environment-parameters-file.md
+      ADR 0023:
+        docs/adr/0023-identifier-resolution.md
+      ADR 0047:
+        docs/adr/0047-unified-catalog-preview-api-coexistence.md
+#>
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
+param(
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [ValidateNotNullOrEmpty()]
+    [string]$Path = (Join-Path $PSScriptRoot '..\data-plane\unified-catalog'),
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [switch]$Force,
+
+    [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
+    [switch]$ExportCurrentState,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [ValidateNotNullOrEmpty()]
+    [string]$ParametersFile,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [ValidatePattern('^[A-Za-z][A-Za-z0-9-]{1,62}[A-Za-z0-9]$')]
+    [Alias('PurviewAccountName')]
+    [string]$AccountName,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [ValidateSet('audit', 'portal-wins', 'repo-wins')]
+    [string]$DirectionPolicy = 'portal-wins',
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
+    [AllowEmptyCollection()]
+    [string[]]$SkipNames = @()
+)
+
+$ErrorActionPreference = 'Stop'
+$script:SkipNameList = @($SkipNames)
+if ($Force.IsPresent) {
+    $ConfirmPreference = 'None'
+}
+
+#region Module dependencies
+if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
+    Install-Module -Name 'powershell-yaml' -Scope CurrentUser -Force -AllowClobber
+}
+Import-Module 'powershell-yaml' -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules\DirectionPolicy.psm1') -Force -Scope Local -ErrorAction Stop
+#endregion
+
+$script:UnifiedCatalogApiVersion = '2026-03-20-preview'
+$script:UnifiedCatalogEndpoint = 'https://api.purview-service.microsoft.com'
+$script:ResolvePrincipalScript = Join-Path $PSScriptRoot 'Get-EntraPrincipalIdByDisplayName.ps1'
+$script:DisplayNameByObjectId = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+$script:PrincipalIdByDisplayName = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+$script:CurrentPrincipalIds = @()
+$script:ManagedRoleCatalog = @(
+    [ordered]@{ FriendlyName = 'Governance Domain Owner'; RoleSlug = 'business-domain-owner'; Family = 'BusinessDomain'; ScopeRequired = $true },
+    [ordered]@{ FriendlyName = 'Governance Domain Reader'; RoleSlug = 'business-domain-reader'; Family = 'BusinessDomain'; ScopeRequired = $true },
+    [ordered]@{ FriendlyName = 'Data Product Owner'; RoleSlug = 'data-product-owner'; Family = 'DGDataQualityScope'; ScopeRequired = $true },
+    [ordered]@{ FriendlyName = 'Data Steward'; RoleSlug = 'data-steward'; Family = 'DGDataQualityScope'; ScopeRequired = $true },
+    [ordered]@{ FriendlyName = 'Data Quality Reader'; RoleSlug = 'data-quality-reader'; Family = 'DGDataQualityScope'; ScopeRequired = $true },
+    [ordered]@{ FriendlyName = 'Data Quality Metadata Reader'; RoleSlug = 'data-quality-metadata-reader'; Family = 'DGDataQualityScope'; ScopeRequired = $true },
+    [ordered]@{ FriendlyName = 'Data Profile Steward'; RoleSlug = 'data-profile-steward'; Family = 'DGDataQualityScope'; ScopeRequired = $true },
+    [ordered]@{ FriendlyName = 'Data Profile Reader'; RoleSlug = 'data-profile-reader'; Family = 'DGDataQualityScope'; ScopeRequired = $true },
+    [ordered]@{ FriendlyName = 'Data Governance Administrator'; RoleSlug = 'datagovernance-administrator'; Family = 'DataGovernanceApp'; ScopeRequired = $false },
+    [ordered]@{ FriendlyName = 'Data Health Reader'; RoleSlug = 'data-health-reader'; Family = 'DataGovernanceApp'; ScopeRequired = $false },
+    [ordered]@{ FriendlyName = 'Data Health Owner'; RoleSlug = 'data-health-owner'; Family = 'DataGovernanceApp'; ScopeRequired = $false },
+    [ordered]@{ FriendlyName = 'Governance Domain Creator'; RoleSlug = 'business-domain-creator'; Family = 'DataGovernanceApp'; ScopeRequired = $false },
+    [ordered]@{ FriendlyName = 'Global Asset Curator'; RoleSlug = 'governance-asset-curator'; Family = 'DataGovernanceApp'; ScopeRequired = $false },
+    [ordered]@{ FriendlyName = 'Global Catalog Reader'; RoleSlug = 'global-catalog-reader'; Family = 'DataGovernanceApp'; ScopeRequired = $false }
+)
+
+function Get-OrdinalDictionary {
+    [CmdletBinding()]
+    param()
+    return [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+}
+
+function Get-RoleMetadataMap {
+    if (-not $script:RoleMetadataMap) {
+        $map = Get-OrdinalDictionary
+        foreach ($entry in $script:ManagedRoleCatalog) {
+            $map[[string]$entry.FriendlyName] = [pscustomobject]$entry
+        }
+        $script:RoleMetadataMap = $map
+    }
+    return $script:RoleMetadataMap
+}
+
+function Get-ManagedRolesForFamily {
+    param([Parameter(Mandatory = $true)][string]$Family)
+    return @($script:ManagedRoleCatalog | Where-Object { $_.Family -eq $Family })
+}
+
+function Get-DesiredItem {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$YamlPath,
+        [Parameter(Mandatory = $true)][string]$SchemaPath
+    )
+
+    if (-not (Test-Path -LiteralPath $YamlPath)) {
+        throw ("Desired-state YAML not found: '{0}'." -f $YamlPath)
+    }
+    if (-not (Test-Path -LiteralPath $SchemaPath)) {
+        throw ("Schema file not found: '{0}'." -f $SchemaPath)
+    }
+
+    $raw = Get-Content -LiteralPath $YamlPath -Raw
+    $doc = $raw | ConvertFrom-Yaml
+    if ($null -eq $doc) {
+        throw ("YAML '{0}' parsed as empty." -f $YamlPath)
+    }
+    if (-not ($doc -is [System.Collections.IDictionary])) {
+        throw ("YAML '{0}' did not parse as a mapping at the document root." -f $YamlPath)
+    }
+    if (-not $doc.ContainsKey('items')) {
+        throw ("YAML '{0}' is missing required top-level key 'items' (use [] when none)." -f $YamlPath)
+    }
+
+    $json = $doc | ConvertTo-Json -Depth 50
+    $null = Test-Json -Json $json -SchemaFile $SchemaPath -ErrorAction Stop
+    return @($doc.items)
+}
+
+function ConvertTo-ReportRow {
+    param(
+        [string]$Category,
+        [string]$Kind,
+        [string]$Name,
+        [string]$Reason = '',
+        [string[]]$Fields = @()
+    )
+    return [pscustomobject]@{
+        Category = $Category
+        Kind     = $Kind
+        Name     = $Name
+        Reason   = $Reason
+        Field    = (@($Fields) -join ',')
+    }
+}
+
+function Get-AssignmentDisplayName {
+    param(
+        [string]$RoleName,
+        [string]$ScopeLabel
+    )
+    if ([string]::IsNullOrWhiteSpace($ScopeLabel)) {
+        return ("Global / {0}" -f $RoleName)
+    }
+    return ("{0} / {1}" -f $ScopeLabel, $RoleName)
+}
+
+function ConvertFrom-JwtPayload {
+    param([Parameter(Mandatory = $true)][string]$Token)
+    $segments = $Token.Split('.')
+    if ($segments.Count -lt 2) {
+        throw 'Access token does not look like a JWT.'
+    }
+    $payload = $segments[1].Replace('-', '+').Replace('_', '/')
+    switch ($payload.Length % 4) {
+        2 { $payload += '==' }
+        3 { $payload += '=' }
+    }
+    $bytes = [Convert]::FromBase64String($payload)
+    $json = [System.Text.Encoding]::UTF8.GetString($bytes)
+    return ($json | ConvertFrom-Json)
+}
+
+function Get-UnifiedCatalogApiContext {
+    param([Parameter(Mandatory = $true)][string]$AccountName)
+
+    $connectScript = Join-Path $PSScriptRoot 'Connect-Purview.ps1'
+    if (-not (Test-Path -LiteralPath $connectScript)) {
+        throw ("Helper not found: '{0}'." -f $connectScript)
+    }
+
+    $null = & $connectScript -AccountName $AccountName
+
+    # api-version justification: the Unified Catalog preview endpoints implemented
+    # by this reconciler are documented under the 2026-03-20-preview Learn view and
+    # ADR 0047 explicitly authorizes that preview contract for issue #47.
+    # Reference: https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane
+    $raw = az account get-access-token --resource https://purview.azure.net --only-show-errors -o json
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to acquire the Purview data-plane token. Run 'az login' or configure OIDC."
+    }
+    $tokenResponse = $raw | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace([string]$tokenResponse.accessToken)) {
+        throw 'az account get-access-token returned no accessToken field for the Purview data-plane audience.'
+    }
+    $claims = ConvertFrom-JwtPayload -Token $tokenResponse.accessToken
+
+    $principalIds = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($candidate in @($claims.oid, $claims.appid, $claims.sub)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$candidate)) {
+            $principalIds.Add([string]$candidate) | Out-Null
+        }
+    }
+    $script:CurrentPrincipalIds = @($principalIds | Sort-Object -Unique)
+
+    return [pscustomobject]@{
+        Endpoint    = $script:UnifiedCatalogEndpoint
+        BearerToken = [string]$tokenResponse.accessToken
+        Headers     = @{ Authorization = "Bearer $($tokenResponse.accessToken)"; 'Content-Type' = 'application/json' }
+        Claims      = $claims
+    }
+}
+
+function Invoke-UnifiedCatalogRestMethod {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('GET', 'PUT')][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][hashtable]$Headers,
+        [object]$Body
+    )
+
+    if ($PSBoundParameters.ContainsKey('Body')) {
+        $json = $Body | ConvertTo-Json -Depth 100
+        return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $Headers -Body $json -ErrorAction Stop
+    }
+    return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $Headers -ErrorAction Stop
+}
+
+function Get-PagedContinuationUri {
+    param(
+        [Parameter(Mandatory = $true)][object]$Response,
+        [Parameter(Mandatory = $true)][string]$BaseUri
+    )
+    if ($Response.nextLink) { return [string]$Response.nextLink }
+    if ($Response.skipToken) { return "$BaseUri&skipToken=$([uri]::EscapeDataString([string]$Response.skipToken))" }
+    if ($Response.'$skipToken') { return "$BaseUri&`$skipToken=$([uri]::EscapeDataString([string]$Response.'$skipToken'))" }
+    return $null
+}
+
+function Get-UnifiedCatalogBusinessDomainSet {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    $items = @()
+    $baseUri = "$($Context.Endpoint)/datagovernance/catalog/businessdomains?api-version=$($script:UnifiedCatalogApiVersion)"
+    $uri = $baseUri
+    do {
+        # api-version justification: ADR 0047 adopts the preview Unified Catalog
+        # contract and Business Domain - Enumerate documents the businessdomains
+        # list endpoint for 2026-03-20-preview.
+        # Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/business-domain/enumerate?view=rest-purview-purview-unified-catalog-2026-03-20-preview
+        $response = Invoke-UnifiedCatalogRestMethod -Method GET -Uri $uri -Headers $Context.Headers
+        foreach ($item in @($response.value)) { $items += ,$item }
+        foreach ($item in @($response.values)) { $items += ,$item }
+        $uri = Get-PagedContinuationUri -Response $response -BaseUri $baseUri
+    } while ($uri)
+    return @($items)
+}
+
+function Get-UnifiedCatalogDataProductSet {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    $items = @()
+    $baseUri = "$($Context.Endpoint)/datagovernance/catalog/dataProducts?api-version=$($script:UnifiedCatalogApiVersion)"
+    $uri = $baseUri
+    do {
+        # api-version justification: ADR 0047 adopts the preview Unified Catalog
+        # contract and Data Products - List documents the dataproducts endpoint
+        # for 2026-03-20-preview.
+        # Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/data-products/list?view=rest-purview-purview-unified-catalog-2026-03-20-preview
+        $response = Invoke-UnifiedCatalogRestMethod -Method GET -Uri $uri -Headers $Context.Headers
+        foreach ($item in @($response.value)) { $items += ,$item }
+        foreach ($item in @($response.values)) { $items += ,$item }
+        $uri = Get-PagedContinuationUri -Response $response -BaseUri $baseUri
+    } while ($uri)
+    return @($items)
+}
+
+function Get-UnifiedCatalogPolicySet {
+    param([Parameter(Mandatory = $true)][object]$Context)
+    $items = @()
+    $baseUri = "$($Context.Endpoint)/datagovernance/catalog/policies?api-version=$($script:UnifiedCatalogApiVersion)"
+    $uri = $baseUri
+    do {
+        # api-version justification: the Policies operation group is preview-only
+        # as of issue #47 and Policies - List documents the pinned 2026-03-20-preview
+        # list endpoint.
+        # Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/policies/list?view=rest-purview-purview-unified-catalog-2026-03-20-preview
+        $response = Invoke-UnifiedCatalogRestMethod -Method GET -Uri $uri -Headers $Context.Headers
+        foreach ($item in @($response.values)) { $items += ,$item }
+        foreach ($item in @($response.value)) { $items += ,$item }
+        $uri = Get-PagedContinuationUri -Response $response -BaseUri $baseUri
+    } while ($uri)
+    return @($items)
+}
+
+function Resolve-PrincipalIdByDisplayName {
+    # NOTE: this reconciler resolves every principal as an Entra Group
+    # (Get-EntraPrincipalIdByDisplayName.ps1 default Kind = 'Group'), and
+    # ConvertTo-PolicyUpdatePayload's default 'principal.microsoft.groups'
+    # attribute name for new grants assumes the same. data-access-policies
+    # .schema.json's "group or user" wording is therefore aspirational for
+    # `principals` today; a user-named principal will fail resolution with
+    # a "No Group found" error rather than succeeding as a user. Threading
+    # a per-principal Kind through resolution AND the attribute-rule
+    # builder (User needs 'principal.microsoft.id', not '.groups') is
+    # tracked as follow-up scope, not fixed in this pass.
+    param([Parameter(Mandatory = $true)][string]$DisplayName)
+    if ($script:PrincipalIdByDisplayName.ContainsKey($DisplayName)) {
+        return [string]$script:PrincipalIdByDisplayName[$DisplayName]
+    }
+    $resolved = & $script:ResolvePrincipalScript -DisplayName $DisplayName
+    $script:PrincipalIdByDisplayName[$DisplayName] = [string]$resolved
+    return [string]$resolved
+}
+
+function Resolve-DisplayNameMapByObjectId {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ObjectIds)
+
+    $pending = @($ObjectIds | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_) -and -not $script:DisplayNameByObjectId.ContainsKey([string]$_)
+        } | Sort-Object -Unique)
+    if ($pending.Count -eq 0) {
+        return $script:DisplayNameByObjectId
+    }
+
+    $graphTokenRaw = az account get-access-token --resource-type ms-graph --only-show-errors -o json
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Failed to acquire a Microsoft Graph token for reverse-resolving policy principals.'
+    }
+    $graphToken = $graphTokenRaw | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace([string]$graphToken.accessToken)) {
+        throw 'az account get-access-token returned no accessToken field for Microsoft Graph.'
+    }
+    $graphHeaders = @{ Authorization = "Bearer $($graphToken.accessToken)"; 'Content-Type' = 'application/json' }
+
+    for ($offset = 0; $offset -lt $pending.Count; $offset += 1000) {
+        $batch = @($pending[$offset..([Math]::Min($pending.Count - 1, $offset + 999))])
+        if ($batch.Count -eq 0) {
+            continue
+        }
+        $body = @{ ids = @($batch) } | ConvertTo-Json -Depth 10
+        # api-version justification: -ExportCurrentState must reverse-resolve Entra object
+        # IDs back to human-readable display names, and Microsoft Graph directoryObject
+        # getByIds is the documented batch lookup endpoint for persisted IDs.
+        # Reference: https://learn.microsoft.com/en-us/graph/api/directoryobject-getbyids?view=graph-rest-1.0
+        $response = Invoke-RestMethod -Method POST -Uri 'https://graph.microsoft.com/v1.0/directoryObjects/getByIds' -Headers $graphHeaders -Body $body -ErrorAction Stop
+        foreach ($item in @($response.value)) {
+            $displayName = [string]$item.displayName
+            if ([string]::IsNullOrWhiteSpace($displayName) -and $item.additionalProperties.displayName) {
+                $displayName = [string]$item.additionalProperties.displayName
+            }
+            if ([string]::IsNullOrWhiteSpace($displayName) -and $item.appDisplayName) {
+                $displayName = [string]$item.appDisplayName
+            }
+            if ([string]::IsNullOrWhiteSpace($displayName)) {
+                throw 'Microsoft Graph getByIds returned a directory object without a usable displayName/appDisplayName.'
+            }
+            $script:DisplayNameByObjectId[[string]$item.id] = $displayName
+        }
+    }
+
+    foreach ($id in $pending) {
+        if (-not $script:DisplayNameByObjectId.ContainsKey([string]$id)) {
+            throw 'Microsoft Graph getByIds did not return every requested object ID for policy export.'
+        }
+    }
+    return $script:DisplayNameByObjectId
+}
+
+function Get-PolicyFamilyFromEntityType {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$EntityType)
+    switch ($EntityType) {
+        'BusinessDomainReference' { return 'BusinessDomain' }
+        'DGDataQualityScopeReference' { return 'DGDataQualityScope' }
+        'DataGovernanceAppReference' { return 'DataGovernanceApp' }
+        default { return $null }
+    }
+}
+
+function Get-ManagedRoleRuleName {
+    param([Parameter(Mandatory = $true)][string]$RoleSlug)
+    return ("purviewdatagovernancerole_builtin_{0}" -f $RoleSlug)
+}
+
+function Get-ManagedRoleRuleId {
+    param(
+        [Parameter(Mandatory = $true)][string]$RoleSlug,
+        [Parameter(Mandatory = $true)][string]$ScopeId
+    )
+    return ("{0}:{1}" -f (Get-ManagedRoleRuleName -RoleSlug $RoleSlug), $ScopeId)
+}
+
+function Get-ManagedPermissionRuleId {
+    param(
+        [Parameter(Mandatory = $true)][string]$Family,
+        [Parameter(Mandatory = $true)][string]$ScopeId
+    )
+    switch ($Family) {
+        'BusinessDomain' { return ("permission_dg:businessdomain_{0}" -f $ScopeId) }
+        'DGDataQualityScope' { return ("permission_dg:dgdataqualityscope_{0}" -f $ScopeId) }
+        'DataGovernanceApp' { return ("permission_dg:datagovernanceapp_{0}" -f $ScopeId) }
+        default { throw ("Unsupported policy family '{0}'." -f $Family) }
+    }
+}
+
+function Get-PrincipalIdsFromAttributeRule {
+    param([object]$AttributeRule)
+    if ($null -eq $AttributeRule) {
+        return @()
+    }
+    $ids = @()
+    foreach ($clause in @($AttributeRule.dnfCondition)) {
+        foreach ($condition in @($clause)) {
+            if ($condition.attributeName -in @('principal.microsoft.id', 'principal.microsoft.groups')) {
+                foreach ($value in @($condition.attributeValueIncludedIn)) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
+                        $ids += [string]$value
+                    }
+                }
+            }
+        }
+    }
+    return @($ids | Sort-Object -Unique)
+}
+
+function Get-PrincipalAttributeNameFromRule {
+    param([object]$AttributeRule)
+    foreach ($clause in @($AttributeRule.dnfCondition)) {
+        foreach ($condition in @($clause)) {
+            if ($condition.attributeName -in @('principal.microsoft.id', 'principal.microsoft.groups')) {
+                return [string]$condition.attributeName
+            }
+        }
+    }
+    return 'principal.microsoft.id'
+}
+
+function Get-PolicyScopeLabel {
+    param(
+        [Parameter(Mandatory = $true)][object]$Policy,
+        [Parameter(Mandatory = $true)][object]$TenantState
+    )
+
+    $family = Get-PolicyFamilyFromEntityType -EntityType ([string]$Policy.properties.entity.type)
+    $scopeId = [string]$Policy.properties.entity.referenceName
+    switch ($family) {
+        'BusinessDomain' {
+            if (-not $TenantState.DomainById.ContainsKey($scopeId)) {
+                throw 'A business-domain policy referenced a scope ID that does not resolve to a live business domain name.'
+            }
+            return [string]$TenantState.DomainById[$scopeId].name
+        }
+        'DataGovernanceApp' {
+            return $null
+        }
+        'DGDataQualityScope' {
+            # TODO: not-on-Learn. The Policies List/Update pages expose
+            # DGDataQualityScopeReference only as opaque IDs. The repo's simplified
+            # projection needs a human-readable scope label, so we resolve the scope
+            # ID against live Data Product IDs first and Business Domain IDs second.
+            # Microsoft Learn does not currently document this behavior as of 2026-07-08.
+            if ($TenantState.DataProductById.ContainsKey($scopeId)) {
+                return [string]$TenantState.DataProductById[$scopeId].name
+            }
+            if ($TenantState.DomainById.ContainsKey($scopeId)) {
+                return [string]$TenantState.DomainById[$scopeId].name
+            }
+            throw 'A data-quality policy scope could not be resolved to a live data product or business domain name.'
+        }
+        default {
+            throw 'Unsupported Unified Catalog policy entity type.'
+        }
+    }
+}
+
+function Get-UnifiedCatalogTenantState {
+    param([Parameter(Mandatory = $true)][object]$Context)
+
+    $domains = @(Get-UnifiedCatalogBusinessDomainSet -Context $Context)
+    $dataProducts = @(Get-UnifiedCatalogDataProductSet -Context $Context)
+    $policies = @(Get-UnifiedCatalogPolicySet -Context $Context)
+
+    $domainById = Get-OrdinalDictionary
+    $domainByName = Get-OrdinalDictionary
+    foreach ($item in $domains) {
+        $domainById[[string]$item.id] = $item
+        $domainByName[[string]$item.name] = $item
+    }
+
+    $dataProductById = Get-OrdinalDictionary
+    $dataProductByName = Get-OrdinalDictionary
+    foreach ($item in $dataProducts) {
+        $dataProductById[[string]$item.id] = $item
+        $dataProductByName[[string]$item.name] = $item
+    }
+
+    $businessDomainPolicyByScopeId = Get-OrdinalDictionary
+    $dgDataQualityScopePolicyByScopeId = Get-OrdinalDictionary
+    $dataGovernanceAppPolicies = @()
+    foreach ($policy in $policies) {
+        $family = Get-PolicyFamilyFromEntityType -EntityType ([string]$policy.properties.entity.type)
+        if (-not $family) {
+            continue
+        }
+        $scopeId = [string]$policy.properties.entity.referenceName
+        switch ($family) {
+            'BusinessDomain' { $businessDomainPolicyByScopeId[$scopeId] = $policy }
+            'DGDataQualityScope' { $dgDataQualityScopePolicyByScopeId[$scopeId] = $policy }
+            'DataGovernanceApp' { $dataGovernanceAppPolicies += ,$policy }
+        }
+    }
+
+    return [pscustomobject]@{
+        Domains                           = $domains
+        DomainById                        = $domainById
+        DomainByName                      = $domainByName
+        DataProducts                      = $dataProducts
+        DataProductById                   = $dataProductById
+        DataProductByName                 = $dataProductByName
+        Policies                          = $policies
+        BusinessDomainPolicyByScopeId     = $businessDomainPolicyByScopeId
+        DGDataQualityScopePolicyByScopeId = $dgDataQualityScopePolicyByScopeId
+        DataGovernanceAppPolicies         = @($dataGovernanceAppPolicies)
+    }
+}
+
+function Get-TenantAssignment {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$TenantState)
+
+    $rows = @()
+    $allPrincipalIds = @()
+
+    foreach ($policy in @($TenantState.Policies)) {
+        $entityType = [string]$policy.properties.entity.type
+        $family = Get-PolicyFamilyFromEntityType -EntityType $entityType
+        if (-not $family) {
+            continue
+        }
+        $scopeId = [string]$policy.properties.entity.referenceName
+        $scopeLabel = Get-PolicyScopeLabel -Policy $policy -TenantState $TenantState
+        $attrRules = @($policy.properties.attributeRules)
+
+        foreach ($role in @(Get-ManagedRolesForFamily -Family $family)) {
+            $ruleId = Get-ManagedRoleRuleId -RoleSlug ([string]$role.RoleSlug) -ScopeId $scopeId
+            $attrRule = @($attrRules | Where-Object { [string]$_.id -eq $ruleId } | Select-Object -First 1)[0]
+            $principalIds = @(Get-PrincipalIdsFromAttributeRule -AttributeRule $attrRule)
+            if ($principalIds.Count -eq 0) {
+                continue
+            }
+            foreach ($id in $principalIds) { $allPrincipalIds += [string]$id }
+            $rows += [pscustomobject]@{
+                    Key                    = ("{0}|{1}|{2}" -f $family, [string]$scopeLabel, [string]$role.FriendlyName)
+                    Kind                   = 'UnifiedCatalogPolicy'
+                    Name                   = Get-AssignmentDisplayName -RoleName ([string]$role.FriendlyName) -ScopeLabel ([string]$scopeLabel)
+                    Family                 = $family
+                    ScopeId                = $scopeId
+                    ScopeLabel             = [string]$scopeLabel
+                    RoleName               = [string]$role.FriendlyName
+                    RoleSlug               = [string]$role.RoleSlug
+                    PolicyId               = [string]$policy.id
+                    Policy                 = $policy
+                    PrincipalIds           = @($principalIds)
+                    PrincipalDisplayNames  = @()
+                    PrincipalAttributeName = Get-PrincipalAttributeNameFromRule -AttributeRule $attrRule
+                    Description            = [string]$policy.properties.description
+                    LastModifiedBy         = if ($policy.systemData.lastModifiedBy) { [string]$policy.systemData.lastModifiedBy } else { '' }
+                }
+        }
+    }
+
+    $displayNameMap = Resolve-DisplayNameMapByObjectId -ObjectIds @($allPrincipalIds)
+    foreach ($row in $rows) {
+        $names = @()
+        foreach ($id in @($row.PrincipalIds)) {
+            if (-not $displayNameMap.ContainsKey([string]$id)) {
+                throw 'Could not reverse-resolve a live policy principal object ID to a display name.'
+            }
+            $names += [string]$displayNameMap[[string]$id]
+        }
+        $row.PrincipalDisplayNames = @($names | Sort-Object -Unique)
+    }
+
+    return @($rows)
+}
+
+function Resolve-TargetPolicyForDesiredAssignment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Assignment,
+        [Parameter(Mandatory = $true)][object]$TenantState
+    )
+
+    switch ($Assignment.Family) {
+        'BusinessDomain' {
+            if (-not $TenantState.DomainByName.ContainsKey([string]$Assignment.ScopeLabel)) {
+                throw ("Business domain '{0}' does not exist in the live Unified Catalog tenant state." -f $Assignment.ScopeLabel)
+            }
+            $domain = $TenantState.DomainByName[[string]$Assignment.ScopeLabel]
+            $scopeId = [string]$domain.id
+            if (-not $TenantState.BusinessDomainPolicyByScopeId.ContainsKey($scopeId)) {
+                throw ("The live tenant does not expose a built-in business-domain policy for '{0}'." -f $Assignment.ScopeLabel)
+            }
+            return $TenantState.BusinessDomainPolicyByScopeId[$scopeId]
+        }
+        'DGDataQualityScope' {
+            # TODO: not-on-Learn. The YAML's legacy domain field carries a human-
+            # readable scope label for data-quality roles because the documented
+            # policy payload exposes only DGDataQualityScopeReference IDs.
+            # Microsoft Learn does not currently document this behavior as of 2026-07-08.
+            $scopeId = $null
+            if ($TenantState.DataProductByName.ContainsKey([string]$Assignment.ScopeLabel)) {
+                $scopeId = [string]$TenantState.DataProductByName[[string]$Assignment.ScopeLabel].id
+            }
+            elseif ($TenantState.DomainByName.ContainsKey([string]$Assignment.ScopeLabel)) {
+                $scopeId = [string]$TenantState.DomainByName[[string]$Assignment.ScopeLabel].id
+            }
+            else {
+                throw ("Data-quality policy scope '{0}' could not be resolved to a live data product or business domain." -f $Assignment.ScopeLabel)
+            }
+            if (-not $TenantState.DGDataQualityScopePolicyByScopeId.ContainsKey($scopeId)) {
+                throw ("The live tenant does not expose a built-in data-quality policy for scope '{0}'." -f $Assignment.ScopeLabel)
+            }
+            return $TenantState.DGDataQualityScopePolicyByScopeId[$scopeId]
+        }
+        'DataGovernanceApp' {
+            if (@($TenantState.DataGovernanceAppPolicies).Count -eq 0) {
+                throw 'The live tenant does not expose a DataGovernanceApp policy.'
+            }
+            if (@($TenantState.DataGovernanceAppPolicies).Count -gt 1) {
+                throw 'The live tenant exposed more than one DataGovernanceApp policy; this reconciler expects exactly one global policy object.'
+            }
+            return @($TenantState.DataGovernanceAppPolicies)[0]
+        }
+        default {
+            throw 'Unsupported desired policy family.'
+        }
+    }
+}
+
+function Get-DesiredAssignment {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$DesiredItems,
+        [Parameter(Mandatory = $true)][object]$TenantState
+    )
+
+    $roleMap = Get-RoleMetadataMap
+    $assignments = @()
+    foreach ($item in @($DesiredItems)) {
+        $roleName = [string]$item.role
+        if (-not $roleMap.ContainsKey($roleName)) {
+            throw ("Role '{0}' is not recognized by the Unified Catalog policy reconciler." -f $roleName)
+        }
+        $metadata = $roleMap[$roleName]
+        $scopeLabel = if ($item.PSObject.Properties.Match('domain').Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$item.domain)) {
+            [string]$item.domain
+        }
+        else {
+            $null
+        }
+        if ($metadata.ScopeRequired -and [string]::IsNullOrWhiteSpace([string]$scopeLabel)) {
+            throw ("Role '{0}' requires a domain/scope label in data-access-policies.yaml." -f $roleName)
+        }
+        if ((-not $metadata.ScopeRequired) -and -not [string]::IsNullOrWhiteSpace([string]$scopeLabel)) {
+            throw ("Role '{0}' is tenant-wide. Omit the domain field for this role." -f $roleName)
+        }
+
+        $principalIds = @()
+        $principalDisplayNames = @()
+        foreach ($displayName in @($item.principals)) {
+            if ([string]::IsNullOrWhiteSpace([string]$displayName)) {
+                continue
+            }
+            $principalDisplayNames += [string]$displayName
+            $principalIds += (Resolve-PrincipalIdByDisplayName -DisplayName ([string]$displayName))
+        }
+        $policy = Resolve-TargetPolicyForDesiredAssignment -Assignment ([pscustomobject]@{ Family = $metadata.Family; ScopeLabel = $scopeLabel }) -TenantState $TenantState
+        $scopeId = [string]$policy.properties.entity.referenceName
+        $assignments += [pscustomobject]@{
+                Key                   = ("{0}|{1}|{2}" -f $metadata.Family, [string]$scopeLabel, $roleName)
+                Kind                  = 'UnifiedCatalogPolicy'
+                Name                  = Get-AssignmentDisplayName -RoleName $roleName -ScopeLabel $scopeLabel
+                Family                = [string]$metadata.Family
+                ScopeId               = $scopeId
+                ScopeLabel            = [string]$scopeLabel
+                RoleName              = $roleName
+                RoleSlug              = [string]$metadata.RoleSlug
+                PolicyId              = [string]$policy.id
+                Policy                = $policy
+                PrincipalIds          = @($principalIds | Sort-Object -Unique)
+                PrincipalDisplayNames = @($principalDisplayNames | Sort-Object -Unique)
+                Description           = if ($item.PSObject.Properties.Match('description').Count -gt 0) { [string]$item.description } else { '' }
+                Status                = if ($item.PSObject.Properties.Match('status').Count -gt 0) { [string]$item.status } else { '' }
+            }
+    }
+    return @($assignments)
+}
+
+function Get-PrincipalDiffText {
+    param(
+        [AllowEmptyCollection()][string[]]$DesiredDisplayNames,
+        [AllowEmptyCollection()][string[]]$TenantDisplayNames
+    )
+    $toAdd = @($DesiredDisplayNames | Where-Object { $TenantDisplayNames -notcontains $_ } | Sort-Object -Unique)
+    $toRemove = @($TenantDisplayNames | Where-Object { $DesiredDisplayNames -notcontains $_ } | Sort-Object -Unique)
+    $parts = @()
+    if ($toAdd.Count -gt 0) {
+        $parts += ("Add principals: {0}" -f ($toAdd -join ', '))
+    }
+    if ($toRemove.Count -gt 0) {
+        $parts += ("Remove principals: {0}" -f ($toRemove -join ', '))
+    }
+    if ($parts.Count -eq 0) {
+        return 'Principal set already matches desired state.'
+    }
+    return ($parts -join '; ')
+}
+
+function Test-IsConflict {
+    param([object]$TenantAssignment)
+    if ($null -eq $TenantAssignment) { return $false }
+    if ([string]::IsNullOrWhiteSpace([string]$TenantAssignment.LastModifiedBy)) { return $false }
+    return ($script:CurrentPrincipalIds -notcontains [string]$TenantAssignment.LastModifiedBy)
+}
+
+function Get-ReconciliationPlan {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$DesiredAssignments,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$TenantAssignments,
+        [switch]$AllowConflictOverwrite,
+        [switch]$PruneMissing
+    )
+
+    $report = New-Object 'System.Collections.Generic.List[object]'
+    $plan = New-Object 'System.Collections.Generic.List[object]'
+    $desiredByKey = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    $tenantByKey = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+
+    foreach ($desired in @($DesiredAssignments)) {
+        $desiredByKey[[string]$desired.Key] = $desired
+    }
+    foreach ($tenant in @($TenantAssignments)) {
+        $tenantByKey[[string]$tenant.Key] = $tenant
+    }
+
+    foreach ($key in @($desiredByKey.Keys | Sort-Object)) {
+        $desired = $desiredByKey[$key]
+        if (-not $tenantByKey.ContainsKey($key)) {
+            $reason = if ($desired.PrincipalDisplayNames.Count -gt 0) { "Grant principals: $($desired.PrincipalDisplayNames -join ', ')" } else { 'Grant empty principal set.' }
+            $report.Add((ConvertTo-ReportRow -Category 'Create' -Kind $desired.Kind -Name $desired.Name -Reason $reason -Fields @('principals'))) | Out-Null
+            $plan.Add([pscustomobject]@{ Action = 'Create'; Name = $desired.Name; Kind = $desired.Kind; Desired = $desired; Tenant = $null; Fields = @('principals'); Conflict = $false; Reason = $reason }) | Out-Null
+            continue
+        }
+
+        $tenant = $tenantByKey[$key]
+        $desiredIds = @($desired.PrincipalIds | Sort-Object -Unique)
+        $tenantIds = @($tenant.PrincipalIds | Sort-Object -Unique)
+        $desiredJson = $desiredIds | ConvertTo-Json -Compress
+        $tenantJson = $tenantIds | ConvertTo-Json -Compress
+        if ($desiredJson -eq $tenantJson) {
+            $report.Add((ConvertTo-ReportRow -Category 'NoChange' -Kind $desired.Kind -Name $desired.Name)) | Out-Null
+            continue
+        }
+
+        $reason = Get-PrincipalDiffText -DesiredDisplayNames @($desired.PrincipalDisplayNames) -TenantDisplayNames @($tenant.PrincipalDisplayNames)
+        $isConflict = Test-IsConflict -TenantAssignment $tenant
+        if ($isConflict -and -not $AllowConflictOverwrite.IsPresent) {
+            $report.Add((ConvertTo-ReportRow -Category 'Conflict' -Kind $desired.Kind -Name $desired.Name -Reason 'Tenant policy was last modified by a different principal. Re-run with -Force to overwrite.' -Fields @('principals'))) | Out-Null
+            continue
+        }
+        if ($isConflict) {
+            $report.Add((ConvertTo-ReportRow -Category 'Conflict' -Kind $desired.Kind -Name $desired.Name -Reason 'Conflict will be overwritten because -Force was supplied.' -Fields @('principals'))) | Out-Null
+        }
+        else {
+            $report.Add((ConvertTo-ReportRow -Category 'Update' -Kind $desired.Kind -Name $desired.Name -Reason $reason -Fields @('principals'))) | Out-Null
+        }
+        $plan.Add([pscustomobject]@{ Action = 'Update'; Name = $desired.Name; Kind = $desired.Kind; Desired = $desired; Tenant = $tenant; Fields = @('principals'); Conflict = $isConflict; Reason = $reason }) | Out-Null
+    }
+
+    foreach ($key in @($tenantByKey.Keys | Sort-Object)) {
+        if ($desiredByKey.ContainsKey($key)) {
+            continue
+        }
+        $tenant = $tenantByKey[$key]
+        $reason = if ($tenant.PrincipalDisplayNames.Count -gt 0) { "Live-only principals: $($tenant.PrincipalDisplayNames -join ', ')" } else { 'Exists in the tenant but not in desired state.' }
+        $report.Add((ConvertTo-ReportRow -Category 'Orphan' -Kind $tenant.Kind -Name $tenant.Name -Reason 'Exists in the tenant but not in desired state.' -Fields @('principals'))) | Out-Null
+        if ($PruneMissing.IsPresent) {
+            $plan.Add([pscustomobject]@{ Action = 'Remove'; Name = $tenant.Name; Kind = $tenant.Kind; Desired = $null; Tenant = $tenant; Fields = @('principals'); Conflict = $false; Reason = $reason }) | Out-Null
+        }
+    }
+
+    return [pscustomobject]@{
+        Report = $report.ToArray()
+        Plan   = $plan.ToArray()
+    }
+}
+
+function Invoke-DirectionPolicyPlan {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Plan,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Report
+    )
+    if ($DirectionPolicy -eq 'audit') {
+        Write-Information '[ADR0029-AUDIT] DirectionPolicy=audit - no writes would have fired. Plan above is read-only.' -InformationAction Continue
+        $Plan.Clear()
+        return
+    }
+
+    $keptPlan = New-Object 'System.Collections.Generic.List[object]'
+    $skippedNames = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($entry in $Plan.ToArray()) {
+        $decision = Resolve-DirectionPolicyAction -Policy $DirectionPolicy -SkipList $script:SkipNameList -DisplayName ([string]$entry.Name) -HasDrift $false
+        if ($decision.Action -eq 'Skip') {
+            $skippedNames.Add([string]$entry.Name) | Out-Null
+            $Report.Add((ConvertTo-ReportRow -Category 'Skip' -Kind $entry.Kind -Name ([string]$entry.Name) -Reason $decision.Reason -Fields $entry.Fields)) | Out-Null
+            Write-Information ("[ADR0029-SKIP] {0}" -f $entry.Name) -InformationAction Continue
+            continue
+        }
+        $keptPlan.Add($entry) | Out-Null
+    }
+
+    if ($skippedNames.Count -gt 0) {
+        $keptReport = @($Report | Where-Object { -not ((($_.Category -eq 'Create') -or ($_.Category -eq 'Update') -or ($_.Category -eq 'Orphan') -or ($_.Category -eq 'Conflict')) -and ($skippedNames -contains [string]$_.Name)) })
+        $Report.Clear()
+        foreach ($row in $keptReport) { $Report.Add($row) | Out-Null }
+    }
+    $Plan.Clear()
+    foreach ($entry in $keptPlan) { $Plan.Add($entry) | Out-Null }
+}
+
+function Show-PlanSummary {
+    param([object[]]$Report)
+    $rows = @($Report | Sort-Object Category, Name)
+    if ($rows.Count -eq 0) {
+        Write-Information 'Plan summary: no rows.' -InformationAction Continue
+        return
+    }
+    Write-Information '' -InformationAction Continue
+    Write-Information 'Plan summary (pre-write):' -InformationAction Continue
+    $rows | Format-Table Category, Kind, Name, Field, Reason -Wrap | Out-String | Write-Information -InformationAction Continue
+}
+
+function Write-YamlItemsBlock {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Entries
+    )
+
+    $originalLines = Get-Content -LiteralPath $FilePath
+    $cutIndex = -1
+    for ($i = 0; $i -lt $originalLines.Count; $i++) {
+        if ($originalLines[$i] -match '^\s*items\s*:') {
+            $cutIndex = $i
+            break
+        }
+    }
+    if ($cutIndex -lt 0) {
+        throw ("Could not find 'items:' key in '{0}'." -f $FilePath)
+    }
+    $headerLines = if ($cutIndex -gt 0) { $originalLines[0..($cutIndex - 1)] } else { @() }
+    $newBlock = New-Object 'System.Collections.Generic.List[string]'
+    if ($Entries.Count -eq 0) {
+        $newBlock.Add('items: []') | Out-Null
+    }
+    else {
+        $body = ([ordered]@{ items = @($Entries) }) | ConvertTo-Yaml -Options WithIndentedSequences
+        foreach ($line in ($body -split "`n")) { $newBlock.Add($line.TrimEnd()) | Out-Null }
+        while ($newBlock.Count -gt 0 -and [string]::IsNullOrEmpty($newBlock[$newBlock.Count - 1])) {
+            $newBlock.RemoveAt($newBlock.Count - 1)
+        }
+    }
+    $finalLines = @($headerLines) + $newBlock.ToArray()
+    $content = ($finalLines -join "`n") + "`n"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($FilePath, $content, $utf8NoBom)
+}
+
+function Get-FinalRoleAssignmentsByPolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$TenantAssignments,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$PlanEntries
+    )
+
+    $byPolicy = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    foreach ($tenant in @($TenantAssignments)) {
+        if (-not $byPolicy.ContainsKey([string]$tenant.PolicyId)) {
+            $byPolicy[[string]$tenant.PolicyId] = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+        }
+        $roleMap = $byPolicy[[string]$tenant.PolicyId]
+        $roleMap[[string]$tenant.RoleSlug] = @($tenant.PrincipalIds)
+    }
+
+    foreach ($entry in @($PlanEntries)) {
+        $policyId = if ($entry.Desired) { [string]$entry.Desired.PolicyId } else { [string]$entry.Tenant.PolicyId }
+        if (-not $byPolicy.ContainsKey($policyId)) {
+            $byPolicy[$policyId] = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+        }
+        $roleMap = $byPolicy[$policyId]
+        switch ($entry.Action) {
+            'Create' { $roleMap[[string]$entry.Desired.RoleSlug] = @($entry.Desired.PrincipalIds) }
+            'Update' { $roleMap[[string]$entry.Desired.RoleSlug] = @($entry.Desired.PrincipalIds) }
+            'Remove' { $roleMap[[string]$entry.Tenant.RoleSlug] = @() }
+        }
+    }
+    return $byPolicy
+}
+
+function ConvertTo-ManagedAttributeRule {
+    param(
+        [Parameter(Mandatory = $true)][string]$RoleSlug,
+        [Parameter(Mandatory = $true)][string]$ScopeId,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$PrincipalIds,
+        [Parameter(Mandatory = $true)][string]$PrincipalAttributeName
+    )
+    $ruleName = Get-ManagedRoleRuleName -RoleSlug $RoleSlug
+    return [ordered]@{
+        kind = 'attributerule'
+        id = ("{0}:{1}" -f $ruleName, $ScopeId)
+        name = ("{0}:{1}" -f $ruleName, $ScopeId)
+        dnfCondition = ,@(
+            [ordered]@{
+                attributeName = $PrincipalAttributeName
+                attributeValueIncludedIn = @($PrincipalIds)
+            },
+            [ordered]@{
+                fromRule = $ruleName
+                attributeName = 'derived.purview.role'
+                attributeValueIncludes = $ruleName
+            }
+        )
+    }
+}
+
+function ConvertTo-ManagedPermissionRule {
+    param(
+        [Parameter(Mandatory = $true)][string]$Family,
+        [Parameter(Mandatory = $true)][string]$ScopeId,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ManagedRoleSlugs,
+        [Parameter(Mandatory = $true)][object]$RoleAssignmentsBySlug
+    )
+    $permissionRuleId = Get-ManagedPermissionRuleId -Family $Family -ScopeId $ScopeId
+    $dnf = @()
+    foreach ($slug in @($ManagedRoleSlugs)) {
+        $principalIds = @($RoleAssignmentsBySlug[$slug])
+        if ($principalIds.Count -eq 0) {
+            continue
+        }
+        $roleRuleId = Get-ManagedRoleRuleId -RoleSlug $slug -ScopeId $ScopeId
+        $dnf += ,@(
+            [ordered]@{
+                fromRule = $roleRuleId
+                attributeName = 'derived.purview.permission'
+                attributeValueIncludes = $roleRuleId
+            }
+        )
+    }
+    return [ordered]@{
+        kind = 'attributerule'
+        id = $permissionRuleId
+        name = $permissionRuleId
+        dnfCondition = @($dnf)
+    }
+}
+
+function ConvertTo-PolicyUpdatePayload {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][object]$Policy,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$TenantAssignments,
+        [Parameter(Mandatory = $true)][object]$RoleAssignmentsBySlug
+    )
+
+    $family = Get-PolicyFamilyFromEntityType -EntityType ([string]$Policy.properties.entity.type)
+    $scopeId = [string]$Policy.properties.entity.referenceName
+    $payload = $Policy | ConvertTo-Json -Depth 100 | ConvertFrom-Json -AsHashtable
+    $attrRules = @($Policy.properties.attributeRules)
+    $managedRoles = @(Get-ManagedRolesForFamily -Family $family)
+    $managedRoleIds = @($managedRoles | ForEach-Object { Get-ManagedRoleRuleId -RoleSlug ([string]$_.RoleSlug) -ScopeId $scopeId })
+    $permissionRuleId = Get-ManagedPermissionRuleId -Family $family -ScopeId $scopeId
+    $preservedRules = @($attrRules | Where-Object { ([string]$_.id) -notin @($managedRoleIds + $permissionRuleId) })
+
+    $newManagedRules = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($role in $managedRoles) {
+        $slug = [string]$role.RoleSlug
+        $principalIds = @($RoleAssignmentsBySlug[$slug])
+        if ($principalIds.Count -eq 0) {
+            continue
+        }
+        $existingAssignment = @($TenantAssignments | Where-Object { $_.RoleSlug -eq $slug } | Select-Object -First 1)[0]
+        # Resolve-PrincipalIdByDisplayName always resolves against the Groups
+        # collection (Get-EntraPrincipalIdByDisplayName.ps1 default Kind), so
+        # every principal ID this reconciler produces is a Group object ID.
+        # 'principal.microsoft.groups' is the attribute that matches a
+        # caller's group memberships; 'principal.microsoft.id' only matches
+        # an individual caller's own object ID and would never match here,
+        # silently granting access to nobody on a brand-new (Create) role
+        # assignment that has no pre-existing tenant rule to inherit the
+        # attribute name from.
+        $principalAttributeName = if ($existingAssignment) { [string]$existingAssignment.PrincipalAttributeName } else { 'principal.microsoft.groups' }
+        $newManagedRules.Add((ConvertTo-ManagedAttributeRule -RoleSlug $slug -ScopeId $scopeId -PrincipalIds $principalIds -PrincipalAttributeName $principalAttributeName)) | Out-Null
+    }
+    $newManagedRules.Add((ConvertTo-ManagedPermissionRule -Family $family -ScopeId $scopeId -ManagedRoleSlugs @($managedRoles | ForEach-Object { [string]$_.RoleSlug }) -RoleAssignmentsBySlug $RoleAssignmentsBySlug)) | Out-Null
+
+    $payload['properties']['attributeRules'] = @($preservedRules | ForEach-Object { $_ | ConvertTo-Json -Depth 100 | ConvertFrom-Json -AsHashtable }) + $newManagedRules.ToArray()
+    return $payload
+}
+
+$scriptRoot = Split-Path -Parent $PSCommandPath
+$repoRoot = Split-Path -Parent $scriptRoot
+if (-not $ParametersFile) {
+    $ParametersFile = Join-Path $repoRoot 'infra\parameters\lab.yaml'
+}
+if (-not (Test-Path -LiteralPath $ParametersFile)) {
+    Write-Error ("Parameters file not found: '{0}'." -f $ParametersFile)
+    return
+}
+$ParametersFile = (Resolve-Path -LiteralPath $ParametersFile).Path
+$parameters = Get-Content -LiteralPath $ParametersFile -Raw | ConvertFrom-Yaml
+if (-not $parameters) {
+    Write-Error ("Parameters file '{0}' parsed as empty or null." -f $ParametersFile)
+    return
+}
+if (-not $parameters.ContainsKey('purviewAccountName')) {
+    Write-Error ("Parameters file '{0}' is missing required key 'purviewAccountName'." -f $ParametersFile)
+    return
+}
+if (-not $AccountName) {
+    $AccountName = [string]$parameters.purviewAccountName
+}
+if (-not (Test-Path -LiteralPath $Path)) {
+    Write-Error ("Unified Catalog folder not found: '{0}'." -f $Path)
+    return
+}
+$Path = (Resolve-Path -LiteralPath $Path).Path
+$yamlPath = Join-Path $Path 'data-access-policies.yaml'
+$schemaPath = Join-Path $Path 'data-access-policies.schema.json'
+$desiredItems = @(Get-DesiredItem -YamlPath $yamlPath -SchemaPath $schemaPath)
+$mode = if ($ExportCurrentState.IsPresent) { 'Export' } else { 'Apply' }
+
+Write-Information ("Parameters file : {0}" -f $ParametersFile) -InformationAction Continue
+Write-Information ("Purview account : {0}" -f $AccountName) -InformationAction Continue
+Write-Information ("YAML file       : {0}" -f $yamlPath) -InformationAction Continue
+Write-Information ("Mode            : {0}" -f $mode) -InformationAction Continue
+Write-Information ("DirectionPolicy : {0}" -f $DirectionPolicy) -InformationAction Continue
+Write-Information ("PruneMissing    : {0}" -f $PruneMissing.IsPresent) -InformationAction Continue
+Write-Information ("Force           : {0}" -f $Force.IsPresent) -InformationAction Continue
+
+if ($WhatIfPreference -and $mode -eq 'Export') {
+    Write-Information '-WhatIf specified with -ExportCurrentState. Planned behaviour (no remote calls made):' -InformationAction Continue
+    Write-Information '  Export Unified Catalog policy assignments -> data-access-policies.yaml' -InformationAction Continue
+    return
+}
+
+$context = $null
+try {
+    $context = Get-UnifiedCatalogApiContext -AccountName $AccountName
+}
+catch {
+    if ($WhatIfPreference -and $mode -eq 'Apply') {
+        Write-Warning ("Could not reach the live Unified Catalog API in this environment: {0}" -f $_.Exception.Message)
+        return ,@()
+    }
+    throw
+}
+
+$tenantState = $null
+try {
+    $tenantState = Get-UnifiedCatalogTenantState -Context $context
+}
+catch {
+    if ($WhatIfPreference -and $mode -eq 'Apply') {
+        Write-Warning ("Could not read live Unified Catalog state in this environment: {0}" -f $_.Exception.Message)
+        return ,@()
+    }
+    throw
+}
+
+$tenantAssignments = @(Get-TenantAssignment -TenantState $tenantState)
+if ($mode -eq 'Export') {
+    if (@($desiredItems).Count -gt 0 -and -not $Force.IsPresent) {
+        throw "'data-access-policies.yaml' already declares item(s). Re-run with -Force to overwrite."
+    }
+    $entries = @(
+        $tenantAssignments |
+            Sort-Object ScopeLabel, RoleName |
+            ForEach-Object {
+                $entry = [ordered]@{}
+                if (-not [string]::IsNullOrWhiteSpace([string]$_.ScopeLabel)) {
+                    $entry['domain'] = [string]$_.ScopeLabel
+                }
+                $entry['role'] = [string]$_.RoleName
+                $entry['principals'] = @($_.PrincipalDisplayNames | Sort-Object -Unique)
+                [pscustomobject]$entry
+            }
+    )
+    $shouldProcessTarget = "YAML file 'data-access-policies.yaml'"
+    $shouldProcessAction = "Replace 'items:' block with $(@($entries).Count) item(s)"
+    if ($PSCmdlet.ShouldProcess($shouldProcessTarget, $shouldProcessAction)) {
+        Write-YamlItemsBlock -FilePath $yamlPath -Entries $entries
+    }
+    return
+}
+
+$desiredAssignments = $null
+$blockedRows = New-Object 'System.Collections.Generic.List[object]'
+try {
+    $desiredAssignments = @(Get-DesiredAssignment -DesiredItems $desiredItems -TenantState $tenantState)
+}
+catch {
+    $blockedRows.Add((ConvertTo-ReportRow -Category 'Blocked' -Kind 'UnifiedCatalogPolicy' -Name 'Desired state' -Reason $_.Exception.Message)) | Out-Null
+    $desiredAssignments = @()
+}
+
+$planResult = Get-ReconciliationPlan -DesiredAssignments $desiredAssignments -TenantAssignments $tenantAssignments -AllowConflictOverwrite:$Force.IsPresent -PruneMissing:$PruneMissing.IsPresent
+$report = New-Object 'System.Collections.Generic.List[object]'
+$plan = New-Object 'System.Collections.Generic.List[object]'
+foreach ($row in $planResult.Report) { $report.Add($row) | Out-Null }
+foreach ($entry in $planResult.Plan) { $plan.Add($entry) | Out-Null }
+Invoke-DirectionPolicyPlan -Plan $plan -Report $report
+foreach ($blocked in $blockedRows) { $report.Add($blocked) | Out-Null }
+Show-PlanSummary -Report $report.ToArray()
+
+if ($blockedRows.Count -gt 0) {
+    throw ("Reconciliation aborted: {0} blocked item(s)." -f $blockedRows.Count)
+}
+
+$planByPolicy = @($plan | Group-Object { if ($_.Desired) { [string]$_.Desired.PolicyId } else { [string]$_.Tenant.PolicyId } })
+$finalAssignmentsByPolicy = Get-FinalRoleAssignmentsByPolicy -TenantAssignments $tenantAssignments -PlanEntries $plan.ToArray()
+
+foreach ($policyGroup in $planByPolicy) {
+    $policyId = [string]$policyGroup.Name
+    $entries = @($policyGroup.Group)
+    $policy = if ($entries[0].Desired) { $entries[0].Desired.Policy } else { $entries[0].Tenant.Policy }
+    $tenantPolicyAssignments = @($tenantAssignments | Where-Object { [string]$_.PolicyId -eq $policyId })
+    $roleAssignmentsBySlug = $finalAssignmentsByPolicy[$policyId]
+    $payload = ConvertTo-PolicyUpdatePayload -Policy $policy -TenantAssignments $tenantPolicyAssignments -RoleAssignmentsBySlug $roleAssignmentsBySlug
+    $targets = @($entries | ForEach-Object { "- $($_.Name): $($_.Reason)" })
+    Write-Information '' -InformationAction Continue
+    Write-Information ("Grant/revoke diff for policy '{0}':" -f $policy.name) -InformationAction Continue
+    foreach ($line in $targets) {
+        Write-Information $line -InformationAction Continue
+    }
+    $target = ("Unified Catalog policy '{0}'" -f $policy.name)
+    $action = 'Update grant/revoke-sensitive policy assignments'
+    if ($PSCmdlet.ShouldProcess($target, $action)) {
+        $uri = "$($context.Endpoint)/datagovernance/catalog/policies/$policyId?api-version=$($script:UnifiedCatalogApiVersion)"
+        # api-version justification: the Policies operation group is preview-only
+        # as of issue #47 and Policies - Update documents the pinned 2026-03-20-preview
+        # PUT contract, including the CatalogValue request body with decisionRules /
+        # attributeRules.
+        # Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/policies/update?view=rest-purview-purview-unified-catalog-2026-03-20-preview
+        [void](Invoke-UnifiedCatalogRestMethod -Method PUT -Uri $uri -Headers $context.Headers -Body $payload)
+    }
+}
+
+return $report.ToArray()

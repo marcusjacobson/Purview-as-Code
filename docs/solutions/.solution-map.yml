@@ -124,6 +124,7 @@ solutions:
     doc: docs/solutions/unified-catalog/unified-catalog.md
     code:
       - scripts/Deploy-UnifiedCatalog.ps1
+      - scripts/Deploy-UnifiedCatalogPolicies.ps1
       - data-plane/unified-catalog/
 
   - name: Purview role groups

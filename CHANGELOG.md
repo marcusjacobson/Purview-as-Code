@@ -16,6 +16,12 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself.
 
+## 2026-07-09
+
+### Added
+
+- **scripts:** add `Deploy-UnifiedCatalogPolicies.ps1` with grant/revoke-aware gating for Unified Catalog data-access policies, plus tests and guide updates (#47)
+
 ## 2026-07-08
 
 ### Added

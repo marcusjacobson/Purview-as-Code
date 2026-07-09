@@ -37,7 +37,7 @@ and summarized in [`docs/scripts-reference.md`](../scripts-reference.md).
 | Information Protection | [`information-protection/README.md`](information-protection/README.md) | Sensitivity labels, label policies, auto-labeling policies. |
 | Compliance | [`compliance/README.md`](compliance/README.md) | Data Loss Prevention, sensitive information types / custom classifications, communication compliance, adaptive scopes. |
 | Data Map | [`data-map/README.md`](data-map/README.md) | Collections, data sources, scans, business glossary. |
-| Unified Catalog | [`unified-catalog/README.md`](unified-catalog/README.md) | Unified Catalog reconciler (watch-list placeholder per [ADR 0037](../adr/0037-unified-catalog-authoring-surface.md)). |
+| Unified Catalog | [`unified-catalog/README.md`](unified-catalog/README.md) | Unified Catalog content plus the separate grant/revoke-aware data-access policy reconciler. |
 
 ## Feature-to-artifact map
 
@@ -63,7 +63,7 @@ reconciler that applies it.
 | Data Map — data sources | [`data-map/data-sources.md`](data-map/data-sources.md) | [`data-sources/data-sources.yaml`](../../data-plane/data-sources/data-sources.yaml) | [`Deploy-DataSources.ps1`](../../scripts/Deploy-DataSources.ps1) |
 | Data Map — scans | [`data-map/scans.md`](data-map/scans.md) | [`scans/scans.yaml`](../../data-plane/scans/scans.yaml) | [`Deploy-Scans.ps1`](../../scripts/Deploy-Scans.ps1) |
 | Data Map — glossary | [`data-map/glossary.md`](data-map/glossary.md) | [`glossary/glossary.yaml`](../../data-plane/glossary/glossary.yaml) | [`Deploy-Glossary.ps1`](../../scripts/Deploy-Glossary.ps1) |
-| Unified Catalog | [`unified-catalog/unified-catalog.md`](unified-catalog/unified-catalog.md) | [`unified-catalog/`](../../data-plane/unified-catalog/) | [`Deploy-UnifiedCatalog.ps1`](../../scripts/Deploy-UnifiedCatalog.ps1) |
+| Unified Catalog | [`unified-catalog/unified-catalog.md`](unified-catalog/unified-catalog.md) | [`unified-catalog/`](../../data-plane/unified-catalog/) | [`Deploy-UnifiedCatalog.ps1`](../../scripts/Deploy-UnifiedCatalog.ps1), [`Deploy-UnifiedCatalogPolicies.ps1`](../../scripts/Deploy-UnifiedCatalogPolicies.ps1) |
 | Purview role groups | [`governance-foundation/purview-role-groups.md`](governance-foundation/purview-role-groups.md) | [`purview-role-groups/role-groups.yaml`](../../data-plane/purview-role-groups/role-groups.yaml) | [`Deploy-PurviewRoleGroups.ps1`](../../scripts/Deploy-PurviewRoleGroups.ps1) |
 | Entra directory roles | [`governance-foundation/entra-directory-roles.md`](governance-foundation/entra-directory-roles.md) | [`entra-directory-roles/role-assignments.yaml`](../../data-plane/entra-directory-roles/role-assignments.yaml) | [`Deploy-EntraDirectoryRoles.ps1`](../../scripts/Deploy-EntraDirectoryRoles.ps1) |
 | Administrative units | [`governance-foundation/administrative-units.md`](governance-foundation/administrative-units.md) | [`administrative-units/administrative-units.yaml`](../../data-plane/administrative-units/administrative-units.yaml) | [`Deploy-AdministrativeUnits.ps1`](../../scripts/Deploy-AdministrativeUnits.ps1) |
