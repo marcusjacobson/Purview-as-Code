@@ -16,6 +16,16 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself.
 
+## 2026-07-11
+
+### Fixed
+
+- **infra:** grant the data-plane automation SP `Key Vault Contributor` at vault scope so the single-login data-plane firewall-toggle workflows can run `az keyvault update --public-network-access Enabled` (management-plane `Microsoft.KeyVault/vaults/write`); the prior `Key Vault Crypto User`-only grant did not cover it (ADR 0049) (#53)
+
+### Documentation
+
+- **docs:** add ADR 0049, update the automation-identity guide's 5d RBAC section, and add `drift-detection.yml` to the "Allow GitHub Actions to create and approve pull requests" rationale in the CI repo-settings runbook (#53)
+
 ## 2026-07-09
 
 ### Added

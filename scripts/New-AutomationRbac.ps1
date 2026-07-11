@@ -21,6 +21,16 @@
         key via `az keyvault key sign`; that is the `keys/sign` data-plane
         operation this role grants.
 
+      * Data-plane SP `gh-oidc-purview-data-plane` -> `Key Vault Contributor`
+        at vault scope on `kv-contoso-lab-01`. Required by ADR 0049
+        (2026-07-11). Every single-login data-plane workflow briefly opens
+        the vault firewall via `az keyvault update --public-network-access
+        Enabled` — a management-plane `Microsoft.KeyVault/vaults/write` call
+        that `Key Vault Crypto User` does not include. `Key Vault Contributor`
+        is the narrowest built-in covering `vaults/write`; it is management-
+        plane only (empty dataActions) so it cannot read secrets/keys/certs
+        and cannot assign RBAC.
+
     OUT of scope (intentionally owned by Wave 0 #5c):
 
       * `Key Vault Certificate User` at cert scope on the data-plane SP.
@@ -298,7 +308,7 @@ if ($LASTEXITCODE -ne 0) {
     return
 }
 
-$target = "RBAC grants in resource group '$ResourceGroupName' (CP Contributor + DP Crypto User on '$VaultName')"
+$target = "RBAC grants in resource group '$ResourceGroupName' (CP Contributor + DP Crypto User & KV Contributor on '$VaultName')"
 $action = 'Deploy automation RBAC via infra/modules/automation-rbac.bicep'
 
 if (-not $PSCmdlet.ShouldProcess($target, $action)) {
@@ -326,8 +336,9 @@ $deployment = ($deploymentJson -join "`n") | ConvertFrom-Json
 $outputs = $deployment.properties.outputs
 
 Write-Information '' -InformationAction Continue
-Write-Information ('controlPlaneContributorAssignmentId : {0}' -f $outputs.controlPlaneContributorAssignmentId.value) -InformationAction Continue
-Write-Information ('dataPlaneCryptoUserAssignmentId     : {0}' -f $outputs.dataPlaneCryptoUserAssignmentId.value)     -InformationAction Continue
+Write-Information ('controlPlaneContributorAssignmentId    : {0}' -f $outputs.controlPlaneContributorAssignmentId.value) -InformationAction Continue
+Write-Information ('dataPlaneCryptoUserAssignmentId        : {0}' -f $outputs.dataPlaneCryptoUserAssignmentId.value)     -InformationAction Continue
+Write-Information ('dataPlaneKeyVaultContributorAssignmentId : {0}' -f $outputs.dataPlaneKeyVaultContributorAssignmentId.value) -InformationAction Continue
 Write-Information '' -InformationAction Continue
 Write-Information 'Done. Re-dispatch `.github/workflows/validate-oidc-auth.yml` on main to verify the Wave 0 #15 smoke now passes.' -InformationAction Continue
 

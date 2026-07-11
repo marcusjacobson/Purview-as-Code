@@ -23,7 +23,7 @@ Run these in order. Each is idempotent and re-runnable.
 | 5a | [`New-AutomationKeyVault.ps1`](../../../scripts/New-AutomationKeyVault.ps1) | Key Vault with RBAC mode, 90-day soft-delete, purge protection, `AuditEvent` sink |
 | 5b | [`New-AutomationEntraApp.ps1`](../../../scripts/New-AutomationEntraApp.ps1) | One Entra app + service principal + federated credential per plane |
 | 5c | [`New-AutomationCertificate.ps1`](../../../scripts/New-AutomationCertificate.ps1) | Data-plane self-signed certificate in Key Vault + `keyCredentials` upload to the data-plane app + per-cert / per-vault KV RBAC |
-| 5d | [`New-AutomationRbac.ps1`](../../../scripts/New-AutomationRbac.ps1) | Azure RBAC the apps need at deploy time (`Contributor` on RG for control plane, `Key Vault Crypto User` on the vault for data plane) |
+| 5d | [`New-AutomationRbac.ps1`](../../../scripts/New-AutomationRbac.ps1) | Azure RBAC the apps need at deploy time (`Contributor` on RG for control plane; `Key Vault Crypto User` for `keys/sign` and `Key Vault Contributor` for the firewall toggle on the vault for data plane) |
 
 Each script is a thin orchestrator around a Bicep module or an `az ad` call. The four-switch reconciler contract (`-PruneMissing` / `-Force` / `-ExportCurrentState`) does **not** apply — these are imperative primitives, not catalog reconcilers.
 
@@ -83,8 +83,11 @@ Reconciles the role assignments required by the two OIDC apps whose target resou
 
 - Control-plane SP → `Contributor` at the resource group. Required by [ADR 0010 §5](../../adr/0010-automation-identity-subject-model.md); without it, `azure/login@v2` succeeds but `az account show` reports `No subscriptions found for ***`. This was the Wave 0 #15 smoke failure observed on 2026-04-25.
 - Data-plane SP → `Key Vault Crypto User` at vault scope. Required by [ADR 0011 §3 supersession](../../adr/0011-certificate-lifecycle.md). The `Connect-IPPSSession` path signs an RFC 7523 JWT assertion against the cert's underlying RSA key via [`az keyvault key sign`](https://learn.microsoft.com/en-us/cli/azure/keyvault/key) — that is the `keys/sign` data-plane operation this role grants.
+- Data-plane SP → `Key Vault Contributor` at vault scope. Required by [ADR 0049](../../adr/0049-data-plane-sp-key-vault-firewall-rbac.md). Every single-login data-plane workflow briefly opens the vault firewall via [`az keyvault update --public-network-access Enabled`](https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update) — a management-plane `Microsoft.KeyVault/vaults/write` operation that `Key Vault Crypto User` does not include. `Key Vault Contributor` is the narrowest built-in that covers `vaults/write`; it is [management-plane only](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/security#key-vault-contributor) (empty `dataActions`), so it cannot read secrets/keys/certs and cannot assign RBAC.
 
 Bicep role-assignment names are derived from `guid(scope, principalId, roleDefinitionId)` in [`rbac.bicep`](../../../infra/modules/rbac.bicep), so a re-run is a no-op once the assignment matches.
+
+> **Idempotency caveat (ADR 0049).** If a tenant already carries a hand-created, random-named role assignment for the same (data-plane SP, `Key Vault Contributor`, vault) tuple, a deterministic-name Bicep re-run collides with `RoleAssignmentExists`. Remove the random-named assignment first, then re-run so the module creates the `guid()`-named one.
 
 Out of scope (intentionally owned by 5c): `Key Vault Certificate User` at cert scope and `Key Vault Certificates Officer` at vault scope on the data-plane SP. These live in `New-AutomationCertificate.ps1` because the certificate object only exists at the time that script runs; Bicep cannot resolve `{vault}/certificates/{name}` ahead of time.
 
