@@ -20,6 +20,8 @@ To add an entry:
 
 ### Fixed
 
+- **scripts:** guard the `None` "no default label" sentinel in `Resolve-DesiredAdvancedSettingLabel` (Deploy-LabelPolicies.ps1) so `OutlookDefaultLabel`/`DefaultLabel`/`teamworkdefaultlabelid` set to any casing of `none` normalize to the lowercase tenant sentinel instead of Blocking as an unresolved label reference; adds Pester coverage (#55)
+- **policies:** remove the `minItems: 1` floor on `exchangeLocation` in `label-policies.schema.json` so a group-scoped-only label policy's `exchangeLocation: []` (emitted by `-ExportCurrentState`) passes forward-deploy schema validation (#55)
 - **infra:** grant the data-plane automation SP `Key Vault Contributor` at vault scope so the single-login data-plane firewall-toggle workflows can run `az keyvault update --public-network-access Enabled` (management-plane `Microsoft.KeyVault/vaults/write`); the prior `Key Vault Crypto User`-only grant did not cover it (ADR 0049) (#53)
 
 ### Documentation

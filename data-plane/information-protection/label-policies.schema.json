@@ -31,8 +31,7 @@
                 "exchangeLocation": {
                     "type": "array",
                     "items": { "type": "string", "minLength": 1 },
-                    "minItems": 1,
-                    "description": "[All] or a list of mailbox SMTP addresses."
+                    "description": "[All] or a list of mailbox SMTP addresses. No minItems floor: Set-LabelPolicy -ExchangeLocation and -ModernGroupLocation are independent optional parameters, so a group-scoped-only policy legitimately has no Exchange location and -ExportCurrentState emits exchangeLocation: []. Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-labelpolicy"
                 },
                 "exchangeLocationException": {
                     "type": "array",

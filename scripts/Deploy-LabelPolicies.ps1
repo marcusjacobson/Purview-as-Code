@@ -860,6 +860,18 @@ function Resolve-DesiredAdvancedSettingLabel {
         if (-not $Hash.advancedSettings.ContainsKey($k)) { continue }
         $ref = [string]$Hash.advancedSettings[$k]
         if ([string]::IsNullOrWhiteSpace($ref)) { continue }
+        # 'None' is the documented "no default label" sentinel for the
+        # label-reference advanced settings (OutlookDefaultLabel,
+        # DefaultLabel, teamworkdefaultlabelid), NOT a label display name.
+        # Get-LabelPolicy.Settings stores it lowercased as 'none'; normalize
+        # the desired side to the same lowercase sentinel and never attempt a
+        # label lookup, so a group-scoped-only policy that opts out of a
+        # default label reconverges to NoChange instead of Blocking.
+        # Reference: https://learn.microsoft.com/en-us/purview/sensitivity-labels-aip#outlook-specific-options-for-default-label-and-mandatory-labeling
+        if ($ref -ieq 'none') {
+            $Hash.advancedSettings[$k] = 'none'
+            continue
+        }
         if ($ref -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
             $Hash.advancedSettings[$k] = $ref.ToLowerInvariant()
             continue
