@@ -25,13 +25,13 @@ To add an entry:
 
 ### Documentation
 
-- **docs:** document the IRM reverse drift-detection workflow (`sync-irm-from-tenant.yml`) and its Tier-3 issue-based (not PR-based) semantics in the Insider Risk Management solution guide and the IRM end-to-end smoke runbook (#PRNUM)
+- **docs:** document the IRM reverse drift-detection workflow (`sync-irm-from-tenant.yml`) and its Tier-3 issue-based (not PR-based) semantics in the Insider Risk Management solution guide and the IRM end-to-end smoke runbook (#59)
 - **docs:** point the DLP solution guide and end-to-end smoke runbook at the new `deploy-dlp.yml` / `sync-dlp-from-tenant.yml` workflows and drop the "no dedicated forward workflow" gap (#70)
 - **docs:** add ADR 0016 §12 (export-scope exclusion + NoChange-only location semantics), a round-trip/scope section in the auto-label-policies solution guide, and export-scope notes in the YAML header (#57)
 
 ### CI/CD
 
-- **ci:** add IRM reverse drift-detection companion `sync-irm-from-tenant.yml` — a Tier-3, issue-based (not PR-based) reverse leg for the Insider Risk Management surface that runs `Deploy-IRMPolicies.ps1 -DirectionPolicy audit` (read-only, ADR 0029), detects drift from the reconciler's returned object rows (`.Category`/`.Name`/`.Reason`, no stdout scraping), post-filters the ADR 0036 skip baseline, and opens a GitHub issue with self-provisioned labels; closes the reverse-leg gap for IRM per the companion-workflow rule in `.github/instructions/github-actions.instructions.md` (#PRNUM)
+- **ci:** add IRM reverse drift-detection companion `sync-irm-from-tenant.yml` — a Tier-3, issue-based (not PR-based) reverse leg for the Insider Risk Management surface that runs `Deploy-IRMPolicies.ps1 -DirectionPolicy audit` (read-only, ADR 0029), detects drift from the reconciler's returned object rows (`.Category`/`.Name`/`.Reason`, no stdout scraping), post-filters the ADR 0036 skip baseline, and opens a GitHub issue with self-provisioned labels; closes the reverse-leg gap for IRM per the companion-workflow rule in `.github/instructions/github-actions.instructions.md` (#59)
 - **ci:** add DLP companion workflows `sync-dlp-from-tenant.yml` (scheduled reverse drift-back, `-ExportCurrentState`) and `deploy-dlp.yml` (isolated forward apply with the ADR 0029 enumerate/apply/drift-back direction-policy contract), closing the Tier-1 loop for the Data Loss Prevention surface per the companion-workflow rule in `.github/instructions/github-actions.instructions.md` (#70)
 
 ## 2026-07-11
