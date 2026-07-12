@@ -15,10 +15,13 @@ lifecycle.
 mid-testing and MUST NOT be mutated by this runbook.** Every step
 below operates on a **throwaway `e2e-irm-smoke-*` policy** the
 operator (or [`Invoke-IRMSmokeTest.ps1`](../../scripts/Invoke-IRMSmokeTest.ps1))
-creates and tears down. The pre-existing 5 names from
+creates and tears down. The pre-existing four operator-authored
+`IRM Lab — *` names from
 [ADR 0036](../adr/0036-irm-tenant-setting-immovable.md) §"The skip
 baseline" are always passed via `-SkipNames`; any plan row that
-would touch one is a bug. Escalate to the lab owner.
+would touch one is a bug. Escalate to the lab owner. The
+system-managed `IRM_Tenant_Setting_*` policy is not on the baseline —
+the reconciler classifies it `NoChange` via a name-prefix wildcard.
 
 ## When to run
 
@@ -91,7 +94,7 @@ preconditions failed.
 | Key Vault access | Caller has `Key Vault Crypto User` + `Key Vault Certificate User` on `kv-contoso-lab-01`. |
 | Working tree clean under `data-plane/irm/**` | `git status -s data-plane/irm/` returns empty. |
 | Required modules | `Get-Module -ListAvailable powershell-yaml, ExchangeOnlineManagement` returns both. |
-| Skip baseline current | `Get-InsiderRiskPolicy \| Select-Object -ExpandProperty Name` matches the 5 names in [ADR 0036](../adr/0036-irm-tenant-setting-immovable.md). If it does not, stop and update ADR 0036 + the workflow `skip_names_irm` default in the same PR. |
+| Skip baseline current | `Get-InsiderRiskPolicy \| Select-Object -ExpandProperty Name` includes the 4 operator-authored `IRM Lab — *` names in [ADR 0036](../adr/0036-irm-tenant-setting-immovable.md) plus the system-managed `IRM_Tenant_Setting_*` policy. If the operator-authored set differs, stop and update ADR 0036 + the workflow `skip_names_irm` default in the same PR. |
 
 ## Step 1 — clean baseline
 
@@ -141,7 +144,6 @@ Expected fields match Step 2's create.
 
 ```pwsh
 $skipBaseline = @(
-  'IRM_Tenant_Setting_<guid>',                  # replace with the tenant value from Step 0
   'IRM Lab — Data leaks by priority users',
   'IRM Lab — Data theft by departing users',
   'IRM Lab — General data leaks',
@@ -153,7 +155,10 @@ $skipBaseline = @(
 
 Expected:
 
-- Exactly **5 `Skipped` rows** — one per skip-baseline name.
+- Exactly **4 `Skipped` rows** — one per skip-baseline name.
+- Exactly **1 `NoChange` row** — the system-managed
+  `IRM_Tenant_Setting_<guid>`, classified via the reconciler's
+  name-prefix wildcard (not via `-SkipNames`).
 - Exactly **1 `Orphan` row** — the throwaway from Step 2, reason
   `Tenant-only; will be removed (-PruneMissing).`
 - **Zero `Update`, `Failed`, `Removed` rows.** A row mentioning any
@@ -203,7 +208,11 @@ Relationship to this runbook:
   or `Set-InsiderRiskPolicyLite` against any name that does not start
   with `e2e-irm-smoke-`.
 - **Never** invoke `Deploy-IRMPolicies.ps1 -PruneMissing` without
-  `-SkipNames` carrying the 5-name ADR 0036 baseline.
+  `-SkipNames` carrying the 4-name ADR 0036 baseline. (The
+  system-managed `IRM_Tenant_Setting_*` policy is safe either way — the
+  reconciler short-circuits it to `NoChange` via a name-prefix wildcard
+  — but the four operator-authored `IRM Lab — *` policies still need the
+  baseline to avoid a prune during the mid-testing window.)
 - The reconciler's audit short-circuit (`-DirectionPolicy audit`) is
   the safest read-only verification. Prefer it over `-WhatIf` alone
   when triaging a tenant in an unexpected state.

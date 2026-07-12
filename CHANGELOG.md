@@ -20,6 +20,7 @@ To add an entry:
 
 ### Fixed
 
+- **scripts:** redact the real Entra tenant-scoped GUID from the `IRM_Tenant_Setting_<tenant-guid>` policy name across all IRM artifacts (skip-baseline defaults, YAML header, smoke-test baseline, ADR 0036, runbook, solution guide) — a tenant-scoped GUID is a real tenant identifier prohibited by the "Environment and identifier boundaries" rule, which supersedes ADR 0036 §Security #1 — and drop the now-redundant system-managed skip entry, since `Deploy-IRMPolicies.ps1` already classifies any `IRM_Tenant_Setting_*` policy as `NoChange` via a name-prefix wildcard (skip baseline shrinks 5→4 operator-authored names) (#60)
 - **scripts:** make `Deploy-AutoLabelPolicies.ps1` round-trip exportable state — `-ExportCurrentState` now builds rules first and skips any whose resolved `contentContainsSensitiveInformation` is empty (EDM / trainable classifier / document fingerprint), then skips parent policies left with zero surviving rules, reporting both as skipped orphans instead of emitting entries that fail the CCSI `minItems:1` floor on the next deploy (ADR 0016 §12) (#57)
 - **policies:** remove the `minItems: 1` floor on `exchangeLocation` in `auto-label-policies.schema.json`, and relax the reconciler's forward-apply input guard to require the key present but allow an empty array, so a SharePoint/OneDrive-only policy's `exchangeLocation: []` round-trips; empty-location writes are gated (Create omits `-ExchangeLocation`, Update skips it) so desired `[]` == tenant `[]` → NoChange (ADR 0016 §12) (#57)
 

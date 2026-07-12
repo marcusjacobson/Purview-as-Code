@@ -94,16 +94,18 @@ on:
           to suppress from the drift report. Applied as a POST-FILTER on
           the reconciler's returned object rows (NOT passed to the
           script -- -SkipNames is inert in audit mode). Case-insensitive;
-          whitespace around commas is trimmed. The default carries the 5
-          names ratified as permanent skip in
-          docs/adr/0036-irm-tenant-setting-immovable.md: the
-          system-managed `IRM_Tenant_Setting_<tenant-guid>` policy plus
-          the four operator-authored `IRM Lab — *` policies under the
-          issue #603 hard rule (mid-testing window). Keep this default
-          in lockstep with the `skip_names_irm` default in
-          deploy-data-plane.yml and ADR 0036's source-of-truth table.
+          whitespace around commas is trimmed. The default carries the 4
+          operator-authored `IRM Lab — *` policy names ratified as
+          permanent skip in
+          docs/adr/0036-irm-tenant-setting-immovable.md under the issue
+          #603 hard rule (mid-testing window). The system-managed
+          `IRM_Tenant_Setting_<tenant-guid>` policy is NOT baselined
+          here: the reconciler classifies it NoChange via a name-prefix
+          wildcard, so it never plans a mutation regardless of this list.
+          Keep this default in lockstep with the `skip_names_irm` default
+          in deploy-data-plane.yml and ADR 0036's source-of-truth table.
         type: string
-        default: 'IRM_Tenant_Setting_bd249dd2-1bd6-4d7c-b0d4-7607b70a8207,IRM Lab — Data leaks by priority users,IRM Lab — Data theft by departing users,IRM Lab — General data leaks,IRM Lab — Risky AI usage'
+        default: 'IRM Lab — Data leaks by priority users,IRM Lab — Data theft by departing users,IRM Lab — General data leaks,IRM Lab — Risky AI usage'
         required: false
 
 # Least-privilege. No `pull-requests` scope -- this Tier-3 surface opens

@@ -90,14 +90,16 @@ For the noise-free `portal-wins` view (matches what CI runs):
 ```pwsh
 ./scripts/Deploy-IRMPolicies.ps1 -WhatIf -DirectionPolicy portal-wins `
   -SkipNames @(
-    'IRM_Tenant_Setting_<guid>',
     'IRM Lab — Data leaks by priority users',
     'IRM Lab — Data theft by departing users',
     'IRM Lab — General data leaks',
     'IRM Lab — Risky AI usage')
 ```
 
-Expected: 5 `Skipped` rows, zero anything else.
+Expected: 4 `Skipped` rows (the operator-authored `IRM Lab — *`
+policies) plus 1 `NoChange` row — the system-managed
+`IRM_Tenant_Setting_<guid>`, classified via the reconciler's
+name-prefix wildcard, not `-SkipNames` — and zero anything else.
 
 For an end-to-end live-tenant smoke (Create → Get → Plan-shape assert → Delete → Get-gone) against a throwaway `e2e-irm-smoke-*` policy, follow [`docs/runbooks/irm-end-to-end-smoke.md`](../../runbooks/irm-end-to-end-smoke.md) or run the wrapper:
 
@@ -111,7 +113,7 @@ The `Deploy IRM policies` step in [`.github/workflows/deploy-data-plane.yml`](..
 
 - `irm_direction_policy` — `audit` / `portal-wins` (default) / `repo-wins`.
 - `confirm_overwrite_irm` — typed `overwrite portal` token, gates `repo-wins` per [ADR 0029](../../adr/0029-source-of-truth-direction-policy.md).
-- `skip_names_irm` — comma list passed through to `-SkipNames`; defaults to the 5-name [ADR 0036](../../adr/0036-irm-tenant-setting-immovable.md) baseline.
+- `skip_names_irm` — comma list passed through to `-SkipNames`; defaults to the 4-name [ADR 0036](../../adr/0036-irm-tenant-setting-immovable.md) baseline (the operator-authored `IRM Lab — *` policies; the system-managed `IRM_Tenant_Setting_*` policy is handled by the reconciler wildcard, not the baseline).
 
 A fail-fast `Validate IRM dispatch inputs` step runs before Azure login and rejects a `repo-wins` dispatch without the typed token.
 

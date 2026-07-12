@@ -20,7 +20,7 @@
 
       - Only ever invoking Remove-InsiderRiskPolicy on names matching
         ^e2e-irm-smoke- (asserted before every Remove-* call).
-      - Passing the ADR 0036 5-name skip baseline to every
+      - Passing the ADR 0036 4-name skip baseline to every
         Deploy-IRMPolicies.ps1 invocation via -SkipNames.
       - Asserting that every plan row in the -WhatIf output classifies
         each pre-existing live policy as Skipped, never Update / Remove
@@ -70,7 +70,7 @@
 
 .PARAMETER SkipNamesBaseline
     The ADR 0036 skip baseline passed to every Deploy-IRMPolicies.ps1
-    invocation. Defaults to the 5-name list from
+    invocation. Defaults to the 4-name list from
     docs/adr/0036-irm-tenant-setting-immovable.md §"The skip baseline".
     Override only if the operator has just updated ADR 0036 and is
     smoke-testing the new shape in the same session.
@@ -156,11 +156,16 @@ if (-not $PSBoundParameters.ContainsKey('EvidenceDirectory')) {
 # region Helpers (AST-extractable; covered by tests/scripts/Invoke-IRMSmokeTest.Tests.ps1)
 
 function Get-IRMSmokeSkipBaseline {
-    # ADR 0036 §"The skip baseline" — 5 names. Treated as a copy-paste
-    # regression check by tests/scripts/Invoke-IRMSmokeTest.Tests.ps1;
-    # any drift here must move the ADR table first.
+    # ADR 0036 §"The skip baseline" — 4 names (the operator-authored
+    # `IRM Lab — *` policies under the issue #603 mid-testing hard rule).
+    # The system-managed IRM_Tenant_Setting_* policy is deliberately NOT
+    # baselined here: Deploy-IRMPolicies.ps1 classifies it NoChange via a
+    # name-prefix wildcard, so it never needs an explicit skip entry (and
+    # a placeholder GUID would never match the real tenant name, breaking
+    # the Skipped-row assertion). Treated as a copy-paste regression
+    # check by tests/scripts/Invoke-IRMSmokeTest.Tests.ps1; any drift
+    # here must move the ADR table first.
     @(
-        'IRM_Tenant_Setting_bd249dd2-1bd6-4d7c-b0d4-7607b70a8207',
         'IRM Lab — Data leaks by priority users',
         'IRM Lab — Data theft by departing users',
         'IRM Lab — General data leaks',

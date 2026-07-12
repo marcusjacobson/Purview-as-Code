@@ -172,10 +172,12 @@ on:
       # Mirror the shape of the Records block above; see #603 for the
       # per-script retrofit. Desired-state YAML is empty today; the
       # workflow ships with a baseline `skip_names_irm` default
-      # carrying the 5 names ratified as permanent skip in
-      # docs/adr/0036-irm-tenant-setting-immovable.md (1 system-managed
-      # tenant-setting policy + 4 operator-authored mid-testing
-      # policies under the #603 hard rule).
+      # carrying the 4 operator-authored `IRM Lab — *` names ratified as
+      # permanent skip in
+      # docs/adr/0036-irm-tenant-setting-immovable.md (the #603 hard-rule
+      # mid-testing policies). The system-managed tenant-setting policy
+      # is NOT baselined: the reconciler classifies it NoChange via a
+      # name-prefix wildcard (`IRM_Tenant_Setting_*`).
       # Reference: docs/adr/0029-source-of-truth-direction-policy.md
       # Reference: docs/adr/0036-irm-tenant-setting-immovable.md
       irm_direction_policy:
@@ -211,19 +213,20 @@ on:
           names to skip even when they would otherwise drift. Wired
           to Deploy-IRMPolicies.ps1 -SkipNames. Case-insensitive;
           whitespace around commas is trimmed. The default carries
-          the 5 names ratified as permanent skip in
-          docs/adr/0036-irm-tenant-setting-immovable.md: the
-          system-managed `IRM_Tenant_Setting_<tenant-guid>` policy
-          plus the four operator-authored `IRM Lab — *` policies
-          under the issue #603 hard rule (mid-testing window). If
-          Microsoft ever changes the tenant-setting policy shape, or
-          the operator-authored testing window closes and the four
-          `IRM Lab — *` policies are adopted into desired state via
+          the 4 operator-authored `IRM Lab — *` policy names ratified
+          as permanent skip in
+          docs/adr/0036-irm-tenant-setting-immovable.md under the
+          issue #603 hard rule (mid-testing window). The system-managed
+          `IRM_Tenant_Setting_<tenant-guid>` policy is NOT baselined
+          here: the reconciler classifies it NoChange via a name-prefix
+          wildcard, so it never plans a mutation regardless of this
+          list. If the operator-authored testing window closes and the
+          four `IRM Lab — *` policies are adopted into desired state via
           follow-up #604, update this default, ADR 0036's
           source-of-truth table, and the runbook at
           docs/runbooks/irm-end-to-end-smoke.md together.
         type: string
-        default: 'IRM_Tenant_Setting_bd249dd2-1bd6-4d7c-b0d4-7607b70a8207,IRM Lab — Data leaks by priority users,IRM Lab — Data theft by departing users,IRM Lab — General data leaks,IRM Lab — Risky AI usage'
+        default: 'IRM Lab — Data leaks by priority users,IRM Lab — Data theft by departing users,IRM Lab — General data leaks,IRM Lab — Risky AI usage'
         required: false
       # ADR 0029 inputs for Deploy-IRMEntityLists.ps1 (Insider Risk
       # Management entity lists). Mirror the shape of the IRM policies
@@ -1081,11 +1084,13 @@ jobs:
       # NoChange / Orphan / Skipped). The `irm_direction_policy`
       # dispatch input wires through the ADR 0029 contract
       # (-DirectionPolicy + -SkipNames) shipped under #603. The
-      # `skip_names_irm` default carries the 5 names ratified as
-      # permanent skip in docs/adr/0036-irm-tenant-setting-immovable.md
-      # (1 Microsoft-managed tenant-setting policy + 4 operator-
-      # authored mid-testing policies under the #603 hard rule), so
-      # every dispatch defaults to noise-free output. Current desired
+      # `skip_names_irm` default carries the 4 operator-authored
+      # `IRM Lab — *` names ratified as permanent skip in
+      # docs/adr/0036-irm-tenant-setting-immovable.md (the #603 hard-rule
+      # mid-testing policies; the system-managed tenant-setting policy is
+      # handled by the reconciler's `IRM_Tenant_Setting_*` name-prefix
+      # wildcard, not the baseline), so every dispatch defaults to
+      # noise-free output. Current desired
       # state is empty (policies: []); the step remains a Skipped-only
       # no-op until the operator-authored testing window closes and
       # follow-up #604 adopts the four `IRM Lab — *` policies.

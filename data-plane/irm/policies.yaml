@@ -19,13 +19,16 @@
 # dedicated `feat(irm)` PR.
 #
 # Skip baseline (see docs/adr/0036-irm-tenant-setting-immovable.md):
-#   The live tenant carries one Microsoft-managed `TenantSetting`
-#   policy (`IRM_Tenant_Setting_<tenant-guid>`) plus four
-#   operator-authored `IRM Lab — *` policies under active testing
-#   (mid-testing hard rule per issue #603). All five names are
-#   baselined into the `skip_names_irm` workflow input default so
-#   `-PruneMissing` runs never plan a mutation against them. The
-#   verbatim list lives in ADR 0036 §"The skip baseline".
+#   The live tenant carries four operator-authored `IRM Lab — *`
+#   policies under active testing (mid-testing hard rule per issue
+#   #603). All four names are baselined into the `skip_names_irm`
+#   workflow input default so `-PruneMissing` runs never plan a
+#   mutation against them. The verbatim list lives in ADR 0036
+#   §"The skip baseline". The tenant also carries one Microsoft-managed
+#   `TenantSetting` policy (`IRM_Tenant_Setting_<tenant-guid>`); it is
+#   NOT baselined -- the reconciler classifies it NoChange via a
+#   name-prefix wildcard (`IRM_Tenant_Setting_*`), so it never needs an
+#   explicit skip entry.
 #
 # Each policy entry maps to the conservative subset of
 # `New-InsiderRiskPolicy` parameters that are stable across PowerShell
