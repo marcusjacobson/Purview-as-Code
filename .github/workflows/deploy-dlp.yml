@@ -1,0 +1,523 @@
+name: deploy-dlp
+
+# Reconciles the Microsoft Purview Data Loss Prevention (DLP) policies +
+# rules in the contoso.onmicrosoft.com tenant from
+# data-plane/dlp/policies.yaml.
+#
+# Sibling of deploy-auto-label-policies.yml (PR #477) and
+# deploy-label-policies.yml (PR #469). Where those workflows own the
+# sensitivity-label auto-apply and binding surfaces via the
+# *-AutoSensitivityLabel* and *-LabelPolicy cmdlet families, this
+# workflow owns the DLP surface via the *-DlpCompliancePolicy +
+# *-DlpComplianceRule cmdlet family, reconciled by
+# scripts/Deploy-DLPPolicies.ps1.
+#
+# Implements the ADR 0029 source-of-truth direction-policy contract.
+# Copied from deploy-auto-label-policies.yml (the reference
+# implementation named in
+# .github/instructions/github-actions.instructions.md) rather than
+# re-deriving the pattern. Every dispatch chooses one of three modes,
+# default portal-wins. Mode effects are arbitrated inside
+# scripts/Deploy-DLPPolicies.ps1 via its -DirectionPolicy / -SkipNames
+# parameters; this workflow's job is to (1) gate destructive modes
+# behind typed confirmation, (2) compute the deterministic skip list
+# for portal-wins via a first read-only pass, and (3) auto-open a
+# drift-back PR when portal-wins skipped any policy or rule.
+#
+# Modes (see docs/adr/0029-source-of-truth-direction-policy.md and
+# docs/runbooks/dlp-end-to-end-smoke.md):
+#
+#   audit       -- read-only. No New-/Set-/Remove-DlpCompliance* calls
+#                  under any condition. Single script invocation with
+#                  -DirectionPolicy audit. Produces the plan table for
+#                  compliance evidence and exits.
+#
+#   portal-wins -- default. Two-pass:
+#                    1) Enumerate pass. Runs Deploy-DLPPolicies.ps1
+#                       with -DirectionPolicy portal-wins -WhatIf,
+#                       parses [ADR0029-SKIP] markers from the run log
+#                       to build a deterministic skip list. No writes
+#                       fire (-WhatIf gates ShouldProcess).
+#                    2) Apply pass. Re-invokes the script with the
+#                       parsed skip list as -SkipNames so the second
+#                       call's skip decisions match the first call's
+#                       exactly, even if tenant state moved between
+#                       calls. Creates policies + rules, applies
+#                       non-conflicting updates, skips shared-property
+#                       drift on either kind.
+#                  If any object was skipped, re-exports the tenant
+#                  state and a follow-up job opens / refreshes a
+#                  drift-back PR listing the skipped objects.
+#
+#   repo-wins   -- DESTRUCTIVE. Overwrites tenant fields with YAML
+#                  values for every shared-property drift on policies
+#                  AND rules. Two-pass:
+#                    1) Audit pass for symmetry / plan visibility
+#                       (read-only, same shape as audit mode).
+#                    2) Apply pass with -DirectionPolicy repo-wins.
+#                       Each overwrite emits a Write-Warning line
+#                       naming the object and the drifted field set.
+#                  Requires confirm_overwrite='overwrite portal'
+#                  (case-sensitive). The pre-flight gate fails the
+#                  job before Key Vault unlock or Azure login if the
+#                  token is missing or mistyped.
+#
+# No Verify-Published step. Unlike deploy-auto-label-policies.yml, DLP
+# has no ADR-0016-section-9 published-runtime Status contract, and
+# scripts/Deploy-DLPPolicies.ps1 exposes no -VerifyPublished switch.
+# The apply passes are the terminal write step.
+#
+# Job split (least-privilege, per
+# .github/instructions/github-actions.instructions.md "Direction-policy
+# contract (ADR 0029)"):
+#   apply           : id-token: write + contents: read. Holds the
+#                     Azure OIDC + IPPS surface. Cannot open PRs.
+#   drift-back-pr   : contents: write + pull-requests: write. Holds
+#                     no Azure surface. Runs only when apply
+#                     succeeded with direction_policy=portal-wins and
+#                     at least one object was skipped.
+# An artifact (the re-exported tenant YAML) is the only data flow
+# between the two jobs.
+#
+# No prune inputs in this first cut. -PruneMissing is supported by
+# scripts/Deploy-DLPPolicies.ps1 but is not exposed as a dispatch
+# input here; a prune ceremony is a separate follow-up.
+#
+# Key Vault access: the runner principal signs the IPPS
+# client_assertion JWT via `az keyvault key sign` against
+# kv-contoso-lab-01. The vault is private-network by default; the
+# apply job temp-opens the public endpoint for the duration of the
+# apply / re-export and restores it via an `if: always()` step.
+#
+# References (Microsoft Learn / GitHub Docs / action upstream):
+#   https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+#   https://learn.microsoft.com/en-us/powershell/exchange/connect-to-scc-powershell
+#   https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-dlpcompliancepolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-dlpcompliancepolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-dlpcompliancepolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-dlpcompliancerule
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-dlpcompliancerule
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-dlpcompliancerule
+#   https://learn.microsoft.com/en-us/purview/dlp-learn-about-dlp
+#   https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#onworkflow_dispatchinputs
+#   https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idoutputs
+#   https://github.com/peter-evans/create-pull-request
+#   https://github.com/actions/upload-artifact
+#   https://github.com/actions/download-artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      direction_policy:
+        description: |
+          ADR 0029 source-of-truth direction policy. Three modes:
+
+          - audit       Read-only verify. No writes under any condition.
+          - portal-wins Default. Create + non-conflicting updates apply;
+                        shared-property drift on policies OR rules is
+                        SKIPPED and a drift-back PR is auto-opened
+                        listing the skipped objects.
+          - repo-wins   DESTRUCTIVE. Overwrite tenant fields with YAML
+                        values for shared-property drift on policies
+                        AND rules. Requires
+                        confirm_overwrite='overwrite portal'.
+
+          See docs/runbooks/dlp-end-to-end-smoke.md.
+        type: choice
+        options:
+          - audit
+          - portal-wins
+          - repo-wins
+        default: portal-wins
+        required: false
+      confirm_overwrite:
+        description: |
+          Typed-confirmation token. When `direction_policy` is
+          `repo-wins` this MUST equal the literal string
+          `overwrite portal` (case-sensitive, two words separated
+          by one space). Ignored when `direction_policy` is
+          `audit` or `portal-wins`. Mirrors the destructive-write
+          confirmation rule in
+          .github/instructions/mcp-tool-usage.instructions.md.
+        type: string
+        default: ''
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - 'data-plane/dlp/policies.yaml'
+      - 'data-plane/dlp/policies.schema.json'
+      - 'scripts/Deploy-DLPPolicies.ps1'
+      - 'scripts/Get-PurviewIPPSAccessToken.ps1'
+      - 'scripts/modules/DirectionPolicy.psm1'
+      - 'infra/parameters/lab.yaml'
+      - '.github/workflows/deploy-dlp.yml'
+
+# Deny-by-default at workflow scope. Each job declares the minimum
+# permission set it needs. Reference:
+# https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-the-permissions-key
+permissions: {}
+
+concurrency:
+  group: deploy-dlp-lab
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: Apply DLP policies
+    runs-on: ubuntu-latest
+    environment: lab
+    permissions:
+      id-token: write       # OIDC token for azure/login@v2.
+      contents: read        # Checkout only; does not push or open PRs.
+    env:
+      KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+      # Defaults applied for `push` events (where github.event.inputs
+      # is null) so the rest of the job can read the env vars
+      # unconditionally and a push-triggered run behaves identically
+      # to a dispatch with default inputs.
+      DIRECTION_POLICY: ${{ github.event.inputs.direction_policy || 'portal-wins' }}
+      CONFIRM_OVERWRITE: ${{ github.event.inputs.confirm_overwrite }}
+    outputs:
+      # Surfaced to the drift-back-pr job. `skip_count` defaults to
+      # '0' when the enumerate step did not run (audit / repo-wins
+      # modes and push events under non-portal-wins dispatch).
+      skip_count: ${{ steps.enumerate.outputs.skip_count || '0' }}
+      direction_policy: ${{ github.event.inputs.direction_policy || 'portal-wins' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Fail-fast pre-flight. Enforces the ADR 0029 typed-confirmation
+      # gate for direction_policy=repo-wins BEFORE Azure login, BEFORE
+      # the Key Vault unlock window, and BEFORE any data-plane call.
+      # Inputs flow through env: to keep ${{ github.event.* }}
+      # substitution outside the pwsh shell-quoting boundary per
+      # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+      - name: Validate dispatch inputs
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        env:
+          DIRECTION_POLICY: ${{ env.DIRECTION_POLICY }}
+          CONFIRM_OVERWRITE: ${{ env.CONFIRM_OVERWRITE }}
+        run: |
+          $policy = $env:DIRECTION_POLICY
+          $overwrite = $env:CONFIRM_OVERWRITE
+          $overwriteDisplay = if ([string]::IsNullOrEmpty($overwrite)) { '<empty>' } else { '<provided>' }
+          Write-Host "direction_policy  = '$policy'"
+          Write-Host "confirm_overwrite = $overwriteDisplay"
+
+          # ADR 0029 typed-confirmation gate. -cne enforces a
+          # case-sensitive comparison so 'Overwrite Portal' or
+          # 'OVERWRITE PORTAL' do not satisfy the gate.
+          if ($policy -eq 'repo-wins') {
+            if ($overwrite -cne 'overwrite portal') {
+              $msg = "::error::direction_policy=repo-wins requires confirm_overwrite to equal the literal string " +
+                     "'overwrite portal' (case-sensitive, two words separated by one space). " +
+                     "Re-dispatch with the correct token. See docs/runbooks/dlp-end-to-end-smoke.md."
+              Write-Host $msg
+              exit 1
+            }
+            Write-Host '::warning::repo-wins confirmed. The Apply step will OVERWRITE tenant fields with YAML values for any shared-property drift on DLP policies or rules.'
+          }
+
+          if ($policy -eq 'audit') {
+            Write-Host 'audit mode: this run will read tenant state and emit a plan; no writes will fire under any condition.'
+          }
+          if ($policy -eq 'portal-wins') {
+            Write-Host 'portal-wins mode: shared-property drift will be skipped (auto-PR will open if any).'
+          }
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install PowerShell modules
+        shell: pwsh
+        run: |
+          Install-Module powershell-yaml -Force -Scope CurrentUser
+          # Connect-IPPSSession -AccessToken requires ExchangeOnlineManagement
+          # v3.8.0-Preview1+; -AllowPrerelease until GA.
+          # Reference: https://learn.microsoft.com/en-us/powershell/exchange/exchange-online-powershell-v2
+          Install-Module ExchangeOnlineManagement -Force -Scope CurrentUser -AllowPrerelease
+
+      - name: Temporarily allow Key Vault public access
+        id: kv-open
+        shell: pwsh
+        run: |
+          if (-not $env:KEY_VAULT_NAME) {
+            throw "vars.KEY_VAULT_NAME is not set on the lab environment. Set it before re-running."
+          }
+          az keyvault update `
+            --name $env:KEY_VAULT_NAME `
+            --public-network-access Enabled `
+            --default-action Allow `
+            --only-show-errors `
+            -o none
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "opened=true"
+          # Wait for the network rule change to propagate before the
+          # first data-plane call (matches deploy-auto-label-policies.yml).
+          Start-Sleep -Seconds 30
+
+      # First pass under portal-wins. Runs the script with the policy
+      # active but writes gated by -WhatIf so the policy pass executes
+      # (it is gated only by `DirectionPolicy -ne 'audit'`, not by
+      # WhatIfPreference) and emits one [ADR0029-SKIP] line per
+      # object (policy OR rule) the policy would skip. The marker
+      # lines are the contract the apply pass and the drift-back-pr
+      # job consume; they are emitted by
+      # scripts/Deploy-DLPPolicies.ps1 via the shared
+      # Resolve-DirectionPolicyAction helper from
+      # scripts/modules/DirectionPolicy.psm1.
+      #
+      # We cannot use -DirectionPolicy audit here because audit-mode
+      # short-circuits BEFORE the policy pass, so it never emits
+      # SKIP markers. The -WhatIf + portal-wins combination is the
+      # script-contract-compatible way to enumerate skips without
+      # touching the tenant.
+      - name: Enumerate skipped objects (portal-wins read-only pass)
+        id: enumerate
+        if: env.DIRECTION_POLICY == 'portal-wins'
+        shell: pwsh
+        run: |
+          $logFile = Join-Path $env:RUNNER_TEMP 'enumerate.log'
+          # *>&1 merges all PowerShell streams (Information, Warning,
+          # Error, Verbose, Debug) into the success stream so
+          # Tee-Object captures the [ADR0029-SKIP] markers the script
+          # emits via Write-Information -InformationAction Continue.
+          ./scripts/Deploy-DLPPolicies.ps1 `
+            -DirectionPolicy portal-wins `
+            -WhatIf `
+            -Confirm:$false `
+            -InformationAction Continue `
+            *>&1 | Tee-Object -FilePath $logFile
+
+          $skipMatches = @(Select-String -Path $logFile -Pattern '^\[ADR0029-SKIP\] (.+)$' -CaseSensitive)
+          $skipNames = @($skipMatches | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() })
+          # ConvertTo-Json on a single-element array produces a scalar
+          # string in PowerShell unless -AsArray is used; we always
+          # emit a JSON array so the apply pass can ConvertFrom-Json
+          # without special-casing.
+          $json = if ($skipNames.Count -eq 0) {
+            '[]'
+          } else {
+            ConvertTo-Json -InputObject $skipNames -Compress -AsArray
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "skip_count=$($skipNames.Count)"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "skip_names_json=$json"
+          Write-Host "Enumerate pass complete: $($skipNames.Count) object(s) would be skipped under portal-wins."
+          if ($skipNames.Count -gt 0) {
+            Write-Host "Skipped objects: $($skipNames -join ', ')"
+          }
+
+      # Symmetry-only read-only pass for audit and repo-wins modes.
+      # audit mode performs its real work here (no separate apply
+      # follows). repo-wins gets a plan-output preview before the
+      # apply pass overwrites tenant state.
+      - name: Read-only plan pass (audit / repo-wins)
+        if: env.DIRECTION_POLICY == 'audit' || env.DIRECTION_POLICY == 'repo-wins'
+        shell: pwsh
+        run: |
+          if ($env:DIRECTION_POLICY -eq 'audit') {
+            Write-Host 'audit mode: this is the only script invocation; no apply pass follows.'
+          } else {
+            Write-Host 'repo-wins read-only pass: plan visibility before the apply pass overwrites tenant state.'
+          }
+          ./scripts/Deploy-DLPPolicies.ps1 `
+            -DirectionPolicy audit `
+            -Confirm:$false `
+            -InformationAction Continue
+
+      # Apply pass: portal-wins. Threads the deterministic skip list
+      # built by the enumerate pass into -SkipNames so the two passes
+      # agree on which objects to skip even if tenant state shifted
+      # between the calls.
+      - name: Apply DLP policies (portal-wins)
+        if: env.DIRECTION_POLICY == 'portal-wins'
+        shell: pwsh
+        env:
+          SKIP_NAMES_JSON: ${{ steps.enumerate.outputs.skip_names_json }}
+        run: |
+          $skipNames = @()
+          if (-not [string]::IsNullOrWhiteSpace($env:SKIP_NAMES_JSON) -and $env:SKIP_NAMES_JSON -ne '[]') {
+            $skipNames = @(ConvertFrom-Json -InputObject $env:SKIP_NAMES_JSON)
+          }
+          $applyArgs = @{
+            DirectionPolicy   = 'portal-wins'
+            Confirm           = $false
+            InformationAction = 'Continue'
+          }
+          if ($skipNames.Count -gt 0) {
+            $applyArgs['SkipNames'] = $skipNames
+          }
+          Write-Host "Applying with -DirectionPolicy portal-wins and -SkipNames count=$($skipNames.Count)."
+          ./scripts/Deploy-DLPPolicies.ps1 @applyArgs
+
+      # Apply pass: repo-wins. No skip list (the contract of repo-wins
+      # is "no shared-drift skip").
+      - name: Apply DLP policies (repo-wins)
+        if: env.DIRECTION_POLICY == 'repo-wins'
+        shell: pwsh
+        run: |
+          Write-Host '::warning::repo-wins: tenant fields will be OVERWRITTEN with YAML values for every shared-property drift on DLP policies or rules. Each overwrite emits a Write-Warning naming the object (kind + name) and fields. See ADR 0029.'
+          ./scripts/Deploy-DLPPolicies.ps1 `
+            -DirectionPolicy repo-wins `
+            -Confirm:$false `
+            -InformationAction Continue
+
+      # Re-export tenant state and stage it as an artifact for the
+      # drift-back-pr job. Runs only when portal-wins skipped at
+      # least one object, so unchanged tenants do not pay the cost.
+      # DLP policies + rules carry only policy/rule names, workload-
+      # location buckets (including a Microsoft Fabric / Power BI
+      # workspace GUID scope), label references, advancedRule bodies,
+      # and SIT GUIDs -- nothing that resolves to a real tenant
+      # identifier, and Deploy-DLPPolicies.ps1 exposes no
+      # -RedactIdentities switch (matches the rationale in the
+      # sync-dlp-from-tenant.yml header).
+      - name: Re-export tenant DLP policies for drift-back PR
+        if: success() && env.DIRECTION_POLICY == 'portal-wins' && steps.enumerate.outputs.skip_count != '0'
+        shell: pwsh
+        run: |
+          ./scripts/Deploy-DLPPolicies.ps1 `
+            -ExportCurrentState `
+            -Force `
+            -Path 'data-plane/dlp/policies.yaml'
+
+      - name: Upload drift-back YAML artifact
+        if: success() && env.DIRECTION_POLICY == 'portal-wins' && steps.enumerate.outputs.skip_count != '0'
+        # actions/upload-artifact@v4.6.2 (current major)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dlp-policies-drift-back-${{ github.run_id }}
+          path: data-plane/dlp/policies.yaml
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Restore Key Vault network defaults
+        if: always() && steps.kv-open.outputs.opened == 'true'
+        shell: pwsh
+        run: |
+          az keyvault update `
+            --name $env:KEY_VAULT_NAME `
+            --public-network-access Disabled `
+            --default-action Deny `
+            --only-show-errors `
+            -o none
+
+  drift-back-pr:
+    name: Open drift-back PR for skipped DLP objects
+    needs: apply
+    # Runs only on the happy path of a portal-wins dispatch that
+    # actually skipped at least one object. apply.outputs.skip_count
+    # is the marker count parsed from the enumerate pass; for audit /
+    # repo-wins / non-portal-wins push events it is '0' by default
+    # (see jobs.apply.outputs.skip_count).
+    if: |
+      needs.apply.result == 'success' &&
+      needs.apply.outputs.direction_policy == 'portal-wins' &&
+      needs.apply.outputs.skip_count != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # peter-evans/create-pull-request pushes the drift-back branch.
+      pull-requests: write  # peter-evans/create-pull-request opens / updates the PR.
+    env:
+      SKIP_COUNT: ${{ needs.apply.outputs.skip_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Overlay the re-exported tenant YAML (produced by the apply
+      # job) onto the working tree before invoking the PR action.
+      # The artifact contains exactly one file at its tracked path.
+      - name: Download drift-back YAML
+        # actions/download-artifact@v4.3.0 (current major)
+        uses: actions/download-artifact@v4
+        with:
+          name: dlp-policies-drift-back-${{ github.run_id }}
+          path: data-plane/dlp
+
+      - name: Open or update drift-back PR
+        id: cpr
+        # peter-evans/create-pull-request@v8.1.1.
+        # SHA shared with .github/workflows/sync-dlp-from-tenant.yml,
+        # .github/workflows/sync-auto-label-policies-from-tenant.yml
+        # (PR #477), and .github/workflows/deploy-auto-label-policies.yml
+        # (PR #477). Verified 2026-07-12 against
+        # https://github.com/peter-evans/create-pull-request/releases/tag/v8.1.1
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1
+        with:
+          add-paths: data-plane/dlp/policies.yaml
+          # Distinct from auto/dlp-drift-sync (used by the scheduled
+          # sync-dlp-from-tenant.yml) so an apply-time drift-back PR and
+          # the daily scheduled drift-back PR cannot fight over the same
+          # branch and PR.
+          branch: auto/dlp-portal-wins-drift
+          base: main
+          delete-branch: false
+          title: 'chore(data-plane): drift-back sync DLP policies skipped under portal-wins'
+          commit-message: |
+            chore(data-plane): drift-back sync DLP policies skipped under portal-wins
+
+            Automated drift-back from a portal-wins dispatch of
+            deploy-dlp.yml that skipped one or more shared-property
+            drifts on DLP policies and/or rules per ADR 0029.
+            Re-exports the live Microsoft Purview Data Loss Prevention
+            (DLP) policy set (and rules) in tenant
+            contoso.onmicrosoft.com into data-plane/dlp/policies.yaml
+            so the repo can be brought back in sync with the tenant.
+
+            See: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-dlpcompliancepolicy
+            ADR: docs/adr/0029-source-of-truth-direction-policy.md
+          labels: |
+            needs-review
+            squad:automation-engineer
+          body: |
+            Automated drift-back from `.github/workflows/deploy-dlp.yml`.
+
+            A `direction_policy=portal-wins` dispatch (per
+            [ADR 0029](../blob/main/docs/adr/0029-source-of-truth-direction-policy.md))
+            skipped **${{ env.SKIP_COUNT }}** shared object(s)
+            (DLP policies and/or rules) because the tenant value
+            disagreed with the committed YAML. This PR re-exports the
+            live tenant state via
+            `scripts/Deploy-DLPPolicies.ps1 -ExportCurrentState`
+            so the repo can be brought back in sync.
+
+            ## Review checklist
+
+            - [ ] **Decide which side wins.** If the tenant value is
+                  the intended one, **merge this PR** -- the next
+                  push run on `main` will then pass cleanly. If the
+                  YAML value is the intended one, **close this PR**
+                  and re-dispatch `deploy-dlp.yml` with
+                  `direction_policy=repo-wins` and
+                  `confirm_overwrite=overwrite portal` to push the
+                  YAML to the tenant. See
+                  [`docs/runbooks/dlp-end-to-end-smoke.md`](../blob/main/docs/runbooks/dlp-end-to-end-smoke.md).
+            - [ ] No real tenant or principal identifiers leaked into
+                  the diff (SIT GUIDs in rule conditions and the
+                  Microsoft Fabric / Power BI workspace GUID scope may
+                  be tenant-real -- verify they match the synthetic
+                  placeholders documented in
+                  [`.github/instructions/sample-data.instructions.md`](../blob/main/.github/instructions/sample-data.instructions.md)).
+
+            ## Notes
+
+            - This PR was opened by the GitHub Actions
+              `GITHUB_TOKEN`, so the PR-open event does **not**
+              automatically dispatch other workflows
+              (`validate.yml` etc.). To run validation, **close
+              and reopen this PR**, or push an empty commit to the
+              `auto/dlp-portal-wins-drift` branch.
+            - Trigger: run [${{ github.run_id }}](../actions/runs/${{ github.run_id }})
+              of `${{ github.workflow }}` on
+              `${{ github.ref_name }}` at `${{ github.sha }}`.
+
+            Refs: ADR 0029

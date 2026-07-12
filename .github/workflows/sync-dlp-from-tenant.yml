@@ -1,0 +1,276 @@
+name: sync-dlp-from-tenant
+
+# Drift-back companion to deploy-dlp.yml. Detects portal-only edits to
+# the Microsoft Purview Data Loss Prevention (DLP) policy set (and their
+# rules) in the contoso.onmicrosoft.com tenant and opens (or refreshes)
+# a pull request that re-exports tenant state into
+# data-plane/dlp/policies.yaml. The PR is reviewed by the lab owner;
+# merging it restores the repo as source of truth, after which
+# deploy-dlp.yml's direction-policy contract (ADR 0029) keeps tenant
+# and YAML converged on the next dispatch.
+#
+# Sibling of sync-auto-label-policies-from-tenant.yml (PR #477),
+# sync-label-policies-from-tenant.yml (PR #182), and
+# sync-labels-from-tenant.yml (PR #149). Where those workflows own the
+# sensitivity-label auto-apply rules, publish bindings, and taxonomy
+# respectively, this workflow owns the DLP policy + rule surface
+# reconciled by scripts/Deploy-DLPPolicies.ps1 via the
+# *-DlpCompliancePolicy / *-DlpComplianceRule cmdlet family.
+#
+# Read-only against the tenant. This workflow never invokes the apply
+# path of Deploy-DLPPolicies.ps1; it only runs -ExportCurrentState.
+# The apply path lives in deploy-dlp.yml and is gated by its own
+# ADR 0029 direction-policy contract.
+#
+# No -VerifyPublished: unlike the auto-label surface, DLP has no
+# ADR-0016-section-9 published-runtime Status contract, and
+# Deploy-DLPPolicies.ps1 exposes no -VerifyPublished switch.
+#
+# No -RedactIdentities: Deploy-DLPPolicies.ps1 exposes no
+# -RedactIdentities switch. policies.yaml carries only policy/rule
+# names, workload-location buckets (including a Microsoft Fabric /
+# Power BI workspace GUID used as a DLP scope), sensitivity-label
+# references, ADR 0031 advancedRule bodies, and SIT (sensitive-
+# information-type) GUIDs. Nothing in the exported shape resolves to a
+# real user, principal, or tenant identifier.
+#
+# Federated credential reuse: the gh-oidc-purview-data-plane app's
+# federated credential is scoped to
+# `repo:contoso/Purview-as-Code-Generic:environment:lab`
+# (per ADR 0010). Because this job declares `environment: lab`, no new
+# federated credential subject is required for the schedule trigger.
+#
+# Key Vault access: the runner principal signs the IPPS client_assertion
+# JWT via `az keyvault key sign` against kv-contoso-lab-01. The vault
+# is private-network by default; the workflow temp-opens its public
+# endpoint for the duration of the export and restores it via an
+# `if: always()` step. The 30-second sleep matches the sibling sync
+# workflows; the 25-second value used historically has been flaky.
+#
+# Branch isolation: drift-back PR lands on `auto/dlp-drift-sync`. The
+# companion apply-time auto-PR opened by deploy-dlp.yml lands on
+# `auto/dlp-portal-wins-drift` -- distinct branches so a scheduled sync
+# and an apply-time drift-back cannot fight over the same PR.
+#
+# References (Microsoft Learn, GitHub Docs, action upstream):
+#   https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+#   https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust
+#   https://learn.microsoft.com/en-us/powershell/exchange/connect-to-scc-powershell
+#   https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-dlpcompliancepolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-dlpcompliancerule
+#   https://learn.microsoft.com/en-us/purview/dlp-learn-about-dlp
+#   https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
+#   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+#   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+#   https://github.com/peter-evans/create-pull-request
+
+on:
+  schedule:
+    # Daily at 07:00 UTC. Offset one hour after the 06:00 slot used by
+    # the sensitivity-label sync crons (sync-labels-from-tenant.yml,
+    # sync-label-policies-from-tenant.yml,
+    # sync-auto-label-policies-from-tenant.yml) so the DLP drift-back
+    # runs after the label family, not concurrently with it. GitHub
+    # Actions runs scheduled workflows independently per workflow file,
+    # so collisions are only visible in the UI, not in execution.
+    # Cron grammar:
+    # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write           # OIDC token for azure/login@v2.
+  contents: write           # peter-evans/create-pull-request pushes the auto/dlp-drift-sync branch.
+  pull-requests: write      # peter-evans/create-pull-request opens / updates the PR.
+
+concurrency:
+  group: sync-dlp-lab
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync DLP policies from tenant
+    runs-on: ubuntu-latest
+    environment: lab
+    env:
+      KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install PowerShell modules
+        shell: pwsh
+        run: |
+          Install-Module powershell-yaml -Force -Scope CurrentUser
+          # Connect-IPPSSession -AccessToken requires ExchangeOnlineManagement
+          # v3.8.0-Preview1+; -AllowPrerelease until GA. Mirrors
+          # sync-auto-label-policies-from-tenant.yml.
+          # Reference: https://learn.microsoft.com/en-us/powershell/exchange/exchange-online-powershell-v2
+          Install-Module ExchangeOnlineManagement -Force -Scope CurrentUser -AllowPrerelease
+
+      - name: Temporarily allow Key Vault public access
+        id: kv-open
+        shell: pwsh
+        run: |
+          if (-not $env:KEY_VAULT_NAME) {
+            throw "vars.KEY_VAULT_NAME is not set on the lab environment. Set it before re-running."
+          }
+          az keyvault update `
+            --name $env:KEY_VAULT_NAME `
+            --public-network-access Enabled `
+            --default-action Allow `
+            --only-show-errors `
+            -o none
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "opened=true"
+          # Wait for the network rule change to propagate before the
+          # first data-plane call. 30s matches the sibling sync
+          # workflows; 25s has been flaky in local lab smoke runs.
+          Start-Sleep -Seconds 30
+
+      - name: Export tenant DLP policies into tracked YAML
+        shell: pwsh
+        run: |
+          # -ExportCurrentState rewrites only the policies / rules
+          # blocks of the target file (header comment is preserved).
+          # No -RedactIdentities: Deploy-DLPPolicies.ps1 exposes no such
+          # switch and policies.yaml has no fields that resolve to real
+          # tenant identifiers (see header comment). -Force is required
+          # because the file already declares policies and/or rules.
+          ./scripts/Deploy-DLPPolicies.ps1 `
+            -ExportCurrentState `
+            -Force `
+            -Path 'data-plane/dlp/policies.yaml'
+
+      - name: Filter cosmetic-only export diff (issue #508)
+        shell: pwsh
+        run: |
+          # The export round-trip via ConvertTo-Yaml strips inline YAML
+          # comments and blank lines below the line-splice cut point;
+          # that is a deferred defect class tracked separately. We do
+          # not want it to open a drift-back PR every scheduled run, so
+          # we inspect the diff here and revert the file when the only
+          # changes are blank lines and comment-only lines. Tracked-field
+          # changes (any other line) flow through unchanged and
+          # peter-evans/create-pull-request opens the PR as before.
+          # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_regular_expressions
+          $path = 'data-plane/dlp/policies.yaml'
+          $diff = git diff -U0 -- $path
+          if (-not $diff) {
+            Write-Host '::notice::No diff after export.'
+            return
+          }
+          $meaningful = $false
+          foreach ($line in ($diff -split "`n")) {
+            if ($line -notmatch '^[-+]') { continue }
+            if ($line -match '^(---|\+\+\+)') { continue }
+            $payload = $line.Substring(1)
+            if ($payload -match '^\s*$') { continue }
+            if ($payload -match '^\s*#') { continue }
+            $meaningful = $true
+            break
+          }
+          if (-not $meaningful) {
+            Write-Host '::notice::Diff is cosmetic-only (blank lines + YAML comments). Reverting export and skipping drift-back PR per issue #508.'
+            git checkout HEAD -- $path
+          } else {
+            Write-Host '::notice::Meaningful drift detected. Proceeding to drift-back PR.'
+          }
+
+      - name: Open or update drift-back PR
+        id: cpr
+        # peter-evans/create-pull-request@v8.1.1
+        # SHA reused from sync-auto-label-policies-from-tenant.yml (PR #477),
+        # sync-label-policies-from-tenant.yml (PR #182), and
+        # sync-labels-from-tenant.yml (PR #149); re-verified 2026-07-12
+        # against https://github.com/peter-evans/create-pull-request/releases/tag/v8.1.1
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1
+        with:
+          add-paths: data-plane/dlp/policies.yaml
+          branch: auto/dlp-drift-sync
+          base: main
+          delete-branch: false
+          title: 'chore(data-plane): sync DLP policies from tenant'
+          commit-message: |
+            chore(data-plane): sync DLP policies from tenant
+
+            Automated drift-back from sync-dlp-from-tenant.yml.
+            Re-exports the live Microsoft Purview Data Loss Prevention
+            (DLP) policy set (and rules) in tenant
+            contoso.onmicrosoft.com into data-plane/dlp/policies.yaml
+            so the repo remains source of truth.
+
+            See: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-dlpcompliancepolicy
+          labels: |
+            needs-review
+            squad:automation-engineer
+          body: |
+            Automated drift-back from `.github/workflows/sync-dlp-from-tenant.yml`.
+
+            The live Microsoft Purview Data Loss Prevention (DLP) policy
+            set (and rules) in tenant `contoso.onmicrosoft.com` no longer
+            matches `data-plane/dlp/policies.yaml`. This PR re-exports the
+            tenant state via
+            `scripts/Deploy-DLPPolicies.ps1 -ExportCurrentState`
+            so the repo regains source-of-truth before the next
+            `deploy-dlp.yml` apply.
+
+            ## Review checklist
+
+            - [ ] The diff reflects an intended portal edit. If the
+                  portal edit was a mistake, **close this PR** and
+                  revert the edit in the Microsoft Purview portal
+                  instead.
+            - [ ] `advancedRule` bodies in the exported diff are the
+                  intended ADR 0031 shape and were not re-serialized
+                  (byte-identity is a tracked-field guarantee).
+            - [ ] SIT (sensitive-information-type) GUID references and
+                  workload-location buckets (including the Microsoft
+                  Fabric / Power BI workspace GUID scope) resolve to
+                  real tenant objects and are not stale.
+            - [ ] After merge, the next `deploy-dlp.yml` push run on
+                  `main` should report 0 drift under
+                  `direction_policy=portal-wins`.
+
+            ## Notes
+
+            - This workflow runs as the GitHub Actions `GITHUB_TOKEN`,
+              so the PR open event will not automatically dispatch
+              other workflows (`validate.yml` etc.). To re-run
+              validation, close and reopen the PR, or push an empty
+              commit to the `auto/dlp-drift-sync` branch.
+            - Trigger: `${{ github.event_name }}` (run id `${{ github.run_id }}`).
+
+      - name: Restore Key Vault network defaults
+        if: always() && steps.kv-open.outputs.opened == 'true'
+        shell: pwsh
+        run: |
+          az keyvault update `
+            --name $env:KEY_VAULT_NAME `
+            --public-network-access Disabled `
+            --default-action Deny `
+            --only-show-errors `
+            -o none
+
+      - name: Summarize result
+        if: always()
+        shell: pwsh
+        env:
+          PR_OPERATION: ${{ steps.cpr.outputs.pull-request-operation }}
+          PR_URL: ${{ steps.cpr.outputs.pull-request-url }}
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PR_OPERATION)) {
+            Write-Host "::notice::Drift-back step did not produce a PR outcome (the job failed before reaching peter-evans/create-pull-request)."
+          } elseif ($env:PR_OPERATION -eq 'none') {
+            Write-Host "::notice::No drift detected. Tenant matches data-plane/dlp/policies.yaml."
+          } else {
+            Write-Host ("::notice::Drift PR {0}: #{1} {2}" -f $env:PR_OPERATION, $env:PR_NUMBER, $env:PR_URL)
+          }
