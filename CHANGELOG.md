@@ -25,7 +25,12 @@ To add an entry:
 
 ### Documentation
 
+- **docs:** point the DLP solution guide and end-to-end smoke runbook at the new `deploy-dlp.yml` / `sync-dlp-from-tenant.yml` workflows and drop the "no dedicated forward workflow" gap (#70)
 - **docs:** add ADR 0016 §12 (export-scope exclusion + NoChange-only location semantics), a round-trip/scope section in the auto-label-policies solution guide, and export-scope notes in the YAML header (#57)
+
+### CI/CD
+
+- **ci:** add DLP companion workflows `sync-dlp-from-tenant.yml` (scheduled reverse drift-back, `-ExportCurrentState`) and `deploy-dlp.yml` (isolated forward apply with the ADR 0029 enumerate/apply/drift-back direction-policy contract), closing the Tier-1 loop for the Data Loss Prevention surface per the companion-workflow rule in `.github/instructions/github-actions.instructions.md` (#70)
 
 ## 2026-07-11
 
