@@ -315,33 +315,43 @@ $rulesUsingAdvancedRule = Select-String `
 
 ### 10. CI workflow exercises the DLP reconciler
 
-The workflow [`deploy-data-plane.yml`](../../.github/workflows/deploy-data-plane.yml)
-includes a `Deploy DLP policies` step inside the Key Vault firewall
-window (shipped under issue #562). The step reads three dispatch
-inputs that thread the ADR 0029 contract through to
-`Deploy-DLPPolicies.ps1`:
+Two CI paths now invoke `Deploy-DLPPolicies.ps1`:
 
-- `dlp_direction_policy` — `audit` / `portal-wins` (default) / `repo-wins`.
-- `confirm_overwrite_dlp` — typed `overwrite portal` token, gates `repo-wins`.
-- `skip_names_dlp` — optional comma list passed through to `-SkipNames`.
+- [`deploy-dlp.yml`](../../.github/workflows/deploy-dlp.yml) — the
+  dedicated per-domain forward-apply workflow. Runs the surface in
+  isolation with the full ADR 0029 enumerate → apply → drift-back
+  ceremony (default `direction_policy=portal-wins`), plus a `push:`
+  trigger on the DLP data-plane paths. Preferred for DLP-only applies.
+- [`deploy-data-plane.yml`](../../.github/workflows/deploy-data-plane.yml) —
+  the monolithic `workflow_dispatch:`-only path that still carries a
+  `Deploy DLP policies` step inside the Key Vault firewall window
+  (shipped under issue #562); it reconciles every data-plane surface in
+  one run.
 
-The workflow itself stays `workflow_dispatch:` only (no `push:`
-trigger) at this revision; a per-domain `push:` + `paths:` story is
-out of scope for #562 and tracked separately when it lands.
+The reverse leg — [`sync-dlp-from-tenant.yml`](../../.github/workflows/sync-dlp-from-tenant.yml) —
+runs `-ExportCurrentState` on a daily schedule (07:00 UTC) plus
+`workflow_dispatch:` and opens a drift-back PR when the tenant has
+moved ahead of the repo.
+
+The dedicated workflow reads two dispatch inputs that thread the
+ADR 0029 contract through to `Deploy-DLPPolicies.ps1`:
+
+- `direction_policy` — `audit` / `portal-wins` (default) / `repo-wins`.
+- `confirm_overwrite` — typed `overwrite portal` token, gates `repo-wins`.
 
 ```pwsh
 # Smoke the audit branch end-to-end against the lab tenant.
-gh workflow run deploy-data-plane.yml `
+gh workflow run deploy-dlp.yml `
   --ref main `
-  --field dlp_direction_policy=audit
+  --field direction_policy=audit
 ```
 
-**Expected**: workflow run succeeds. The `Validate DLP dispatch
-inputs` step logs `dlp_direction_policy = 'audit'` and exits 0; the
-`Deploy DLP policies` step emits the `[ADR0029-AUDIT]` marker and the
-21-row NoChange plan against the steady-state tenant. To exercise the
-destructive branch under typed confirmation, dispatch with
-`dlp_direction_policy=repo-wins` and `confirm_overwrite_dlp='overwrite portal'`.
+**Expected**: workflow run succeeds. The `Validate dispatch inputs`
+step logs `direction_policy = 'audit'` and exits 0; the read-only plan
+pass emits the `[ADR0029-AUDIT]` marker and the 21-row NoChange plan
+against the steady-state tenant. To exercise the destructive branch
+under typed confirmation, dispatch with `direction_policy=repo-wins`
+and `confirm_overwrite='overwrite portal'`.
 
 **Evidence**: link to the successful workflow run.
 
@@ -372,14 +382,6 @@ durable artifacts.
 
 ## Known gaps surfaced by this smoke
 
-- **No dedicated `deploy-dlp.yml` workflow.** §5.8 issue [#463](../../issues/463)
-  refactored the label family into per-domain workflows (`deploy-labels.yml`,
-  `deploy-label-policies.yml`, `deploy-auto-label-policies.yml`) with full
-  ADR 0029 plumbing (enumerate + apply + drift-back PR). DLP currently
-  rides on the monolithic `deploy-data-plane.yml` via the step added under
-  [#562](../../issues/562); a dedicated `deploy-dlp.yml` with the same
-  multi-pass enumerate / apply / drift-back shape is a separate follow-up
-  to file if and when it's needed.
 - **`-PruneMissing` AC wording on #560 is ambiguous.** Step 8
   documents the semantically correct version. The next smoke run can
   follow this runbook verbatim; the issue body is one-time only.
@@ -391,6 +393,10 @@ durable artifacts.
 - [ADR 0032 — DLP generic Locations YAML shape](../adr/0032-dlp-generic-locations-shape.md)
 - [ADR 0033 — DLP rule tracked-field expansion](../adr/0033-dlp-rule-tracked-field-expansion.md)
 - [`scripts/Deploy-DLPPolicies.ps1`](../../scripts/Deploy-DLPPolicies.ps1)
+- [`.github/workflows/deploy-dlp.yml`](../../.github/workflows/deploy-dlp.yml) —
+  isolated forward-apply workflow (ADR 0029 direction-policy contract)
+- [`.github/workflows/sync-dlp-from-tenant.yml`](../../.github/workflows/sync-dlp-from-tenant.yml) —
+  scheduled reverse drift-back workflow
 - [`data-plane/dlp/policies.yaml`](../../data-plane/dlp/policies.yaml)
 - [`data-plane/dlp/policies.schema.json`](../../data-plane/dlp/policies.schema.json)
 - [`labels-direction-policy.md`](labels-direction-policy.md) — runbook for the

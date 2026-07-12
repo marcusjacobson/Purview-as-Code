@@ -72,20 +72,37 @@ The script resolves `-VaultName`, `-CertificateName`, `-DataPlaneAppDisplayName`
    ./scripts/Deploy-DLPPolicies.ps1 -DirectionPolicy repo-wins -WhatIf
    ```
 
-1. Apply through the data-plane workflow after the PR is reviewed.
+1. Apply through the data-plane workflow after the PR is reviewed. The
+   dedicated [`deploy-dlp.yml`](../../../.github/workflows/deploy-dlp.yml)
+   workflow runs the DLP surface in isolation with the full ADR 0029
+   enumerate → apply → drift-back ceremony, and also runs automatically
+   on `push` to `main` for the DLP data-plane paths.
 
    ```pwsh
-   gh workflow run deploy-data-plane.yml `
-     -f dlp_direction_policy=portal-wins `
-     -f skip_names_dlp=''
+   gh workflow run deploy-dlp.yml `
+     -f direction_policy=portal-wins
    ```
 
    For `repo-wins`, the workflow requires the typed confirmation token:
 
    ```pwsh
-   gh workflow run deploy-data-plane.yml `
-     -f dlp_direction_policy=repo-wins `
-     -f confirm_overwrite_dlp='overwrite portal'
+   gh workflow run deploy-dlp.yml `
+     -f direction_policy=repo-wins `
+     -f confirm_overwrite='overwrite portal'
+   ```
+
+   The monolithic [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml)
+   still carries a `Deploy DLP policies` step (inputs `dlp_direction_policy`,
+   `confirm_overwrite_dlp`, `skip_names_dlp`) when you need to reconcile
+   every data-plane surface in one run.
+
+1. Detect portal drift with the reverse companion
+   [`sync-dlp-from-tenant.yml`](../../../.github/workflows/sync-dlp-from-tenant.yml),
+   which runs daily (07:00 UTC) plus on demand and opens a drift-back PR
+   when the tenant has moved ahead of the repo.
+
+   ```pwsh
+   gh workflow run sync-dlp-from-tenant.yml
    ```
 
 1. Verify with the [DLP end-to-end smoke runbook](../../runbooks/dlp-end-to-end-smoke.md). At minimum, rerun `-WhatIf` and confirm the plan returns only `NoChange` or documented `Skip` rows.
