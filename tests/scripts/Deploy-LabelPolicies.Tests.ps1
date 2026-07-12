@@ -480,6 +480,30 @@ Describe 'OutlookDefaultLabel advanced-setting tracking (issue #488; ADR 0030 ro
             $missing.Count | Should -Be 0
             $hash.advancedSettings.Keys | Should -Not -Contain 'OutlookDefaultLabel'
         }
+
+        It "treats the 'None' sentinel as no-default-label, not a label reference (<Casing>)" -TestCases @(
+            @{ Casing = 'none' }
+            @{ Casing = 'None' }
+            @{ Casing = 'NONE' }
+        ) {
+            param($Casing)
+            # 'None' is the documented "no default label" sentinel. Any
+            # casing must normalize to the lowercase 'none' the tenant read
+            # stores, with zero missing refs (never Blocked as a label).
+            $hash = @{ advancedSettings = @{ OutlookDefaultLabel = $Casing } }
+            $missing = Resolve-DesiredAdvancedSettingLabel -Hash $hash -Lookup $script:LabelLookup
+            $missing.Count | Should -Be 0
+            $hash.advancedSettings['OutlookDefaultLabel'] | Should -Be 'none'
+        }
+
+        It 'honors the None sentinel uniformly across the label-reference keys' {
+            # Same guard applies to every key in
+            # LabelReferenceAdvancedSettingsKeys, not just OutlookDefaultLabel.
+            $hash = @{ advancedSettings = @{ teamworkdefaultlabelid = 'None' } }
+            $missing = Resolve-DesiredAdvancedSettingLabel -Hash $hash -Lookup $script:LabelLookup
+            $missing.Count | Should -Be 0
+            $hash.advancedSettings['teamworkdefaultlabelid'] | Should -Be 'none'
+        }
     }
 
     Context 'Compare-PolicyHash detects OutlookDefaultLabel drift across the four quadrants' {
