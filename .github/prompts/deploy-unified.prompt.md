@@ -20,7 +20,24 @@ below before proceeding.
 2. Read the target Purview account (`purviewAccountName`) from
    [`infra/parameters/lab.yaml`](../../infra/parameters/lab.yaml). Echo the value but do not echo
    full resource IDs.
-3. Confirm the active branch is a feature branch (not `main`).
+3. **Confirm the account is a real, owner-confirmed governance target before probing its shape.**
+   Run the read-only [`/discover-purview-account`](discover-purview-account.prompt.md) gate
+   ([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md)) for that `purviewAccountName`.
+   Proceed only on a **Pass** whose outcome is **a confirmed unified account** (tenant-level, or an
+   account exposing only the unified data plane — row 3 of that prompt's Step 5 matrix). On any
+   **Stop** outcome — a pay-as-you-go metering decoy, not-found-in-ARM / unconfirmed, not yet
+   created, or a confirmed classic account in a subscription or tenant the sign-in cannot reach —
+   stop here and follow that prompt's owner-action guidance; do not continue to the Step 1
+   account-shape gate or any unified reconciler. If the gate passes as a **confirmed classic**
+   account, this is the wrong track: redirect to [`/deploy-datamap`](deploy-datamap.prompt.md).
+4. Confirm the active branch is a feature branch (not `main`).
+
+> **The two gates layer; they do not duplicate.** This ADR 0048 precondition answers *"is this a
+> real, owner-confirmed, non-decoy governance target?"* by enumerating ARM and confirming with the
+> owner. The Step 1 ADR 0047 gate below answers a different question — *"which data plane does this
+> account speak?"* — by issuing two data-plane GETs. `Get-PurviewAccountShape.ps1` never touches
+> ARM, so it structurally cannot detect a pay-as-you-go metering decoy or an unconfirmed
+> `purview-contoso-lab` placeholder. Run both, in this order.
 
 ## Step 1 — Account-shape gate (fail closed)
 

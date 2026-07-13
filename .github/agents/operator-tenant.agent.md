@@ -212,15 +212,19 @@ Once the target is identified, record whether it is **classic** or **unified** a
 - **Classic** (answers on the Atlas Data Map host `{account}.purview.azure.com`) → proceed; the
   shipped `Deploy-*.ps1` reconcilers and the [`/deploy-datamap`](../prompts/deploy-datamap.prompt.md)
   export-first onboarding apply.
-- **Unified** (tenant-level, or a new account exposing only the unified data plane) → **flag that
-  classic `Deploy-*.ps1` onboarding is blocked** pending the
-  [ADR 0047](../../docs/adr/0047-unified-catalog-preview-api-coexistence.md) unified reconcilers, and
-  do not imply the `/deploy-datamap` export-first flow will work against it.
+- **Unified** (tenant-level, or a new account exposing only the unified data plane) → route to
+  [`/deploy-unified`](../prompts/deploy-unified.prompt.md), which runs the
+  [ADR 0047](../../docs/adr/0047-unified-catalog-preview-api-coexistence.md) unified reconcilers
+  behind its own account-shape gate. **The classic `Deploy-*.ps1` reconcilers and the
+  `/deploy-datamap` export-first onboarding do not apply to a unified account** — do not imply that
+  flow will work against it.
 
 Learn documents no procedure for programmatically detecting classic vs unified as of 2026-07-06, so
-this is an **owner-confirmed** determination (or, later, probe-assisted once the ADR 0047
-reconcile-time account-shape probe ships) — never inferred from a host string
-([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 5).
+this remains an **owner-confirmed** determination — never inferred from a host string
+([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) §Decision item 5). The ADR 0047
+reconcile-time account-shape probe has since shipped as
+[`scripts/Get-PurviewAccountShape.ps1`](../../scripts/Get-PurviewAccountShape.ps1) and may be run to
+**corroborate** the owner's answer — it never replaces their confirmation.
 
 ### 1a.5 — Never write a guessed name
 
@@ -231,7 +235,7 @@ outcome matrix ([ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md
 |---|---|---|
 | Confirmed classic governance account | Write the confirmed name to all surfaces | Proceed with classic `Deploy-*.ps1` / `/deploy-datamap` |
 | Confirmed classic account in a sub/tenant the sign-in can't enumerate | Write the owner-confirmed name | Deploy precondition: the deploy identity must reach that sub/tenant first |
-| Confirmed unified (tenant-level, or unified-only account) | **Leave the placeholder**; do not write a classic name | Classic `Deploy-*.ps1` blocked pending ADR 0047 reconcilers |
+| Confirmed unified (tenant-level, or unified-only account) | **Leave the placeholder**; do not write a classic name | Route to [`/deploy-unified`](../prompts/deploy-unified.prompt.md); classic `Deploy-*.ps1` / `/deploy-datamap` do not apply |
 | Only a pay-as-you-go metering resource discovered | Treat as not-found; **leave the placeholder** | Never select the meter |
 | Not yet created | **Leave the placeholder** | Owner action: create the account, then re-run discovery |
 
