@@ -225,7 +225,13 @@
       * Pass `-SkipSchemaValidation` to bypass the check in emergency
         scenarios (e.g. fixing the schema itself). Do not use in CI.
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Apply')]
+# ConfirmImpact = 'High' is load-bearing, not decorative. PowerShell only
+# raises a ShouldProcess confirmation when ConfirmImpact >= $ConfirmPreference,
+# and $ConfirmPreference defaults to 'High'. This script shipped 'Medium'
+# until ADR 0052, so every $PSCmdlet.ShouldProcess(...) call below returned
+# $true without ever prompting. Do not lower it back to 'Medium'.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -1094,6 +1100,14 @@ Import-Module $module -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so the prune and repo-wins overwrite branches
+# cannot be entered unattended from a local terminal.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -1759,6 +1773,10 @@ try {
     # arbitrate). Audit mode is handled by a separate short-circuit below
     # and does not enter this pass.
     # Reference: docs/adr/0029-source-of-truth-direction-policy.md
+    # ADR 0052: names of the shared labels a repo-wins run would overwrite.
+    # Collected here (the only place the decision is made) and consumed by
+    # the destructive-operation confirmation gate below.
+    $repoWinsOverwrites = New-Object 'System.Collections.Generic.List[string]'
     if ($DirectionPolicy -ne 'audit') {
         $skipDecisions = New-Object 'System.Collections.Generic.List[object]'
         $keptPolicyPlan = @()
@@ -1787,6 +1805,7 @@ try {
             # ADR 0029 §"repo-wins mode".
             $fieldsText = @($p.Fields) -join ','
             Write-Warning ("repo-wins overwriting tenant on label '{0}' fields: {1}" -f $displayName, $fieldsText)
+            if ($DirectionPolicy -eq 'repo-wins') { $repoWinsOverwrites.Add($displayName) }
             $keptPolicyPlan += $p
         }
         if ($skipDecisions.Count -gt 0) {
@@ -1898,6 +1917,54 @@ try {
         Write-Information '[ADR0029-AUDIT] DirectionPolicy=audit — no writes would have fired. Plan above is read-only.' -InformationAction Continue
         $plan.Clear()
         $orphans = @()
+    }
+
+    # ---- ADR 0052: destructive-operation confirmation gate ----
+    # The last point before Phase 2/3 at which nothing has been written.
+    # Both destructive branches are gated here, once per run, via
+    # $PSCmdlet.ShouldContinue() -- NOT ShouldProcess(). ShouldContinue
+    # prompts unconditionally; ShouldProcess only prompts when
+    # ConfirmImpact >= $ConfirmPreference, which is precisely the
+    # comparison that silently defeated this gate before issue #85.
+    #
+    # The $yesToAll / $noToAll pair is shared by both gates, so a run that
+    # trips the overwrite gate AND the prune gate prompts once, not twice,
+    # and never once per object.
+    #
+    # Suppressed by -Force, by an explicit -Confirm:$false (the CI path --
+    # every workflow apply step binds it), and skipped under -WhatIf so a
+    # dry run still previews the deletes without blocking on input.
+    # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+    $yesToAll = $false
+    $noToAll = $false
+    $confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+    $confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+    $gateArgs = @{
+        Cmdlet       = $PSCmdlet
+        Caption      = 'Destructive operation (ADR 0052)'
+        YesToAll     = ([ref]$yesToAll)
+        NoToAll      = ([ref]$noToAll)
+        Force        = $Force.IsPresent
+        IsWhatIf     = [bool]$WhatIfPreference
+        ConfirmBound = $confirmBound
+        ConfirmValue = $confirmValue
+    }
+
+    if ($DirectionPolicy -eq 'repo-wins' -and $repoWinsOverwrites.Count -gt 0) {
+        $overwriteQuery = "repo-wins will OVERWRITE tenant fields on {0} shared sensitivity label(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+            $repoWinsOverwrites.Count, (($repoWinsOverwrites | Sort-Object) -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
+            throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'
+        }
+    }
+
+    if ($PruneMissing.IsPresent -and $orphans.Count -gt 0) {
+        $orphanNames = @($orphans | ForEach-Object { [string]$_.DisplayName })
+        $pruneQuery = "-PruneMissing will DELETE {0} orphan sensitivity label(s) from the tenant: {1}. This cannot be undone. Continue?" -f `
+            $orphanNames.Count, (($orphanNames | Sort-Object) -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+            throw 'Aborted by operator at the -PruneMissing delete confirmation gate (ADR 0052). No tenant writes were made.'
+        }
     }
 
     # ---- Phase 2: Refresh session before any writes ----

@@ -1,0 +1,85 @@
+---
+# Microsoft File Plan Manager seed content — prune skip baseline (ADR 0035).
+#
+# This file is the single executable home of the 31-name baseline mandated by
+# ADR 0035 (docs/adr/0035-records-seed-content-immovable.md), Decision #3.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# The baseline used to live as the `skip_names_records` workflow_dispatch input
+# default of .github/workflows/deploy-data-plane.yml. ADR 0051 retired that
+# workflow (PR #82), which left the mandated baseline with nowhere executable to
+# live: scripts/Deploy-FilePlan.ps1 has no workflow caller at all, so the ONLY
+# way it runs today is an operator at a local terminal. A workflow input cannot
+# defend a code path that never traverses a workflow. ADR 0052 relocated the
+# baseline here, where the reconciler reads it by default on every run —
+# including the local run that is the only run there is.
+#
+# WHAT IT ACTUALLY PREVENTS
+# -------------------------
+# Precisely: 31 noisy failures. NOT data loss. These 31 objects are UNDELETABLE
+# on the documented IPPS surface — every Remove-FilePlanProperty* call against
+# them fails with ErrorRuleNotFoundException (ADR 0035 §Context records the
+# probe transcripts; issue #582 is the live evidence). A `-PruneMissing` run
+# without this skip list therefore produces 31 `Failed` plan rows, not 31
+# deletions. The real data-loss exposure that ADR 0052's confirmation gate
+# addresses is to OPERATOR-AUTHORED objects, which delete just fine.
+#
+# HOW scripts/Deploy-FilePlan.ps1 CONSUMES IT
+# -------------------------------------------
+# The reconciler UNIONS these names into the effective skip list on every run.
+# Operators may EXTEND the list at the command line via -SkipNames; they cannot
+# SHRINK it from the command line, which is exactly what ADR 0035 Decision #3
+# requires ("Operators may extend the list at dispatch time; they should not
+# shrink it without superseding this ADR"). Shrinking it means editing this
+# file in a reviewed PR — auditable, diffable, and revertible in a single PR,
+# as ADR 0035 §Consequences promised.
+#
+# Source of truth for this list: ADR 0035 §"The 31 seed names".
+# Order: Authorities, Categories, Citations, Departments — alphabetical within
+# each kind. All 31 rows are reproduced verbatim from that table.
+#
+# Note: the skip filter matches on Name, and two names each occur under two
+# kinds — "Legal" (Authority + Department) and "Procurement" (Category +
+# Department). The 31 rows therefore collapse to 29 distinct names. That is
+# harmless for a name-based filter (both kinds are skipped, which is the
+# intent) and is preserved rather than deduplicated so this file stays a
+# row-for-row mirror of the ADR 0035 table.
+#
+# Reference: https://learn.microsoft.com/en-us/purview/file-plan-manager
+seedSkipNames:
+  # Authorities (3)
+  - Business
+  - Legal
+  - Regulatory
+  # Categories (13)
+  - Accounts payable
+  - Accounts receivable
+  - Administration
+  - Compliance
+  - Contracting
+  - Financial statements
+  - Learning and development
+  - Payroll
+  - Planning
+  - Policies and procedures
+  - Procurement
+  - Recruiting and hiring
+  - Research and development
+  # Citations (5)
+  - Commodity Exchange Act
+  - Health Insurance Portability and Accountability Act of 1996
+  - OSHA Injury and Illness Recordkeeping and Reporting Requirements
+  - Sarbanes-Oxley Act of 2002
+  - Truth in Lending Act
+  # Departments (10)
+  - Finance
+  - Human resources
+  - Information technology
+  - Legal
+  - Marketing
+  - Operations
+  - Procurement
+  - Products
+  - Sales
+  - Services

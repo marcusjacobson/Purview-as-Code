@@ -2,8 +2,18 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-07
-- **Gates:** Adds open-question row Q15 in [`docs/project-plan.md`](../project-plan.md) §8 Open-question ADRs. Resolves the implicit Phase 2 gate surfaced during [#582](../../issues/582) (closed `not feasible`). Governs the `Prune` planner branch in [`scripts/Deploy-FilePlan.ps1`](../../scripts/Deploy-FilePlan.ps1) for the 31 named property objects below, and the baseline ``skip_names_records`` workflow input shipped by sibling [#586](../../issues/586). Does not gate any other item.
+- **Gates:** Adds open-question row Q15 in [`docs/project-plan.md`](../project-plan.md) §8 Open-question ADRs. Resolves the implicit Phase 2 gate surfaced during [#582](../../issues/582) (closed `not feasible`). Governs the `Prune` planner branch in [`scripts/Deploy-FilePlan.ps1`](../../scripts/Deploy-FilePlan.ps1) for the 31 named property objects below, and the baseline skip list now carried by [`data-plane/records/seed-skip-names.yaml`](../../data-plane/records/seed-skip-names.yaml) (originally the ``skip_names_records`` workflow input shipped by sibling [#586](../../issues/586); relocated by [ADR 0052](0052-destructive-confirmation-gate-at-script-layer.md) — see the Update note below). Does not gate any other item.
 - **Deciders:** @contoso
+
+> **Update 2026-07-13 (link maintenance, not a decision change — [ADR 0052](0052-destructive-confirmation-gate-at-script-layer.md), issue [#85](https://github.com/marcusjacobson/Purview-as-Code/issues/85)).**
+>
+> This ADR's Decision #3 anchored the 31-name baseline skip list to the `skip_names_records` `workflow_dispatch` input of `.github/workflows/deploy-data-plane.yml`. [ADR 0051](0051-per-solution-workflow-unit-of-data-plane-apply.md) retired that workflow (PR [#82](https://github.com/marcusjacobson/Purview-as-Code/pull/82)), which left the mandated baseline pointing at a file that no longer exists — and therefore living **nowhere executable**. `scripts/Deploy-FilePlan.ps1` has no other workflow caller, so its only remaining caller is an operator at a local terminal, which a workflow input could never defend.
+>
+> **The decision below is unchanged: the 31 seeds are still not deleted, and the baseline skip list is still mandatory.** Only its *home* moved. The baseline now lives in the checked-in data file [`data-plane/records/seed-skip-names.yaml`](../../data-plane/records/seed-skip-names.yaml), which `Deploy-FilePlan.ps1` reads and unions into the effective skip list on **every** run — including the local run that is now the only run there is. Operators may still extend the list via `-SkipNames`; they can no longer shrink it from the command line, which enforces Decision #3's "may extend … should not shrink it without superseding this ADR" mechanically rather than by convention.
+>
+> Three references below are stale as written and are corrected by this note rather than by rewriting the Accepted text: **Decision #3** and the **§"The 31 seed names"** preamble both name `.github/workflows/deploy-data-plane.yml` as the baseline's home; read both as naming `data-plane/records/seed-skip-names.yaml` instead. The `-PruneMissing` bullet in §Consequences ("Harder") likewise names the [#586](../../issues/586) workflow input; the local-run hazard it describes is now closed by the script-side default, and the residual hazard it was really about — an unconfirmed destructive prune — is closed by ADR 0052's confirmation gate.
+>
+> **Precision preserved:** the 31 seeds are **undeletable** (all 31 `Remove-FilePlanProperty*` calls fail with `ErrorRuleNotFoundException` — see §Context). A `-PruneMissing` run without the skip list therefore produces **31 noisy failures, not 31 deletions**. The seeds were never at risk of loss, and this note does not claim otherwise. The genuine data-loss exposure that ADR 0052 addresses is to **operator-authored** objects, which delete normally.
 
 ## Context
 
@@ -69,7 +79,9 @@ Net: **Microsoft Learn does not currently document any path — PowerShell, Micr
 
 2. **The reconciler gains a `-SkipNames` parameter** (shipped by sibling [#584](../../issues/584) as a `chore(scripts)` retrofit, modelled on [#571](../../issues/571) / [#569](../../issues/569)). `-SkipNames` filters both label and property plan rows by `Name`. This ADR does not specify the parameter shape; [#584](../../issues/584) does.
 
-3. **The CI workflow baseline skip list lists all 31 seed names verbatim** (shipped by sibling [#586](../../issues/586) under the `skip_names_records` `workflow_dispatch` input). The `Deploy file plan` step in `.github/workflows/deploy-data-plane.yml` defaults `skip_names_records` to the list in §Consequences below. Operators may extend the list at dispatch time; they should not shrink it without superseding this ADR.
+3. **The baseline skip list lists all 31 seed names verbatim.** Operators may extend the list; they should not shrink it without superseding this ADR.
+
+   > **Corrected 2026-07-13 per [ADR 0052](0052-destructive-confirmation-gate-at-script-layer.md).** As originally written, this decision read: *"(shipped by sibling [#586](../../issues/586) under the `skip_names_records` `workflow_dispatch` input). The `Deploy file plan` step in `.github/workflows/deploy-data-plane.yml` defaults `skip_names_records` to the list in §Consequences below. Operators may extend the list at dispatch time …"* — but [ADR 0051](0051-per-solution-workflow-unit-of-data-plane-apply.md) deleted that workflow. The baseline now lives in [`data-plane/records/seed-skip-names.yaml`](../../data-plane/records/seed-skip-names.yaml) and is unioned into the effective skip list by [`scripts/Deploy-FilePlan.ps1`](../../scripts/Deploy-FilePlan.ps1) on every run. Operators extend it via `-SkipNames`; shrinking it requires editing that data file in a reviewed PR. The mandate is unchanged — only its executable home moved.
 
 4. **The desired-state YAML header documents the seeds and links here.** [`data-plane/records/file-plan.yaml`](../../data-plane/records/file-plan.yaml) gains a `Microsoft seed content (see ADR-0035)` paragraph explaining why the declared empty state coexists with 31 tenant entries. The same paragraph names the 31 entries verbatim so the YAML is self-describing without a round-trip to this file.
 
@@ -110,7 +122,11 @@ This ADR is to be re-opened with a follow-up ADR if any of the following becomes
 
 ### The 31 seed names (verbatim, for the workflow baseline and the YAML header)
 
-The list below is the source of truth for both [`data-plane/records/file-plan.yaml`](../../data-plane/records/file-plan.yaml)'s header comment and the `skip_names_records` baseline default in `.github/workflows/deploy-data-plane.yml`. Order: Authorities, Categories, Citations, Departments — alphabetical within each kind.
+The list below is the source of truth for both [`data-plane/records/file-plan.yaml`](../../data-plane/records/file-plan.yaml)'s header comment and the baseline skip list in [`data-plane/records/seed-skip-names.yaml`](../../data-plane/records/seed-skip-names.yaml). Order: Authorities, Categories, Citations, Departments — alphabetical within each kind.
+
+> **Corrected 2026-07-13 per [ADR 0052](0052-destructive-confirmation-gate-at-script-layer.md).** This preamble originally named "the `skip_names_records` baseline default in `.github/workflows/deploy-data-plane.yml`", a file [ADR 0051](0051-per-solution-workflow-unit-of-data-plane-apply.md) deleted. The consuming file is now `data-plane/records/seed-skip-names.yaml`. The 31 rows themselves are unchanged.
+>
+> Note for implementers: the skip filter matches on `Name`, and two names each appear under two kinds — **Legal** (Authority + Department) and **Procurement** (Category + Department). The 31 rows therefore carry 29 distinct names. This is harmless for a name-based filter (both kinds are skipped, which is the intent) and is why `seed-skip-names.yaml` reproduces all 31 rows rather than deduplicating them.
 
 | Kind | Name |
 |---|---|

@@ -163,11 +163,13 @@ A script that hardcodes a resource name, resource group, region, or tag default 
 | Switch | Default | Effect |
 |---|---|---|
 | `-WhatIf` | off | Produce the drift report; make no writes. Built into `[CmdletBinding(SupportsShouldProcess)]`. |
-| `-PruneMissing` | `$false` | Allow deletion of objects that are in Purview but not in YAML. Without it, orphans are reported and skipped. |
-| `-Force` | `$false` | Allow overwriting objects whose `lastModifiedBy` is not the current deploy principal. Without it, such conflicts are reported and skipped. |
+| `-PruneMissing` | `$false` | Allow deletion of objects that are in Purview but not in YAML. Without it, orphans are reported and skipped. Deletion is gated by the [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) confirmation prompt. |
+| `-Force` | `$false` | **Suppress the safety guard that would otherwise block or question this operation.** In the **Apply** parameter set that guard is the [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) destructive-operation confirmation prompt. In the **Export** parameter set it is `-ExportCurrentState`'s refusal to clobber a non-empty managed block. The two parameter sets are disjoint, so the meaning is unambiguous at any call site. |
 | `-ExportCurrentState` | off | Read the live tenant and write its current state into the corresponding `data-plane/**` YAML. Makes no writes to Purview. Used to bootstrap a YAML file from an existing tenant so the first reconciler run does not look like drift. Must fail if the YAML already has non-empty managed content, unless `-Force` is also specified. |
 
 A script that does not expose these four switches is rejected by review.
+
+> **`-Force` does *not* mean "overwrite objects whose `lastModifiedBy` is not the deploy principal."** That definition was retired by [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) §6. It described a capability the IPPS / Security & Compliance cmdlets cannot support — they do not return a `lastModifiedBy` to diff against — and no reconciler ever implemented it. If a future Purview surface exposes one, that override gets its **own** switch (`-OverwriteForeignAuthor`); do not fold it back onto `-Force`.
 
 ### Direction-policy contract (ADR 0029)
 
@@ -184,14 +186,39 @@ Required script-side behaviour:
 - **Audit short-circuit.** When `-DirectionPolicy audit`, after the plan is computed and before Phase 2 (session refresh) or Phase 3 (writes), empty the plan and orphan lists and emit a single `[ADR0029-AUDIT] DirectionPolicy=audit — no writes would have fired. Plan above is read-only.` marker via `Write-Information -InformationAction Continue`. Do NOT use `return` to exit early — the script's post-finally output handling depends on the normal control flow completing.
 - **Skip markers.** When `-DirectionPolicy portal-wins` (or `repo-wins`, harmlessly) skips a shared label, emit `[ADR0029-SKIP] <displayName>` via `Write-Information -InformationAction Continue` — one line per skipped object, exact format `^\[ADR0029-SKIP\] (.+)$` so the workflow's `Select-String` parse is reliable. The skip list is also emitted as `Skip` rows in the plan-summary table.
 - **Overwrite warnings.** When `-DirectionPolicy repo-wins` overwrites a shared label, emit `Write-Warning ("repo-wins overwriting tenant on label '{0}' fields: {1}" -f $displayName, $fieldsText)` so every overwrite is named in the run log alongside the drifted field set.
-- **No CI-layer concerns.** Do NOT enforce `confirm_overwrite` inside the script — that gate lives in the workflow's pre-flight step per ADR 0029. The script trusts that any caller passing `-DirectionPolicy repo-wins` already cleared the workflow gate.
+- **Do not re-implement the workflow's *typed-token* gate inside the script.** The `confirm_overwrite = 'overwrite portal'` / `confirm_prune = 'confirm prune'` token ceremony stays in the workflow's pre-flight step per ADR 0029. The script does not parse or enforce those tokens.
+- **But the script MUST run its own confirmation gate.** ~~The script trusts that any caller passing `-DirectionPolicy repo-wins` already cleared the workflow gate.~~ **Superseded by [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md).** That trust was misplaced: the script is reachable *without* the workflow, so a local `-DirectionPolicy repo-wins` or `-PruneMissing` run cleared no gate at all. `Deploy-FilePlan.ps1` has no workflow caller whatsoever — for it, the local terminal is the only path there is. The script layer is the one layer **both** callers traverse, so the mandatory gate lives there. See §"Destructive-operation confirmation gate (ADR 0052)" below.
 - **Pester coverage.** Test the helper by importing the same module (`Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'DirectionPolicy.psm1') -Force -ErrorAction Stop` in `BeforeAll`) so the consumer-side test file covers all three policy branches (portal-wins skip / repo-wins write / SkipList match), the SKIP-marker emission shape (source-text assertion against the consumer script), and the AUDIT-marker short-circuit (source-text assertion against the consumer script). Reference: [`tests/scripts/Deploy-Labels.Tests.ps1`](../../tests/scripts/Deploy-Labels.Tests.ps1) (16 ADR 0029 cases added in PR [#458](https://github.com/contoso/Purview-as-Code-Generic/pull/458), refactored to import the shared module in PR [#473](https://github.com/contoso/Purview-as-Code-Generic/pull/473)).
 
 A backing script that does not expose `-DirectionPolicy` and `-SkipNames` with the shapes above — or that re-inlines `Resolve-DirectionPolicyAction` instead of importing it from `scripts/modules/DirectionPolicy.psm1` — is rejected by review.
 
-### Per-write `ShouldProcess` is mandatory
+### Per-write `ShouldProcess` is mandatory — and `ConfirmImpact` must be `'High'`
 
-Declaring `[CmdletBinding(SupportsShouldProcess = $true)]` is necessary but not sufficient. Every state-changing call inside the script must be individually gated by `$PSCmdlet.ShouldProcess(...)` so that `-WhatIf` skips it and `-Confirm` prompts on it:
+Every `Deploy-*.ps1` MUST declare:
+
+```powershell
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', ...)]
+```
+
+**`ConfirmImpact = 'High'` is load-bearing, not decorative. Do not "tidy" it down to `'Medium'`.**
+
+#### The `Medium` < `High` trap — read this before touching `ConfirmImpact`
+
+PowerShell raises a `ShouldProcess` confirmation prompt **only when `ConfirmImpact >= $ConfirmPreference`**. The default `$ConfirmPreference` is **`High`**. Therefore:
+
+> `ConfirmImpact = 'Medium'` against the default `$ConfirmPreference = 'High'` means **`Medium < High`**, so **every `$PSCmdlet.ShouldProcess(...)` call returns `$true` without ever prompting.** The `-WhatIf` path still works perfectly, which is exactly why this is so easy to miss.
+
+This is not hypothetical. Twenty of twenty-one reconcilers shipped `ConfirmImpact = 'Medium'` and their confirmation prompts were **dead code for the entire life of the repo** — a silent, live violation of the delete-confirmation rule in §"Idempotency and safety" below. See [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md).
+
+When grepping for this defect, note that the on-disk spelling has **spaces around the `=`**. `grep "ConfirmImpact='Medium'"` returns zero matches and a false sense of safety. Use a whitespace-tolerant pattern:
+
+```bash
+grep -rInE "ConfirmImpact\s*=\s*'Medium'" scripts/
+```
+
+#### Per-write gating
+
+Declaring `SupportsShouldProcess` is necessary but not sufficient. Every state-changing call inside the script must be individually gated by `$PSCmdlet.ShouldProcess(...)` so that `-WhatIf` skips it and `-Confirm` prompts on it:
 
 ```powershell
 if ($PSCmdlet.ShouldProcess($target, $action)) {
@@ -204,6 +231,51 @@ if ($PSCmdlet.ShouldProcess($target, $action)) {
 Where `$target` is the human-readable identity of the object being changed (the label name, the collection path, the data source `displayName` — never the access token, request body, or response headers), and `$action` is a short imperative verb phrase (`'Create label'`, `'Update label policy'`, `'Remove orphan classification'`).
 
 A script that wraps the *outer* loop in `ShouldProcess` but lets individual writes fall through is rejected by review — `-WhatIf` then runs every API write while only suppressing the loop banner. Reference: [Everything about ShouldProcess](https://learn.microsoft.com/en-us/powershell/scripting/learn/deep-dives/everything-about-shouldprocess).
+
+### Destructive-operation confirmation gate (ADR 0052)
+
+Per-write `ShouldProcess` makes `-WhatIf` honest. It does **not** make the destructive path safe, because its prompting behaviour is a *negotiation* with the caller's `$ConfirmPreference` (see the trap above). Guarding an irreversible tenant delete with a negotiable prompt is the defect [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) fixes.
+
+Every `Deploy-*.ps1` MUST gate **both** destructive branches behind `$PSCmdlet.ShouldContinue()`:
+
+- the `-PruneMissing` **delete** branch, and
+- the `-DirectionPolicy repo-wins` **overwrite** branch.
+
+Use the shared helper [`scripts/modules/ConfirmGate.psm1`](../../scripts/modules/ConfirmGate.psm1); do not re-inline the logic.
+
+```powershell
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') -Force -Scope Local -ErrorAction Stop
+
+$yesToAll = $false
+$noToAll  = $false
+$confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+$confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+$gateArgs = @{
+    Cmdlet = $PSCmdlet; Caption = 'Destructive operation (ADR 0052)'
+    YesToAll = ([ref]$yesToAll); NoToAll = ([ref]$noToAll)
+    Force = $Force.IsPresent; IsWhatIf = [bool]$WhatIfPreference
+    ConfirmBound = $confirmBound; ConfirmValue = $confirmValue
+}
+if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $query)) {
+    throw 'Aborted by operator at the ... confirmation gate (ADR 0052). No tenant writes were made.'
+}
+```
+
+Binding rules:
+
+1. **`ShouldContinue`, NOT `ShouldProcess`.** `ShouldContinue` performs no `ConfirmImpact` / `$ConfirmPreference` comparison — it prompts unconditionally whenever reached, so it cannot be silently defeated by an impact/preference mismatch or by a caller setting `$ConfirmPreference = 'None'`. This is the entire point; a PR that "simplifies" the gate to `ShouldProcess` is rejected by review.
+2. **One prompt per run, never one per object.** Use the `yesToAll` / `noToAll` four-argument overload, and share one `[ref]` pair across both gates in a run. A prompt-per-object gate trains operators to reflex-`-Force`, which is worse than no gate.
+3. **Name the objects and the count** in the query text, so the operator can see what they are about to destroy.
+4. **Place the gate before any write.** It belongs after the plan is final and after the `audit` short-circuit, but before the first `New-*` / `Set-*` / `Remove-*` of the apply phase.
+5. **`-WhatIf` short-circuits before the prompt.** Return `$true` without prompting under `-WhatIf` so the branch is still walked and the per-write `ShouldProcess` calls render their `What if:` preview lines. Returning `$false` would hide the very deletes `-WhatIf` exists to preview.
+6. **A declined gate aborts the run** (`throw`). Do not partially apply.
+7. **Suppressors are `-Force` and an explicit `-Confirm:$false`** — and nothing else. `$ConfirmPreference` is deliberately not consulted.
+
+#### Every CI invocation of a reconciler MUST bind `-Confirm:$false`
+
+At `ConfirmImpact = 'High'`, any `ShouldProcess`-gated write reached in a workflow will raise a confirmation prompt that **no one can answer on a hosted runner — the job hangs.** This is a real, verified hazard, not a theoretical one: `Deploy-Labels.ps1` wraps its `-ExportCurrentState` YAML write in `ShouldProcess`, and two workflow steps (`deploy-labels.yml`, `sync-labels-from-tenant.yml`) invoked it without `-Confirm:$false` until ADR 0052.
+
+Every `Deploy-*.ps1` invocation from a workflow — **apply, export, or verify** — binds `-Confirm:$false`. A bare `-WhatIf` invocation (e.g. `drift-detection.yml`) is safe without it, because `-WhatIf` short-circuits `ShouldProcess` before the confirmation check, but binding it anyway is harmless and preferred.
 
 ### Deterministic `-ExportCurrentState` round-trip
 
@@ -247,8 +319,8 @@ Every `-WhatIf` run must emit a categorized report. The five categories, in orde
 1. **Create** — in YAML, not in Purview.
 2. **Update** — in both; content differs.
 3. **NoChange** — in both; content identical.
-4. **Orphan** — in Purview, not in YAML. Would be deleted only with `-PruneMissing`.
-5. **Conflict** — in both; last modified by a non-deploy principal. Would be overwritten only with `-Force`.
+4. **Orphan** — in Purview, not in YAML. Would be deleted only with `-PruneMissing` *and* an answered [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) confirmation.
+5. **Conflict** — **reserved; not currently emitted by any reconciler.** This row assumed a per-object `lastModifiedBy` that the IPPS / Security & Compliance cmdlets do not return, so no reconciler can populate it. Retired as a `-Force` trigger by [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) §6. Do not emit a fabricated `Conflict` row; if a future Purview surface exposes an authorship field, reinstate this row alongside a dedicated `-OverwriteForeignAuthor` switch.
 
 **Per-object rows, not aggregate counts.** The report is one `PSCustomObject` per object with the columns `Category`, `Kind`, `Name`, `Reason`, emitted as a pipeline (not `Write-Host`) so the caller can pipe it to `Format-Table`, `Out-File`, `ConvertTo-Json`, or `>> $GITHUB_STEP_SUMMARY`. A short summary banner (`Plan: 3 Create, 1 Update, 12 NoChange`) may follow the table but never replaces it. A reconciler that only prints a banner and a short-circuit message is rejected — `-WhatIf` must enumerate every object it would touch.
 
@@ -264,9 +336,10 @@ Reference: [Microsoft Purview Data Map REST APIs](https://learn.microsoft.com/en
 ## Idempotency and safety
 
 - Apply scripts must be idempotent: GET current state, compute a diff, then PUT/PATCH.
-- Any delete / prune operation must be gated behind an explicit `-PruneMissing` (or equivalent) switch that defaults to `$false` and emits a confirmation prompt unless `-Force` is also set.
+- Any delete / prune operation must be gated behind an explicit `-PruneMissing` (or equivalent) switch that defaults to `$false` **and** must emit a real confirmation prompt via `$PSCmdlet.ShouldContinue()` unless `-Force` or an explicit `-Confirm:$false` is set. See §"Destructive-operation confirmation gate (ADR 0052)" above for the binding pattern.
+  - **This rule was unenforced from the repo's first commit until [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md).** The prompt was written as a `ShouldProcess` call against `ConfirmImpact = 'Medium'`, which never fires at the default `$ConfirmPreference = 'High'`. Satisfying this rule with `ShouldProcess` alone does **not** work — use `ShouldContinue`.
 - `$ErrorActionPreference = 'Stop'` at the top of every script so REST failures don't silently pass.
-- Honour `-WhatIf` for every mutating call (`[CmdletBinding(SupportsShouldProcess)]` when appropriate).
+- Honour `-WhatIf` for every mutating call (`[CmdletBinding(SupportsShouldProcess)]` when appropriate), and declare `ConfirmImpact = 'High'` on every `Deploy-*.ps1`.
 
 ## Logging
 
@@ -321,7 +394,10 @@ Run before opening a PR that touches `scripts/**`. Paste the output of each comm
 
 - [ ] `Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning -EnableExit` exits 0
 - [ ] Every touched `Deploy-*.ps1` exposes `-WhatIf`, `-PruneMissing`, `-Force`, and `-ExportCurrentState`
+- [ ] Every touched `Deploy-*.ps1` declares `ConfirmImpact = 'High'` — **never `'Medium'`**, which never prompts against the default `$ConfirmPreference = 'High'` (ADR 0052). Check with `grep -rInE "ConfirmImpact\s*=\s*'Medium'" scripts/` — the on-disk spelling has spaces around the `=`
 - [ ] Every state-changing call in the touched script is individually wrapped in `$PSCmdlet.ShouldProcess(...)`
-- [ ] `-WhatIf` emits a per-object plan table (Create / Update / NoChange / Orphan / Conflict rows), not just a summary banner
+- [ ] The `-PruneMissing` delete branch and the `-DirectionPolicy repo-wins` overwrite branch are each gated by `$PSCmdlet.ShouldContinue()` via `scripts/modules/ConfirmGate.psm1` — one prompt per run, suppressed by `-Force` / `-Confirm:$false`, skipped under `-WhatIf` (ADR 0052)
+- [ ] Every workflow invocation of a touched reconciler binds `-Confirm:$false` (at `ConfirmImpact = 'High'` an unbound `ShouldProcess`-gated write hangs the job on an unanswerable prompt)
+- [ ] `-WhatIf` emits a per-object plan table (Create / Update / NoChange / Orphan rows), not just a summary banner
 - [ ] If `-ExportCurrentState` was touched, the round-trip triangle (export → `git diff` empty → `-WhatIf` only `NoChange`) is captured in the PR description
 - [ ] No destructive operation (delete, prune) runs without an explicit opt-in switch that defaults to `$false`

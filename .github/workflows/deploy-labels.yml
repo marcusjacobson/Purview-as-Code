@@ -402,10 +402,17 @@ jobs:
         if: success() && env.DIRECTION_POLICY == 'portal-wins' && steps.enumerate.outputs.skip_count != '0'
         shell: pwsh
         run: |
+          # -Confirm:$false is REQUIRED, not decorative. Deploy-Labels.ps1 runs
+          # at ConfirmImpact = 'High' per ADR 0052, and its -ExportCurrentState
+          # YAML write is wrapped in $PSCmdlet.ShouldProcess(...). Without an
+          # explicit -Confirm:$false this step would raise a confirmation
+          # prompt that no one can answer on a hosted runner, and the job would
+          # hang. Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
           ./scripts/Deploy-Labels.ps1 `
             -ExportCurrentState `
             -RedactIdentities `
             -Force `
+            -Confirm:$false `
             -Path 'data-plane/information-protection/labels.yaml'
 
       - name: Upload drift-back YAML artifact
