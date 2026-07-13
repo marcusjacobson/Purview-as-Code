@@ -72,16 +72,12 @@ To add an entry:
 
 - **unified-catalog:** promote `Deploy-UnifiedCatalog.ps1` to a live full-circle reconciler for business domains, data products, OKRs, critical data elements, and glossary terms (#45)
 - **unified-catalog:** rename `data-plane/unified-catalog/governance-domains.{yaml,schema.json}` to `business-domains.{yaml,schema.json}` to match the `2026-03-20-preview` Unified Catalog API's Business Domain operation group, and add `glossary-terms.{yaml,schema.json}` (Terms operation group) and `data-access-policies.{yaml,schema.json}` (Policies operation group, modeled as a simplified role-assignment projection pending the dedicated grant/revoke-aware reconciler) — schema-only scaffolding per ADR 0047 §Decision item 5/10, item (a); no reconciler logic or live API calls added (#43)
-
-### Documentation
-
-- **docs:** update `docs/solutions/unified-catalog/unified-catalog.md` and ADR 0024 with a non-substantive note reflecting the ADR 0047 rename and the two new concept files (#43)
-
- to `Find-PurviewAccount.ps1` — when ARM enumeration finds no *confirmed* governance account (an empty result, or a result made up entirely of `RequiresOwnerConfirmation` hits such as a pay-as-you-go metering resource), runs a single tenant-scoped GET against the Unified Catalog preview data-plane `businessdomains` enumerate endpoint (`2026-03-20-preview`) and appends a diagnostic classification (`UnifiedCatalogTenantReachable`, `UnifiedCatalogUnauthorized`, `UnifiedCatalogProbeIndeterminate`, `UnifiedCatalogUnreachable`, `UnifiedCatalogProbeSkipped`) to the returned array; default off, never writes, never prints the token, and its diagnostic label must never be written to `purviewAccountName`; Pester coverage of the classification, shaping, and probe-calling functions, including a regression guard proving the probe still fires when ARM surfaces only a metering resource (#41)
+- **scripts:** add an opt-in, read-only `-ProbeUnifiedCatalog` switch to `Find-PurviewAccount.ps1` — when ARM enumeration finds no *confirmed* governance account (an empty result, or a result made up entirely of `RequiresOwnerConfirmation` hits such as a pay-as-you-go metering resource), runs a single tenant-scoped GET against the Unified Catalog preview data-plane `businessdomains` enumerate endpoint (`2026-03-20-preview`) and appends a diagnostic classification (`UnifiedCatalogTenantReachable`, `UnifiedCatalogUnauthorized`, `UnifiedCatalogProbeIndeterminate`, `UnifiedCatalogUnreachable`, `UnifiedCatalogProbeSkipped`) to the returned array; default off, never writes, never prints the token, and its diagnostic label must never be written to `purviewAccountName`; Pester coverage of the classification, shaping, and probe-calling functions, including a regression guard proving the probe still fires when ARM surfaces only a metering resource (#41)
 - **instructions:** wire the opt-in Unified Catalog tenant-reachability probe into the ADR 0048 operator flow — `@operator-tenant` Step 1a.3 and the `/discover-purview-account` prompt Step 3 now offer `Find-PurviewAccount.ps1 -ProbeUnifiedCatalog` to corroborate the "tenant-level Unified Catalog" hypothesis in the "not found in ARM" branch, with an explicit never-write-to-`purviewAccountName` rule (#41)
 
 ### Documentation
 
+- **docs:** update `docs/solutions/unified-catalog/unified-catalog.md` and ADR 0024 with a non-substantive note reflecting the ADR 0047 rename and the two new concept files (#43)
 - **docs:** add an ADR 0048 addendum grounding the opt-in Unified Catalog tenant-reachability probe in the Learn-documented `businessdomains` enumerate operation, framed conservatively as a tenant-level reachability signal that neither confirms a specific account's type nor reopens item 5's classic-vs-unified caveat (#41)
 
 ## 2026-07-06
@@ -94,7 +90,7 @@ To add an entry:
 
 ### Documentation
 
-- **docs:** add ADR 0048 requiring `@operator-tenant` to run a read-only discovery-and-confirmation gate for the Purview account target — enumerate `Microsoft.Purview/accounts` across every visible subscription, distinguish a governance account from a pay-as-you-go metering decoy, handle the "not found in ARM" (unified / other subscription / not-yet-created) case as first-class, route on classic-vs-unified, and never write a guessed account name — complementing ADR 0047's reconcile-time routing
+- **docs:** add ADR 0048 requiring `@operator-tenant` to run a read-only discovery-and-confirmation gate for the Purview account target — enumerate `Microsoft.Purview/accounts` across every visible subscription, distinguish a governance account from a pay-as-you-go metering decoy, handle the "not found in ARM" (unified / other subscription / not-yet-created) case as first-class, route on classic-vs-unified, and never write a guessed account name — complementing ADR 0047's reconcile-time routing (#34)
 - **docs:** record the Microsoft Purview Unified Catalog preview-REST-API coexistence decision in ADR 0047, superseding ADR 0037 after its watch-list trigger #1 fired (#32)
 
 ## 2026-07-05
