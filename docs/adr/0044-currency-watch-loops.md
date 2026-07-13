@@ -1,6 +1,6 @@
 # 0044 — Code- and feature-currency watch loops
 
-- **Status:** Proposed <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
+- **Status:** Accepted <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
 - **Date:** 2026-06-20
 - **Gates:** Cross-cutting; no [`project-plan.md`](../project-plan.md) §5 / §8 row.
 - **Deciders:** contoso

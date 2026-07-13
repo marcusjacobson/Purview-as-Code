@@ -16,6 +16,12 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself.
 
+## 2026-07-13
+
+### Documentation
+
+- **adr:** ratify ADRs 0044, 0045, and 0046 to `Accepted` (each one's decision has shipped), resolve the duplicate 0045 number by moving the misfiled tracking plan out of the ADR namespace to `docs/plans/adr-0045-implementation-plan.md` (re-pathing its four sibling-ADR links), and backfill the `docs/adr/README.md` index with the missing rows for 0044, 0045, 0046, and 0049 — 0049's authored `Proposed` status is left untouched pending a separate owner ruling (#63)
+
 ## 2026-07-12
 
 ### Fixed

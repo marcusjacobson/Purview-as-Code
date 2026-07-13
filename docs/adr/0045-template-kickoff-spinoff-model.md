@@ -1,6 +1,6 @@
 # 0045 — Template kickoff and spin-off consumption model with a no-push-back guard
 
-- **Status:** Proposed <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
+- **Status:** Accepted <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
 - **Date:** 2026-07-03
 - **Gates:** Cross-cutting; no [`project-plan.md`](../project-plan.md) §5 / §8 row. Tracks #4.
 - **Deciders:** contoso
