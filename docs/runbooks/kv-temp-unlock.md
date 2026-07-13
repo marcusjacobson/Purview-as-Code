@@ -8,15 +8,25 @@ deploy script).
 
 For day-to-day deploys, prefer:
 
-- The companion deploy workflows (`deploy-labels.yml`,
-  `deploy-label-policies.yml`, `deploy-data-plane.yml`, etc.) which
-  already handle their own unlock window via the
-  `validate-oidc-auth.yml` pattern. `deploy-data-plane.yml` brackets
-  only its `Deploy purview role groups` step with a runner-IP-scoped
-  PNA toggle (PNA Enabled + default-action Deny + runner /32 rule) and
-  re-locks via `if: always()`; the remaining catalog steps continue to
-  run against PNA Disabled because they use bearer tokens minted by
-  `az`, not Key Vault.
+- The per-solution deploy workflows (`deploy-labels.yml`,
+  `deploy-label-policies.yml`, `deploy-auto-label-policies.yml`,
+  `deploy-dlp.yml`, `deploy-irm.yml`) and their `sync-*-from-tenant.yml`
+  reverse companions, which already handle their own unlock window via
+  the `validate-oidc-auth.yml` pattern: each temp-opens the Key Vault
+  public endpoint for the duration of its own apply and re-locks via an
+  `if: always()` step.
+
+  > **Surfaces without a per-solution workflow have no CI unlock window,
+  > because they have no CI apply at all.** Purview role groups is the
+  > notable case: its Key Vault firewall bracket used to live in the
+  > monolithic `deploy-data-plane.yml`, which
+  > [ADR 0051](../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md)
+  > retired (it never once executed, so that bracket never actually ran).
+  > Applying role groups today means running
+  > [`scripts/Deploy-PurviewRoleGroups.ps1`](../../scripts/Deploy-PurviewRoleGroups.ps1)
+  > **locally**, which is precisely the case this runbook's temporary
+  > unlock exists to serve. Backfill of the per-solution workflows is
+  > tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 - The temporary unlock recipe documented in the user-memory note
   `deploy-labels-prune-pitfalls.md` if you are running locally with an
   interactive Az CLI session.

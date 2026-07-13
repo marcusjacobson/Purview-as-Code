@@ -198,9 +198,10 @@ Relationship to this runbook:
   steps": **accept into YAML** (edit
   [`data-plane/irm/policies.yaml`](../../data-plane/irm/policies.yaml),
   then re-apply forward via
-  [`deploy-irm.yml`](../../.github/workflows/deploy-irm.yml) — the isolated
-  forward companion, preferred — or the monolithic `deploy-data-plane.yml`
-  IRM step), **`repo-wins` overwrite** (dispatch `deploy-irm.yml` with
+  [`deploy-irm.yml`](../../.github/workflows/deploy-irm.yml) — the
+  per-solution forward companion, and the only forward-apply path for IRM
+  since [ADR 0051](../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md)
+  retired the monolithic workflow), **`repo-wins` overwrite** (dispatch `deploy-irm.yml` with
   `irm_direction_policy=repo-wins` and the typed
   `confirm_overwrite_irm=overwrite portal` token), or **extend the skip
   baseline + ADR 0036**.
