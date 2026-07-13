@@ -2,7 +2,7 @@
 
 - **Status:** Accepted <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
 - **Date:** 2026-07-03
-- **Gates:** Cross-cutting; no [`project-plan.md`](../project-plan.md) §5 / §8 row. Tracks #4.
+- **Gates:** Cross-cutting; no [`project-plan.md`](../project-plan.md) §5 / §8 row. Tracks #4. Ratifies [`scripts/modules/KickoffGuard.psm1`](../../scripts/modules/KickoffGuard.psm1), [`Set-KickoffGuard.ps1`](../../scripts/Set-KickoffGuard.ps1), [`Test-KickoffGuard.ps1`](../../scripts/Test-KickoffGuard.ps1), and the `@operator-kickoff` agent.
 - **Deciders:** contoso
 
 ## Context
