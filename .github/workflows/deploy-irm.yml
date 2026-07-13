@@ -16,6 +16,14 @@ name: deploy-irm
 # require the control-plane Purview account and go red when it is not
 # deployed, producing poor forward-apply evidence for IRM alone.
 #
+# The paragraph above is quoted VERBATIM by ADR 0051 as its Evidence 3 --
+# the repo's own recorded rationale for preferring the per-solution
+# workflow -- and is deliberately preserved word-for-word so that citation
+# stays true. It now reads as history: ADR 0051 acted on it and RETIRED
+# deploy-data-plane.yml outright. This workflow is the only forward-apply
+# path for IRM policies; there is no "apply the whole data plane" entry
+# point, and a deploy-all.yml orchestrator is explicitly deferred.
+#
 # Tier-3 surface -- SINGLE apply pass. Unlike the export-capable forward
 # workflows (deploy-labels.yml, deploy-auto-label-policies.yml,
 # deploy-dlp.yml), scripts/Deploy-IRMPolicies.ps1 exposes NO
@@ -61,9 +69,12 @@ name: deploy-irm
 # Skip baseline (GUID-free, lockstep). The default skip_names_irm carries
 # the 4 operator-authored mid-testing IRM policy display names
 # (`IRM Lab — <scenario>`, em-dash U+2014). Byte-match this default across
-# deploy-irm.yml, deploy-data-plane.yml, and sync-irm-from-tenant.yml and
-# keep them in lockstep with ADR 0036's skip-baseline table. The
-# system-managed IRM_Tenant_Setting_* policy is NOT listed --
+# deploy-irm.yml and sync-irm-from-tenant.yml -- a TWO-way lockstep -- and
+# keep them in lockstep with ADR 0036's skip-baseline table. This was a
+# three-way lockstep until ADR 0051 retired the monolithic
+# deploy-data-plane.yml, whose copy was the third leg (and was dead code
+# that never once ran; the tax it levied while dead is ADR 0051's
+# Evidence 5). The system-managed IRM_Tenant_Setting_* policy is NOT listed --
 # Deploy-IRMPolicies.ps1 auto-classifies it NoChange via a name-prefix
 # wildcard, so an explicit entry is redundant and its real tenant-scoped
 # GUID suffix must never be committed (identifier-boundary rule).
@@ -137,8 +148,9 @@ on:
           the reconciler classifies it NoChange via a name-prefix
           wildcard, so it never plans a mutation regardless of this list.
           Keep this default byte-for-byte in lockstep with the
-          skip_names_irm defaults in deploy-data-plane.yml and
-          sync-irm-from-tenant.yml, and with ADR 0036's skip-baseline table.
+          skip_names_irm default in sync-irm-from-tenant.yml (a TWO-way
+          lockstep since ADR 0051 retired deploy-data-plane.yml), and
+          with ADR 0036's skip-baseline table.
         type: string
         default: 'IRM Lab — Data leaks by priority users,IRM Lab — Data theft by departing users,IRM Lab — General data leaks,IRM Lab — Risky AI usage'
         required: false
@@ -237,8 +249,8 @@ jobs:
         run: |
           Install-Module powershell-yaml -Force -Scope CurrentUser
           # Connect-IPPSSession -AccessToken requires ExchangeOnlineManagement
-          # v3.8.0-Preview1+; -AllowPrerelease until GA. Matches the IRM step
-          # of deploy-data-plane.yml and sync-irm-from-tenant.yml.
+          # v3.8.0-Preview1+; -AllowPrerelease until GA. Matches
+          # sync-irm-from-tenant.yml.
           # Reference: https://learn.microsoft.com/en-us/powershell/exchange/exchange-online-powershell-v2
           Install-Module ExchangeOnlineManagement -Force -Scope CurrentUser -AllowPrerelease
 

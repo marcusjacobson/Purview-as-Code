@@ -15,7 +15,8 @@
     The federated-credential subject is bound to a dedicated GitHub
     Environment (`kv-unlock`) rather than the shared `lab` environment so
     the kv-temp-unlock approval gate (required reviewers, wait timer) is
-    configurable independently from `deploy-infra.yml` / `deploy-data-plane.yml`.
+    configurable independently from `deploy-infra.yml` and the per-solution
+    `deploy-<solution>.yml` data-plane workflows.
 
     What this script does:
 

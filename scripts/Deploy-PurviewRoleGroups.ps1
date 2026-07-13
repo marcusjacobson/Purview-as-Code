@@ -143,8 +143,11 @@
     `Connect-IPPSSession -UserPrincipalName`. Intended for local-dev
     runs from a workstation that cannot reach the Key Vault (PNA=
     Disabled, no private-link path). Opens a browser MFA flow. CI must
-    not use this switch; the deploy-data-plane workflow always runs
-    app-only.
+    not use this switch; any workflow running this reconciler always
+    runs app-only. NOTE: no per-solution workflow owns Purview role
+    groups today (ADR 0051; backfill tracked in issue #80), so the
+    documented apply path for this surface is a LOCAL run of this
+    script.
 
 .PARAMETER UserPrincipalName
     UPN to pre-populate in the interactive sign-in dialog. Used only
