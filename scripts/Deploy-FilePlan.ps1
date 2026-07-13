@@ -187,7 +187,13 @@
     NoChange, Orphan, Removed, DriftWarn, Skipped, WhatIf, Failed.
 #>
 
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Apply')]
+# ConfirmImpact = 'High' is load-bearing, not decorative. PowerShell only
+# raises a ShouldProcess confirmation when ConfirmImpact >= $ConfirmPreference,
+# and $ConfirmPreference defaults to 'High'. This script shipped 'Medium'
+# until ADR 0052, so every $PSCmdlet.ShouldProcess(...) call below returned
+# $true without ever prompting. Do not lower it back to 'Medium'.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param (
     [Parameter()]
     [ValidateNotNullOrEmpty()]
@@ -626,6 +632,16 @@ Import-Module $module -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so the prune and repo-wins overwrite branches
+# cannot be entered unattended from a local terminal. This script has NO
+# workflow caller, so the local terminal is the only way it ever runs and
+# this gate is the only gate it has.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -682,6 +698,59 @@ Write-Information ("Data-plane app  : {0}" -f $DataPlaneAppDisplayName) -Informa
 Write-Information ("Tenant domain   : {0}" -f $TenantDomain)            -InformationAction Continue
 Write-Information ("YAML path       : {0}" -f $Path)                    -InformationAction Continue
 Write-Information ("DirectionPolicy : {0}" -f $DirectionPolicy)         -InformationAction Continue
+
+#endregion
+
+#region ADR 0035 seed-skip baseline
+
+# The 31 Microsoft File Plan Manager seed property objects are undeletable on
+# the documented IPPS surface -- every Remove-FilePlanProperty* call against
+# them fails with ErrorRuleNotFoundException (ADR 0035 "Context"; issue #582).
+# A -PruneMissing run that does not skip them produces 31 Failed plan rows,
+# not 31 deletions. ADR 0035 Decision #3 mandates a baseline skip list.
+#
+# That baseline used to be the `skip_names_records` workflow_dispatch input
+# default of .github/workflows/deploy-data-plane.yml. ADR 0051 retired that
+# workflow (PR #82), and this script has no other workflow caller -- the only
+# way it runs is an operator at a local terminal. The mandated baseline was
+# therefore left with nowhere executable to live. ADR 0052 relocates it to a
+# checked-in data file that the reconciler reads by default on EVERY run,
+# including the local run that is now the only run there is.
+#
+# The baseline is UNIONed into the effective skip list. Operators may EXTEND
+# it via -SkipNames; they cannot SHRINK it from the command line. Shrinking it
+# means editing the data file in a reviewed PR -- exactly what ADR 0035
+# Decision #3 requires ("may extend ... should not shrink it without
+# superseding this ADR") and what ADR 0035 "Consequences" promised ("a future
+# revert is a single-PR change").
+# Reference: docs/adr/0035-records-seed-content-immovable.md
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+$seedSkipPath = Join-Path $scriptRoot '..\data-plane\records\seed-skip-names.yaml'
+if (-not (Test-Path -LiteralPath $seedSkipPath)) {
+    Write-Error ("ADR 0035 seed-skip baseline not found at '{0}'. This file is the mandated prune-safety baseline; restore it from source control before running a reconcile." -f $seedSkipPath)
+    return
+}
+$seedSkipRoot = Get-Content -LiteralPath $seedSkipPath -Raw | ConvertFrom-Yaml
+$seedSkipNames = @($seedSkipRoot.seedSkipNames)
+if ($seedSkipNames.Count -eq 0) {
+    Write-Error ("ADR 0035 seed-skip baseline at '{0}' declares no names under 'seedSkipNames:'. Refusing to run with an empty safety baseline." -f $seedSkipPath)
+    return
+}
+
+# Union, case-insensitively, preserving the caller's names first.
+$effectiveSkipNames = [System.Collections.Generic.List[string]]::new()
+foreach ($n in @($SkipNames)) {
+    if (-not [string]::IsNullOrWhiteSpace($n) -and -not ($effectiveSkipNames | Where-Object { $_ -ieq $n })) {
+        $effectiveSkipNames.Add([string]$n)
+    }
+}
+foreach ($n in $seedSkipNames) {
+    if (-not [string]::IsNullOrWhiteSpace($n) -and -not ($effectiveSkipNames | Where-Object { $_ -ieq $n })) {
+        $effectiveSkipNames.Add([string]$n)
+    }
+}
+$SkipNames = @($effectiveSkipNames)
+Write-Information ("Skip list       : {0} name(s) ({1} from the ADR 0035 seed baseline at {2})." -f $SkipNames.Count, $seedSkipNames.Count, (Split-Path -Leaf $seedSkipPath)) -InformationAction Continue
 
 #endregion
 
@@ -968,6 +1037,9 @@ try {
         }
     }
 
+    # ADR 0052: names of the retention labels a repo-wins run would overwrite.
+    $repoWinsOverwrites = New-Object 'System.Collections.Generic.List[string]'
+
     # ---- ADR 0029: direction-policy pass on the label plan --------------
     # Labels are the only file plan object kind with a documented
     # Set-* cmdlet, so portal-wins / repo-wins drift arbitration on
@@ -1003,6 +1075,8 @@ try {
             if ($row.Action -eq 'Update' -and $DirectionPolicy -eq 'repo-wins') {
                 $fieldsText = ($row.Reason -replace '^Drift in: ', '')
                 Write-Warning ("repo-wins overwriting tenant on retention label '{0}' fields: {1}" -f $row.Name, $fieldsText)
+                # ADR 0052: feed the destructive-operation confirmation gate below.
+                $repoWinsOverwrites.Add([string]$row.Name)
             }
         }
 
@@ -1014,6 +1088,70 @@ try {
         # instructions rule, so we do not prefix the Kind here.
         foreach ($s in $script:Adr0029Skips) {
             Write-Information ("[ADR0029-SKIP] {0}" -f $s.DisplayName) -InformationAction Continue
+        }
+    }
+
+    # ---- ADR 0052: destructive-operation confirmation gate ----
+    # Placed before the label apply loop -- the first loop that can overwrite
+    # (Set-ComplianceTag) or, further down, delete (Remove-ComplianceTag /
+    # Remove-FilePlanProperty*). The property apply loop above only Creates,
+    # so nothing destructive has run when this gate is reached.
+    #
+    # Both destructive branches are gated here, once per run, via
+    # $PSCmdlet.ShouldContinue() -- NOT ShouldProcess(). ShouldContinue
+    # prompts unconditionally; ShouldProcess only prompts when
+    # ConfirmImpact >= $ConfirmPreference, which is the comparison that
+    # silently defeated this gate before issue #85.
+    #
+    # The $yesToAll / $noToAll pair is shared by both gates, so a run that
+    # trips the overwrite gate AND the prune gate prompts once, not twice,
+    # and never once per object.
+    #
+    # Suppressed by -Force and by an explicit -Confirm:$false. Skipped under
+    # -WhatIf (and therefore under -DirectionPolicy audit, which sets
+    # $WhatIfPreference above) so a dry run previews the deletes without
+    # blocking on input.
+    #
+    # The orphan count below counts only what -PruneMissing would ACTUALLY
+    # try to delete. The 31 ADR 0035 seeds have already been mutated to Skip
+    # rows by the seed-skip baseline, so they are not counted and not named:
+    # the prompt names operator-authored objects, which are the objects that
+    # actually delete.
+    # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+    $yesToAll = $false
+    $noToAll = $false
+    $confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+    $confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+    $gateArgs = @{
+        Cmdlet       = $PSCmdlet
+        Caption      = 'Destructive operation (ADR 0052)'
+        YesToAll     = ([ref]$yesToAll)
+        NoToAll      = ([ref]$noToAll)
+        Force        = $Force.IsPresent
+        IsWhatIf     = [bool]$WhatIfPreference
+        ConfirmBound = $confirmBound
+        ConfirmValue = $confirmValue
+    }
+
+    if ($DirectionPolicy -eq 'repo-wins' -and $repoWinsOverwrites.Count -gt 0) {
+        $overwriteQuery = "repo-wins will OVERWRITE tenant fields on {0} shared retention label(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+            $repoWinsOverwrites.Count, (($repoWinsOverwrites | Sort-Object) -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
+            throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'
+        }
+    }
+
+    if ($PruneMissing.IsPresent) {
+        $pruneTargets = @(
+            @($labelPlan | Where-Object { $_.Action -eq 'Orphan' } | ForEach-Object { "Label '{0}'" -f $_.Name }) +
+            @($propertyPlan | Where-Object { $_.Action -eq 'Orphan' } | ForEach-Object { "{0} '{1}'" -f $_.Kind.Display, $_.Name })
+        )
+        if ($pruneTargets.Count -gt 0) {
+            $pruneQuery = "-PruneMissing will DELETE {0} orphan file plan object(s) from the tenant: {1}. This cannot be undone. Continue?" -f `
+                $pruneTargets.Count, (($pruneTargets | Sort-Object) -join ', ')
+            if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+                throw 'Aborted by operator at the -PruneMissing delete confirmation gate (ADR 0052). No tenant writes were made.'
+            }
         }
     }
 

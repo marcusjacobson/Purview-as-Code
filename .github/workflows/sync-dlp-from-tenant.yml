@@ -144,9 +144,17 @@ jobs:
           # switch and policies.yaml has no fields that resolve to real
           # tenant identifiers (see header comment). -Force is required
           # because the file already declares policies and/or rules.
+          # -Confirm:$false: Deploy-DLPPolicies.ps1 runs at ConfirmImpact =
+          # 'High' per ADR 0052. Its -ExportCurrentState write is not currently
+          # ShouldProcess-gated (unlike Deploy-Labels.ps1's), so this binding is
+          # not load-bearing TODAY -- it is here so that gating the export write
+          # later cannot silently hang this job on an unanswerable prompt.
+          # Every CI invocation of a reconciler binds -Confirm:$false.
+          # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
           ./scripts/Deploy-DLPPolicies.ps1 `
             -ExportCurrentState `
             -Force `
+            -Confirm:$false `
             -Path 'data-plane/dlp/policies.yaml'
 
       - name: Filter cosmetic-only export diff (issue #508)

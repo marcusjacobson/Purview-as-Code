@@ -198,7 +198,13 @@
     Name / Reason. Suitable for capture to `$GITHUB_STEP_SUMMARY` or
     a file. No credential material is printed.
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Apply')]
+# ConfirmImpact = 'High' is load-bearing, not decorative. PowerShell only
+# raises a ShouldProcess confirmation when ConfirmImpact >= $ConfirmPreference,
+# and $ConfirmPreference defaults to 'High'. This script shipped 'Medium'
+# until ADR 0052, so every $PSCmdlet.ShouldProcess(...) call below returned
+# $true without ever prompting. Do not lower it back to 'Medium'.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -2240,6 +2246,14 @@ Import-Module $module -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so the prune and repo-wins overwrite branches
+# cannot be entered unattended from a local terminal.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -2549,6 +2563,10 @@ try {
     # the comma-joined drifted-field set, matching the per-object
     # shape proven in the sibling Deploy-*.ps1 reconcilers.
     # Reference: docs/adr/0029-source-of-truth-direction-policy.md
+    # ADR 0052: names of the objects a repo-wins run would overwrite.
+    # Collected across both passes and consumed by the destructive-operation
+    # confirmation gate below.
+    $repoWinsOverwrites = New-Object 'System.Collections.Generic.List[string]'
     if ($DirectionPolicy -ne 'audit') {
         $skipDecisions = New-Object 'System.Collections.Generic.List[object]'
 
@@ -2574,6 +2592,7 @@ try {
             }
             $fieldsText = [string]$row.Fields
             Write-Warning ("repo-wins overwriting tenant on DLP policy '{0}' fields: {1}" -f $displayName, $fieldsText)
+            if ($DirectionPolicy -eq 'repo-wins') { $repoWinsOverwrites.Add(("policy '{0}'" -f $displayName)) }
         }
 
         # Pass 2: rules. SkipNames is matched against rule.Name (NOT
@@ -2600,6 +2619,7 @@ try {
             }
             $fieldsText = [string]$row.Fields
             Write-Warning ("repo-wins overwriting tenant on DLP rule '{0}' fields: {1}" -f $displayName, $fieldsText)
+            if ($DirectionPolicy -eq 'repo-wins') { $repoWinsOverwrites.Add(("rule '{0}'" -f $displayName)) }
         }
 
         # Machine-readable marker per skipped object for the workflow's
@@ -2625,6 +2645,61 @@ try {
     if ($DirectionPolicy -eq 'audit') {
         Write-Information '[ADR0029-AUDIT] DirectionPolicy=audit - no writes will fire. Plan below is read-only.' -InformationAction Continue
         $WhatIfPreference = $true
+    }
+
+    # ---- ADR 0052: destructive-operation confirmation gate ----
+    # The last point before any write at which nothing has been written.
+    # Both destructive branches -- the repo-wins overwrite (Set-Dlp*) and the
+    # -PruneMissing delete (Remove-Dlp*) -- are gated here, once per run, via
+    # $PSCmdlet.ShouldContinue() -- NOT ShouldProcess(). ShouldContinue
+    # prompts unconditionally; ShouldProcess only prompts when
+    # ConfirmImpact >= $ConfirmPreference, which is the comparison that
+    # silently defeated this gate before issue #85.
+    #
+    # The $yesToAll / $noToAll pair is shared by both gates, so a run that
+    # trips the overwrite gate AND the prune gate prompts once, not twice,
+    # and never once per object.
+    #
+    # Suppressed by -Force and by an explicit -Confirm:$false (the CI path --
+    # deploy-dlp.yml binds it on every apply step). Skipped under -WhatIf (and
+    # therefore under -DirectionPolicy audit, which sets $WhatIfPreference
+    # above) so a dry run previews the deletes without blocking on input.
+    # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+    $yesToAll = $false
+    $noToAll = $false
+    $confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+    $confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+    $gateArgs = @{
+        Cmdlet       = $PSCmdlet
+        Caption      = 'Destructive operation (ADR 0052)'
+        YesToAll     = ([ref]$yesToAll)
+        NoToAll      = ([ref]$noToAll)
+        Force        = $Force.IsPresent
+        IsWhatIf     = [bool]$WhatIfPreference
+        ConfirmBound = $confirmBound
+        ConfirmValue = $confirmValue
+    }
+
+    if ($DirectionPolicy -eq 'repo-wins' -and $repoWinsOverwrites.Count -gt 0) {
+        $overwriteQuery = "repo-wins will OVERWRITE tenant fields on {0} shared DLP object(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+            $repoWinsOverwrites.Count, (($repoWinsOverwrites | Sort-Object) -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
+            throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'
+        }
+    }
+
+    if ($PruneMissing.IsPresent) {
+        $pruneTargets = @(
+            @($policyPlan | Where-Object { $_.Action -eq 'Orphan' } | ForEach-Object { "policy '{0}'" -f $_.Name }) +
+            @($ruleOrphanPlan | ForEach-Object { "rule '{0}'" -f $_.Key })
+        )
+        if ($pruneTargets.Count -gt 0) {
+            $pruneQuery = "-PruneMissing will DELETE {0} orphan DLP object(s) from the tenant: {1}. This cannot be undone. Continue?" -f `
+                $pruneTargets.Count, (($pruneTargets | Sort-Object) -join ', ')
+            if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+                throw 'Aborted by operator at the -PruneMissing delete confirmation gate (ADR 0052). No tenant writes were made.'
+            }
+        }
     }
 
     # Apply policy-level plan. Policies must exist before rules can
