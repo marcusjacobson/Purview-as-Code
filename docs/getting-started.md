@@ -11,7 +11,7 @@ app per workflow file**, not a single shared app:
 | Entra app (lab display name) | Bound workflow | Federated-credential subject |
 |---|---|---|
 | `gh-oidc-purview-control-plane` | [`deploy-infra.yml`](../.github/workflows/deploy-infra.yml) | `repo:<org>/<repo>:environment:lab` |
-| `gh-oidc-purview-data-plane` | [`deploy-data-plane.yml`](../.github/workflows/deploy-data-plane.yml) | `repo:<org>/<repo>:environment:lab` |
+| `gh-oidc-purview-data-plane` | the per-solution data-plane workflows — [`deploy-labels.yml`](../.github/workflows/deploy-labels.yml), [`deploy-label-policies.yml`](../.github/workflows/deploy-label-policies.yml), [`deploy-auto-label-policies.yml`](../.github/workflows/deploy-auto-label-policies.yml), [`deploy-dlp.yml`](../.github/workflows/deploy-dlp.yml), [`deploy-irm.yml`](../.github/workflows/deploy-irm.yml) — and their `sync-*-from-tenant.yml` reverse companions | `repo:<org>/<repo>:environment:lab` |
 | `gh-oidc-purview-kv-unlock` | [`kv-temp-unlock.yml`](../.github/workflows/kv-temp-unlock.yml) | `repo:<org>/<repo>:environment:kv-unlock` |
 
 > [!IMPORTANT]
@@ -69,7 +69,7 @@ Assignment UI: Purview portal → Data Map → Collections → root → **Role a
 Under **Settings → Secrets and variables → Actions**:
 
 - Secrets (Environment: `lab`):
-  - `AZURE_CLIENT_ID` = the `appId` your deploy workflows authenticate as (consumed by [`deploy-infra.yml`](../.github/workflows/deploy-infra.yml) and [`deploy-data-plane.yml`](../.github/workflows/deploy-data-plane.yml)). The shipped workflows share this one secret; [ADR 0010](adr/0010-automation-identity-subject-model.md) describes the intended per-plane split (`AZURE_CLIENT_ID_CONTROL_PLANE` / `AZURE_CLIENT_ID_DATA_PLANE`).
+  - `AZURE_CLIENT_ID` = the `appId` your deploy workflows authenticate as (consumed by [`deploy-infra.yml`](../.github/workflows/deploy-infra.yml) and by every per-solution data-plane workflow, such as [`deploy-labels.yml`](../.github/workflows/deploy-labels.yml) and [`deploy-dlp.yml`](../.github/workflows/deploy-dlp.yml)). The shipped workflows share this one secret; [ADR 0010](adr/0010-automation-identity-subject-model.md) describes the intended per-plane split (`AZURE_CLIENT_ID_CONTROL_PLANE` / `AZURE_CLIENT_ID_DATA_PLANE`).
   - `AZURE_CLIENT_ID_CONTROL_PLANE` = the **control-plane** app's `appId` (consumed by [`validate-oidc-auth.yml`](../.github/workflows/validate-oidc-auth.yml)).
   - `AZURE_TENANT_ID`
   - `AZURE_SUBSCRIPTION_ID`
@@ -129,7 +129,11 @@ pwsh ./scripts/Deploy-Collections.ps1 -AccountName purview-contoso-lab
 
 The [`/deploy-datamap`](../.github/prompts/deploy-datamap.prompt.md) prompt automates this exact guarded cycle for all five domains and enforces the stop-on-`Orphan`/`Conflict` rule for you — prefer it over running the scripts by hand.
 
-The normal day-2 path is to commit desired-state edits and let CI apply them: open a PR, merge to `main`, and the deploy workflow for whichever plane changed runs the reconcile (`deploy-infra` first when `infra/` changed, then `deploy-data-plane`). Run a local apply only when you deliberately deploy from your workstation — there is then no follow-up CI apply to expect.
+The normal day-2 path is to commit desired-state edits and let CI apply them: open a PR, merge to `main`, and the deploy workflow that owns whatever changed runs the reconcile (`deploy-infra` when `infra/` changed; the per-solution `deploy-<solution>` workflow when that surface's `data-plane/**` YAML or its reconciler changed).
+
+> **Not every surface has a CI apply path.** Only five surfaces own a per-solution workflow today — sensitivity labels, label policies, auto-labeling policies, DLP, and IRM. For the rest (collections, glossary, classifications, data sources, scans, administrative units, Purview role groups, audit retention, retention/DLM, records/file plan, IRM entity lists, unified catalog), there is **no automated apply path yet**: merging the YAML changes nothing on its own, and you must run the surface's [`scripts/Deploy-*.ps1`](../scripts/) reconciler locally. See [ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md); backfilling the missing workflows is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
+
+Run a local apply for a CI-covered surface only when you deliberately deploy from your workstation — there is then no follow-up CI apply to expect.
 
 ## 5. Day-2 workflow
 

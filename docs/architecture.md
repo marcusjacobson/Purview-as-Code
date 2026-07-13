@@ -7,7 +7,7 @@ flowchart LR
     PR[Pull request] --> Validate[validate.yml<br/>Bicep lint · yamllint · PSScriptAnalyzer]
     Validate -->|merge| Main[main branch]
     Main -->|infra/** changed| Infra[deploy-infra.yml]
-    Main -->|data-plane/** or scripts/** changed| Data[deploy-data-plane.yml]
+    Main -->|data-plane/&lt;surface&gt;/** or its reconciler changed| Data[per-solution<br/>deploy-&lt;solution&gt;.yml]
 
     Infra -->|az deployment group create| ARM[(Azure Resource Manager)]
     ARM -->|Microsoft.Purview/accounts| Account[Purview Account<br/>purview-contoso-lab]
@@ -81,16 +81,19 @@ Switching between `Template` and `UserDefined` is a YAML edit followed by a reco
 
 ### Applying label changes via CI
 
-Sensitivity labels are reconciled by the `Deploy sensitivity labels` step in the [`deploy-data-plane`](../.github/workflows/deploy-data-plane.yml) workflow. The workflow is manual-dispatch only (`workflow_dispatch`), and the labels step shares the same Key Vault firewall open/close window as the role-groups step so the vault returns to `publicNetworkAccess: Disabled` after every run.
+Sensitivity labels are reconciled by [`deploy-labels.yml`](../.github/workflows/deploy-labels.yml), the per-solution forward-apply workflow that owns this surface and nothing else, per [ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md). It auto-applies on merge to `main` when the labels YAML or [`scripts/Deploy-Labels.ps1`](../scripts/Deploy-Labels.ps1) changes, and can also be dispatched manually. It brackets the apply in a Key Vault firewall open/close window, so the vault returns to `publicNetworkAccess: Disabled` after every run.
 
 Dispatch procedure:
 
-1. Open the workflow in the GitHub Actions UI: **Actions → deploy-data-plane → Run workflow**.
+1. Open the workflow in the GitHub Actions UI: **Actions → deploy-labels → Run workflow**.
 2. Choose inputs:
-   - `plan_labels_only: true` — runs `Deploy-Labels.ps1 -WhatIf`. No `Set-Label` calls; produces the plan table only. Use this first whenever the YAML has changed since the last apply.
-   - `plan_labels_only: false` (default) — runs `Deploy-Labels.ps1` for a live apply against the lab tenant.
-   - `prune_role_groups`: leave `false` unless the dispatch is specifically reconciling role-group drift; it does not affect labels.
+   - `direction_policy: audit` — read-only. Forces `$WhatIfPreference`, so no `Set-Label` call fires under any condition; produces the plan table only. Use this first whenever the YAML has changed since the last apply.
+   - `direction_policy: portal-wins` (default) — non-destructive apply. Creates missing labels and applies non-conflicting updates, skipping shared-property drift so the portal stays authoritative.
+   - `direction_policy: repo-wins` — **destructive**. Overwrites tenant fields with YAML values; requires the typed `confirm_overwrite: overwrite portal` token, per [ADR 0029](adr/0029-source-of-truth-direction-policy.md).
+   - `prune_missing` / `confirm_prune` — leave `false` unless the dispatch is deliberately removing labels that are absent from the YAML.
 3. Confirm the run targets the `lab` environment and the `feat/...` or `main` ref you expect.
-4. After completion, inspect the `Deploy sensitivity labels` step log for the reconciler plan table and any `WARNING` rows (for example, the documented `autoApplicationOf` create-path gap).
+4. After completion, inspect the apply step log for the reconciler plan table and any `WARNING` rows (for example, the documented `autoApplicationOf` create-path gap).
+
+> The monolithic `deploy-data-plane.yml` that previously carried a `Deploy sensitivity labels` step was retired by [ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md): it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and therefore never once executed (90 runs, 0 successes, 0 jobs scheduled). No apply path was lost — the one it advertised did not exist.
 
 Who can dispatch: anyone with `write` access to the repo can dispatch, but the dispatch flows through the `lab` GitHub environment which is owner-gated. The data-plane workload identity (`gh-oidc-purview-data-plane`) is the principal that mutates labels; portal UI changes by humans require membership in `sg-purview-information-protection-admins`.

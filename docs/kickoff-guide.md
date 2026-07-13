@@ -84,7 +84,12 @@ plane) and the Microsoft Purview roles **Collection Admin**, **Data Curator**, a
 ### 5. Validate, then deploy
 
 Run `az bicep build --file infra/main.bicep` and `pwsh -File tests/Run-Pester.ps1` locally; both must
-pass. Then run the `deploy-infra` and `deploy-data-plane` workflows. Exact steps:
+pass. Then run the `deploy-infra` workflow, followed by the per-solution `deploy-<solution>` workflow
+for each data-plane surface you have adopted (`deploy-labels`, `deploy-label-policies`,
+`deploy-auto-label-policies`, `deploy-dlp`, `deploy-irm`). Surfaces without a per-solution workflow
+have **no automated apply path yet** — run their `scripts/Deploy-*.ps1` reconciler locally
+([ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md); backfill tracked in
+[#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80)). Exact steps:
 [tenant onboarding §6–§7](tenant-onboarding.md) and [Getting started §4](getting-started.md).
 
 ### 6. Adopt features, one at a time
