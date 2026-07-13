@@ -4,22 +4,44 @@ on:
   pull_request:
     types: [labeled]
 
-# A top-level `permissions:` block is exhaustive: any scope not listed here is set to `none`,
-# so the two scopes below left `issues` at `none`. GitHub performs the `Closes #NN` linked-issue
-# closure as the *merging identity* — here `secrets.GITHUB_TOKEN` (`gh pr merge --auto`) — which
-# therefore had no permission to close the issue, and no ClosedEvent was ever raised. `issues: write`
-# is the minimum scope that lets the merging identity write the linked issue's state (issue #73).
-# Reference: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions
+# Why this workflow closes linked issues itself (issue #73)
+#
+# GitHub never fires the implicit `Closes #NN` linked-issue closure for a PR merged by
+# `secrets.GITHUB_TOKEN` (`gh pr merge --auto`). Adding `issues: write` (PR #74) was necessary
+# but NOT sufficient: PR #76 merged with `issues: write` already on `main`, its
+# `closingIssuesReferences` resolved correctly, and issue #75 still received no ClosedEvent.
+#
+# Root cause: events produced by the `GITHUB_TOKEN`-attributed merge are suppressed —
+# "events triggered by the GITHUB_TOKEN [...] will not create a new workflow run", the rule that
+# prevents recursive runs. In this repo that single rule has three faces, all confirmed empirically:
+#   1. the implicit linked-issue close never fires;
+#   2. a `pull_request: closed` workflow never runs (`pr-stacked-retarget.yml` has run only on
+#      human merges — never on any of the 11 `GITHUB_TOKEN` merges);
+#   3. a `push: [main]` workflow never runs (`validate.yml`'s push lane likewise).
+#
+# So the close CANNOT be hung off `pull_request: closed` or `push: main` — neither trigger ever
+# fires for our merges. The only surviving, non-suppressed trigger is the *human* `labeled` event
+# already used below (the owner applying `owner-approved`). The `close-linked-issues` job therefore
+# waits for the auto-merge to land inside this same human-triggered run, then closes the linked
+# issues explicitly. This is fallback #1 named on issue #73, and it is what makes the `issues: write`
+# scope added by PR #74 load-bearing rather than dead.
+#
 # Reference: https://docs.github.com/en/actions/concepts/security/github_token
-permissions:
-  pull-requests: write
-  contents: write
-  issues: write
+# Reference: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions
+# Reference: https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
+
+# Deny-by-default at workflow scope; each job declares only the scopes it needs.
+permissions: {}
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
     if: github.event.label.name == 'owner-approved'
+    # Least privilege: merge + delete the head branch (`contents: write`), read/comment on the
+    # PR (`pull-requests: write`). This job does not touch issues.
+    permissions:
+      pull-requests: write
+      contents: write
     steps:
       # Owner identity is data-driven via the OWNER_APPROVAL_LOGIN repository variable
       # (Settings → Secrets and variables → Actions → Variables), so no owner login is
@@ -123,3 +145,120 @@ jobs:
           Please check the workflow run logs for details and resolve the issue before re-applying the label.
 
           *Triggered by the \`pr-auto-merge\` workflow.*"
+
+  # Closes the merged PR's linked issues explicitly, because GitHub will not do it for a
+  # `GITHUB_TOKEN`-merged PR (see the header comment and issue #73).
+  #
+  # `needs: auto-merge` keeps this inside the same human-triggered `labeled` run — the only run
+  # that actually executes for these merges. `gh pr merge --auto` merely *enables* auto-merge; the
+  # merge itself lands later (once required checks pass), so this job waits for it rather than
+  # assuming it has already happened.
+  close-linked-issues:
+    name: Close linked issues after merge
+    needs: auto-merge
+    runs-on: ubuntu-latest
+    # Bounded so a PR whose checks never go green cannot pin a runner open.
+    timeout-minutes: 30
+    # Least privilege: write issue state only. No `contents: write`, no `pull-requests: write` —
+    # this job must never be able to merge, push, or delete a branch.
+    permissions:
+      issues: write
+      pull-requests: read
+      contents: read
+    steps:
+      - name: Wait for the auto-merge to land
+        id: wait
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          MAX_ATTEMPTS=60
+          SLEEP_SECONDS=20   # 60 x 20s = 20 minutes, inside the 30-minute job timeout.
+
+          for ATTEMPT in $(seq 1 "$MAX_ATTEMPTS"); do
+            STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')
+
+            if [ "$STATE" = "MERGED" ]; then
+              MERGE_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeCommit --jq '.mergeCommit.oid')
+              echo "merged=true" >> "$GITHUB_OUTPUT"
+              echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
+              echo "PR #$PR_NUMBER merged as $MERGE_SHA (after $ATTEMPT attempt(s))."
+              exit 0
+            fi
+
+            if [ "$STATE" = "CLOSED" ]; then
+              echo "::warning::PR #$PR_NUMBER was closed without merging. No linked issue will be closed."
+              echo "merged=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: PR #$PR_NUMBER is $STATE. Waiting ${SLEEP_SECONDS}s for auto-merge to land..."
+            sleep "$SLEEP_SECONDS"
+          done
+
+          # Timing out is not a failure: auto-merge is still armed and the PR will merge later.
+          # Only the automatic issue close is forfeited, so warn and exit clean.
+          echo "::warning::Timed out after ~$(( MAX_ATTEMPTS * SLEEP_SECONDS / 60 )) minutes waiting for PR #$PR_NUMBER to merge. Auto-merge remains enabled; close the linked issue(s) manually once it lands."
+          echo "merged=false" >> "$GITHUB_OUTPUT"
+
+      - name: Close linked issues
+        if: steps.wait.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          MERGE_SHA: ${{ steps.wait.outputs.merge_sha }}
+        run: |
+          # No `-e`: a single un-closable issue must not fail the workflow (the PR is already
+          # merged by this point). Each close is attempted independently and logged.
+          set -uo pipefail
+
+          # `closingIssuesReferences` is GitHub's own authoritative list of the issues it *would*
+          # have closed for this PR. It is the only list we act on — nothing outside it is ever
+          # touched, so this job cannot close an unrelated issue.
+          # Reference: https://docs.github.com/en/graphql/reference/objects#pullrequest
+          LINKED=$(gh api graphql \
+            -f owner="$OWNER" \
+            -f name="$REPO_NAME" \
+            -F number="$PR_NUMBER" \
+            -f query='query($owner: String!, $name: String!, $number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $number) {
+                  closingIssuesReferences(first: 50) {
+                    nodes { number state }
+                  }
+                }
+              }
+            }' --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[] | "\(.number) \(.state)"')
+
+          if [ -z "$LINKED" ]; then
+            echo "PR #$PR_NUMBER has no linked closing issues. Nothing to close."
+            exit 0
+          fi
+
+          echo "$LINKED" | while read -r ISSUE_NUMBER ISSUE_STATE; do
+            [ -z "$ISSUE_NUMBER" ] && continue
+
+            # Idempotent: a re-run, or an issue closed by hand in the meantime, is a no-op.
+            if [ "$ISSUE_STATE" = "CLOSED" ]; then
+              echo "Issue #$ISSUE_NUMBER is already closed. Skipping."
+              continue
+            fi
+
+            echo "Closing issue #$ISSUE_NUMBER (linked by PR #$PR_NUMBER)..."
+
+            # Reference: https://cli.github.com/manual/gh_issue_close
+            if gh issue close "$ISSUE_NUMBER" \
+                 --repo "$REPO" \
+                 --reason completed \
+                 --comment "Closed by the \`pr-auto-merge\` workflow: PR #${PR_NUMBER} was squash-merged as \`${MERGE_SHA}\`. GitHub does not fire its implicit linked-issue closure for pull requests merged by \`GITHUB_TOKEN\` (issue #73), so the workflow performs the close explicitly."; then
+              echo "Issue #$ISSUE_NUMBER closed."
+            else
+              echo "::warning::Could not close issue #$ISSUE_NUMBER. Close it manually. Continuing."
+            fi
+          done
