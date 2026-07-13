@@ -77,8 +77,25 @@
     `-DirectionPolicy audit` mode. Default `@()`.
 
 .PARAMETER Force
-    Allow overwriting conflict rows (`lastModifiedBy` differs from deploy
-    principal) and allow overwriting a non-empty YAML on export.
+    Suppress the safety guard on the operation you asked for. In the
+    Export parameter set that guard is `-ExportCurrentState`'s refusal
+    to clobber a non-empty managed block in the target YAML. In the
+    Apply parameter set it is the ADR 0052 destructive-operation
+    confirmation prompt.
+    `-Force` does NOT authorize overwriting a foreign-authored tenant
+    object, and it does NOT suppress `Conflict` rows -- that meaning was
+    split out to `-OverwriteForeignAuthor` by ADR 0053.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
+
+.PARAMETER OverwriteForeignAuthor
+    Apply parameter set only. Permit `Update` writes against tenant data
+    sources whose authorship (`lastModifiedBy` / `updatedBy` /
+    `properties.lastModifiedBy` / `systemData.lastModifiedBy`) differs from
+    the current deploy principal. Without it, such a data source is reported
+    as a `Conflict` row and left untouched.
+    The `Conflict` row is emitted either way -- this switch authorizes the
+    overwrite, it does not hide the finding. Default `$false`.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
 
 .PARAMETER ExportCurrentState
     Export live tenant data sources to YAML and exit. Makes no writes
@@ -118,6 +135,12 @@ param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
     [switch]$Force,
+
+    # ADR 0053: the foreign-author overwrite override is its own switch and
+    # lives in the Apply parameter set only. The Export path has no tenant
+    # object to be authored by anyone, so there is nothing for it to mean there.
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$OverwriteForeignAuthor,
 
     [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
     [switch]$ExportCurrentState,
@@ -353,13 +376,19 @@ function Get-LastModifiedByIdentity {
 }
 
 function Test-ConflictRow {
+    # ADR 0053: the short-circuit consults -OverwriteForeignAuthor, NOT -Force.
+    # Before ADR 0053 this parameter was bound to $Force.IsPresent, so a -Force
+    # run suppressed the Conflict classification entirely and silently
+    # overwrote the portal-authored data source as a plain Update. -Force now
+    # means only "suppress the safety guard on the operation you asked for";
+    # the authorship override is its own switch.
     param(
         [Parameter(Mandatory = $true)]$TenantRaw,
         [Parameter(Mandatory = $true)][string]$DeployIdentity,
-        [Parameter(Mandatory = $true)][bool]$ForceEnabled
+        [Parameter(Mandatory = $true)][bool]$OverwriteForeignAuthor
     )
 
-    if ($ForceEnabled) { return $false }
+    if ($OverwriteForeignAuthor) { return $false }
     if ([string]::IsNullOrWhiteSpace($DeployIdentity)) { return $false }
 
     $last = Get-LastModifiedByIdentity -Source $TenantRaw
@@ -641,10 +670,10 @@ foreach ($d in ($desiredEntries | Sort-Object -Property { $_.name.ToLowerInvaria
         if ($diffs.Count -eq 0) {
             $plan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $d.name; Desired = $d; Reason = 'In sync with tenant.' }) | Out-Null
         } else {
-            $isConflict = Test-ConflictRow -TenantRaw $tenantRawByName[$key] -DeployIdentity $deployIdentity -ForceEnabled $Force.IsPresent
+            $isConflict = Test-ConflictRow -TenantRaw $tenantRawByName[$key] -DeployIdentity $deployIdentity -OverwriteForeignAuthor $OverwriteForeignAuthor.IsPresent
             if ($isConflict) {
                 $who = Get-LastModifiedByIdentity -Source $tenantRawByName[$key]
-                $plan.Add([pscustomobject]@{ Action = 'Conflict'; Name = $d.name; Desired = $d; Reason = ("Drift in: {0}; lastModifiedBy '{1}' differs from deploy principal." -f ($diffs -join ', '), $who) }) | Out-Null
+                $plan.Add([pscustomobject]@{ Action = 'Conflict'; Name = $d.name; Desired = $d; Reason = ("Drift in: {0}; lastModifiedBy '{1}' differs from deploy principal. Re-run with -OverwriteForeignAuthor to overwrite." -f ($diffs -join ', '), $who) }) | Out-Null
             } else {
                 $plan.Add([pscustomobject]@{ Action = 'Update'; Name = $d.name; Desired = $d; Reason = ('Drift in: {0}' -f ($diffs -join ', ')) }) | Out-Null
             }

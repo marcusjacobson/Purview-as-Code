@@ -382,3 +382,158 @@ Describe 'Round-trip determinism (Tenant strip → desired compare)' {
         Compare-RuleHash -Desired $desiredH -Tenant $tenantH | Should -BeNullOrEmpty
     }
 }
+
+
+# ---------------------------------------------------------------------------
+# ADR 0053 -- the foreign-author override is split out of -Force into its own
+# switch, -OverwriteForeignAuthor.
+#
+# This is a Mechanism A script: before ADR 0053, Test-ConflictRow opened with
+# `if ($ForceEnabled) { return $false }` and was called with
+# `-ForceEnabled $Force.IsPresent`, so a -Force run SUPPRESSED the Conflict
+# classification entirely and silently overwrote the portal-authored object as
+# a plain Update. These tests pin the corrected contract:
+#
+#   * -Force alone            => Conflict row IS emitted, object NOT overwritten.
+#   * -OverwriteForeignAuthor => overwrite permitted, Conflict row still emitted.
+#   * the switch lives in the Apply parameter set only.
+#
+# Reference: docs/adr/0053-overwrite-foreign-author-switch.md
+# ---------------------------------------------------------------------------
+Describe 'ADR 0053 -- -OverwriteForeignAuthor (Deploy-Classifications.ps1)' {
+
+    BeforeAll {
+        $script:Adr0053Path = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-Classifications.ps1'
+        if (-not (Test-Path $script:Adr0053Path)) {
+            throw "Could not locate Deploy-Classifications.ps1 at: $script:Adr0053Path"
+        }
+        $script:Adr0053Source = Get-Content -Path $script:Adr0053Path -Raw
+
+        $adr0053Tokens = $null
+        $adr0053Errors = $null
+        $script:Adr0053Ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:Adr0053Path, [ref]$adr0053Tokens, [ref]$adr0053Errors)
+        if ($adr0053Errors.Count -gt 0) {
+            throw ($adr0053Errors | ForEach-Object Message | Out-String)
+        }
+
+        foreach ($fnName in @('Get-LastModifiedByIdentity', 'Test-ConflictRow')) {
+            $fnAst = $script:Adr0053Ast.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq $fnName
+                }, $true)
+            if (-not $fnAst) { throw "Function $fnName not found in $script:Adr0053Path" }
+            . ([ScriptBlock]::Create($fnAst.Extent.Text))
+        }
+
+        # A drifted classification type the PORTAL last touched, versus the deploy principal.
+        $script:Adr0053ForeignRaw = [pscustomobject]@{
+            name      = 'adr0053-fixture'
+            updatedBy = 'portal-admin@contoso.onmicrosoft.com'
+        }
+        $script:Adr0053DeployIdentity = 'gh-oidc-purview-data-plane'
+    }
+
+    Context 'Parameter surface -- Apply set only' {
+
+        It 'declares -OverwriteForeignAuthor in the Apply parameter set' {
+            $cmd = Get-Command -Name $script:Adr0053Path -CommandType ExternalScript
+            $apply = @($cmd.ParameterSets | Where-Object { $_.Name -eq 'Apply' })
+            $apply.Count | Should -Be 1
+            $apply[0].Parameters.Name | Should -Contain 'OverwriteForeignAuthor'
+        }
+
+        It 'does NOT declare -OverwriteForeignAuthor in the Export parameter set' {
+            # The export path writes a local YAML file. No tenant object's
+            # authorship is in question there, so the switch must be unbindable.
+            $cmd = Get-Command -Name $script:Adr0053Path -CommandType ExternalScript
+            $export = @($cmd.ParameterSets | Where-Object { $_.Name -eq 'Export' })
+            $export.Count | Should -Be 1
+            $export[0].Parameters.Name | Should -Not -Contain 'OverwriteForeignAuthor'
+        }
+
+        It 'keeps -Force bindable in BOTH parameter sets (the Export-path callers do not break)' {
+            $cmd = Get-Command -Name $script:Adr0053Path -CommandType ExternalScript
+            foreach ($setName in @('Apply', 'Export')) {
+                $set = @($cmd.ParameterSets | Where-Object { $_.Name -eq $setName })
+                $set[0].Parameters.Name | Should -Contain 'Force'
+            }
+        }
+    }
+
+    Context 'Test-ConflictRow consults -OverwriteForeignAuthor, never -Force' {
+
+        It 'no longer exposes a -ForceEnabled parameter' {
+            (Get-Command Test-ConflictRow).Parameters.Keys | Should -Not -Contain 'ForceEnabled'
+        }
+
+        It 'exposes -OverwriteForeignAuthor instead' {
+            (Get-Command Test-ConflictRow).Parameters.Keys | Should -Contain 'OverwriteForeignAuthor'
+        }
+
+        It 'EMITS the Conflict row for a foreign-authored object when the override is absent (-Force alone)' {
+            # The load-bearing assertion. -Force alone leaves
+            # $OverwriteForeignAuthor.IsPresent = $false, so the classifier must
+            # still return $true and the plan builder must emit a Conflict row
+            # rather than an Update. Pre-ADR-0053 this returned $false under
+            # -Force and the object was silently overwritten.
+            Test-ConflictRow `
+                -TenantRaw $script:Adr0053ForeignRaw `
+                -DeployIdentity $script:Adr0053DeployIdentity `
+                -OverwriteForeignAuthor $false | Should -BeTrue
+        }
+
+        It 'permits the overwrite only when -OverwriteForeignAuthor is supplied' {
+            Test-ConflictRow `
+                -TenantRaw $script:Adr0053ForeignRaw `
+                -DeployIdentity $script:Adr0053DeployIdentity `
+                -OverwriteForeignAuthor $true | Should -BeFalse
+        }
+
+        It 'does not flag an object the deploy principal itself last authored' {
+            $ownRaw = [pscustomobject]@{
+                name      = 'adr0053-fixture'
+                updatedBy = $script:Adr0053DeployIdentity
+            }
+            Test-ConflictRow `
+                -TenantRaw $ownRaw `
+                -DeployIdentity $script:Adr0053DeployIdentity `
+                -OverwriteForeignAuthor $false | Should -BeFalse
+        }
+    }
+
+    Context 'Call-site binding' {
+
+        It 'binds every Test-ConflictRow call from $OverwriteForeignAuthor and never from $Force' {
+            $calls = @($script:Adr0053Ast.FindAll({
+                        param($node)
+                        $node -is [System.Management.Automation.Language.CommandAst] -and
+                        $node.GetCommandName() -eq 'Test-ConflictRow'
+                    }, $true))
+
+            $calls.Count | Should -BeGreaterThan 0
+            foreach ($call in $calls) {
+                $callText = $call.Extent.Text
+                $callText | Should -Match '-OverwriteForeignAuthor\s+\$OverwriteForeignAuthor\.IsPresent'
+                $callText | Should -Not -Match '\$Force'
+                $callText | Should -Not -Match '-ForceEnabled'
+            }
+        }
+
+        It 'names -OverwriteForeignAuthor (not -Force) in the Conflict row Reason text' {
+            $script:Adr0053Source | Should -Match 'Re-run with -OverwriteForeignAuthor to overwrite'
+        }
+
+        It 'carries no ambient $ConfirmPreference self-disarm (ADR 0053 section 4)' {
+            # AST, not raw text -- see the note in the Mechanism B test files.
+            $assignments = @($script:Adr0053Ast.FindAll({
+                        param($node)
+                        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $node.Left.VariablePath.UserPath -eq 'ConfirmPreference'
+                    }, $true))
+            $assignments.Count | Should -Be 0
+        }
+    }
+}
