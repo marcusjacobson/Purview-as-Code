@@ -422,7 +422,7 @@
           <div class="kv"><span class="k">Language</span><span class="v">YAML rendered by PowerShell</span></div>
           <div class="kv"><span class="k">API</span><span class="v">Purview data-plane REST + S&amp;C PowerShell</span></div>
           <div class="kv"><span class="k">Auth</span><span class="v">App-only identity (OIDC / cert in Key Vault)</span></div>
-          <div class="kv"><span class="k">Deploys via</span><span class="v"><code class="inline">deploy-data-plane.yml</code></span></div>
+          <div class="kv"><span class="k">Deploys via</span><span class="v">per-solution <code class="inline">deploy-&lt;solution&gt;.yml</code> (5 surfaces); the rest apply locally</span></div>
         </div>
       </div>
 
@@ -489,9 +489,11 @@
         <div class="card">
           <h3>Data-plane path</h3>
           <p>
-            The <code class="inline">deploy-data-plane</code> workflow authenticates via OIDC, then
-            each <code class="inline">Deploy-*.ps1</code> reconciler renders its YAML manifest into
+            Each per-solution <code class="inline">deploy-&lt;solution&gt;.yml</code> workflow authenticates via OIDC, then
+            runs the one <code class="inline">Deploy-*.ps1</code> reconciler it owns, rendering that YAML manifest into
             idempotent PUT/PATCH calls against the Purview data-plane APIs. Deletes are opt-in.
+            Five surfaces have such a workflow today; the rest have no automated apply path yet and
+            are applied by running their reconciler locally.
           </p>
         </div>
       </div>
@@ -533,7 +535,7 @@
         </li>
         <li>
           <h4>Validate and deploy</h4>
-          <p>Run <code class="inline">az bicep build</code> and the Pester suite, then trigger the <code class="inline">deploy-infra</code> and <code class="inline">deploy-data-plane</code> workflows.</p>
+          <p>Run <code class="inline">az bicep build</code> and the Pester suite, then trigger <code class="inline">deploy-infra</code> and the per-solution <code class="inline">deploy-&lt;solution&gt;</code> workflows.</p>
         </li>
       </ol>
 
@@ -564,7 +566,7 @@
 
       <pre class="tree">.
 ├── <span class="d">.github/</span>
-│   ├── <span class="d">workflows/</span>     <span class="c"># validate + deploy-infra + deploy-data-plane</span>
+│   ├── <span class="d">workflows/</span>     <span class="c"># validate + deploy-infra + per-solution deploy-*</span>
 │   ├── <span class="d">instructions/</span>  <span class="c"># path-scoped Copilot rules (Bicep, PowerShell, YAML…)</span>
 │   ├── <span class="d">prompts/</span>       <span class="c"># reusable /-invoked task templates</span>
 │   └── <span class="d">agents/</span>        <span class="c"># workspace-scoped Squad agents (personas)</span>
@@ -720,7 +722,7 @@ From an empty copy to a tailored, deployable repo in six steps.
 3. **Tailor it.** Run the **Tenant Intake** agent [`@operator-tenant`](.github/agents/operator-tenant.agent.md). It interviews you for your tenant values and writes them into [`infra/parameters/lab.yaml`](infra/parameters/lab.yaml) and the identity-boundary statements.
 4. **Review the diff** the agent produced, then commit it on a branch.
 5. **Wire up identity.** Create the Microsoft Entra app + OIDC federated credential, set the GitHub Environment secrets, and set the `OWNER_APPROVAL_LOGIN` repository variable — see [Getting started §1–§2](docs/getting-started.md).
-6. **Validate and deploy.** Run `az bicep build` and the Pester suite, then the `deploy-infra` / `deploy-data-plane` workflows — see the [Tenant onboarding guide](docs/tenant-onboarding.md) and [Getting started §4](docs/getting-started.md).
+6. **Validate and deploy.** Run `az bicep build` and the Pester suite, then the `deploy-infra` workflow and the per-solution `deploy-<solution>` workflows — see the [Tenant onboarding guide](docs/tenant-onboarding.md) and [Getting started §4](docs/getting-started.md).
 
 ## Why two planes?
 
@@ -744,7 +746,7 @@ References:
 ```text
 .
 ├── .github/
-│   ├── workflows/  # CI (validate) and CD (deploy-infra, deploy-data-plane)
+│   ├── workflows/  # CI (validate) and CD (deploy-infra, per-solution deploy-*)
 │   ├── instructions/  # Path-scoped Copilot rules (Bicep, PowerShell, YAML, ...)
 │   ├── prompts/  # Reusable /-invoked task templates
 │   └── agents/  # Workspace-scoped Squad agents (personas)
@@ -803,7 +805,7 @@ References:
 2. **Create the deployment service principal** and grant it the required Purview data plane roles (one-time) — see [Authenticate for APIs](https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane).
 3. **Configure GitHub secrets/variables**: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `PURVIEW_ACCOUNT_NAME`.
 4. **Provision control plane**: push to `main`, the `deploy-infra` workflow runs `az deployment group create` against [`infra/main.bicep`](infra/main.bicep).
-5. **Deploy data plane**: `deploy-data-plane` workflow renders YAML under [`data-plane/`](data-plane/) into REST API calls.
+5. **Deploy data plane**: each surface is applied by its **own** per-solution workflow — [`deploy-labels`](.github/workflows/deploy-labels.yml), [`deploy-label-policies`](.github/workflows/deploy-label-policies.yml), [`deploy-auto-label-policies`](.github/workflows/deploy-auto-label-policies.yml), [`deploy-dlp`](.github/workflows/deploy-dlp.yml), [`deploy-irm`](.github/workflows/deploy-irm.yml) — which render the YAML under [`data-plane/`](data-plane/) into REST / Security & Compliance PowerShell calls. Every other surface has **no automated apply path yet**: run its [`scripts/Deploy-*.ps1`](scripts/) reconciler locally. See [ADR 0051](docs/adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) and the backfill tracker [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
 ## Design principles
 
@@ -829,7 +831,7 @@ flowchart LR
     PR[Pull request] --> Validate[validate.yml<br/>Bicep lint · yamllint · PSScriptAnalyzer]
     Validate -->|merge| Main[main branch]
     Main -->|infra/** changed| Infra[deploy-infra.yml]
-    Main -->|data-plane/** or scripts/** changed| Data[deploy-data-plane.yml]
+    Main -->|data-plane/&lt;surface&gt;/** or its reconciler changed| Data[per-solution<br/>deploy-&lt;solution&gt;.yml]
 
     Infra -->|az deployment group create| ARM[(Azure Resource Manager)]
     ARM -->|Microsoft.Purview/accounts| Account[Purview Account<br/>purview-contoso-lab]
@@ -903,17 +905,20 @@ Switching between `Template` and `UserDefined` is a YAML edit followed by a reco
 
 ### Applying label changes via CI
 
-Sensitivity labels are reconciled by the `Deploy sensitivity labels` step in the [`deploy-data-plane`](../.github/workflows/deploy-data-plane.yml) workflow. The workflow is manual-dispatch only (`workflow_dispatch`), and the labels step shares the same Key Vault firewall open/close window as the role-groups step so the vault returns to `publicNetworkAccess: Disabled` after every run.
+Sensitivity labels are reconciled by [`deploy-labels.yml`](../.github/workflows/deploy-labels.yml), the per-solution forward-apply workflow that owns this surface and nothing else, per [ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md). It auto-applies on merge to `main` when the labels YAML or [`scripts/Deploy-Labels.ps1`](../scripts/Deploy-Labels.ps1) changes, and can also be dispatched manually. It brackets the apply in a Key Vault firewall open/close window, so the vault returns to `publicNetworkAccess: Disabled` after every run.
 
 Dispatch procedure:
 
-1. Open the workflow in the GitHub Actions UI: **Actions → deploy-data-plane → Run workflow**.
+1. Open the workflow in the GitHub Actions UI: **Actions → deploy-labels → Run workflow**.
 2. Choose inputs:
-   - `plan_labels_only: true` — runs `Deploy-Labels.ps1 -WhatIf`. No `Set-Label` calls; produces the plan table only. Use this first whenever the YAML has changed since the last apply.
-   - `plan_labels_only: false` (default) — runs `Deploy-Labels.ps1` for a live apply against the lab tenant.
-   - `prune_role_groups`: leave `false` unless the dispatch is specifically reconciling role-group drift; it does not affect labels.
+   - `direction_policy: audit` — read-only. Forces `$WhatIfPreference`, so no `Set-Label` call fires under any condition; produces the plan table only. Use this first whenever the YAML has changed since the last apply.
+   - `direction_policy: portal-wins` (default) — non-destructive apply. Creates missing labels and applies non-conflicting updates, skipping shared-property drift so the portal stays authoritative.
+   - `direction_policy: repo-wins` — **destructive**. Overwrites tenant fields with YAML values; requires the typed `confirm_overwrite: overwrite portal` token, per [ADR 0029](adr/0029-source-of-truth-direction-policy.md).
+   - `prune_missing` / `confirm_prune` — leave `false` unless the dispatch is deliberately removing labels that are absent from the YAML.
 3. Confirm the run targets the `lab` environment and the `feat/...` or `main` ref you expect.
-4. After completion, inspect the `Deploy sensitivity labels` step log for the reconciler plan table and any `WARNING` rows (for example, the documented `autoApplicationOf` create-path gap).
+4. After completion, inspect the apply step log for the reconciler plan table and any `WARNING` rows (for example, the documented `autoApplicationOf` create-path gap).
+
+> The monolithic `deploy-data-plane.yml` that previously carried a `Deploy sensitivity labels` step was retired by [ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md): it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and therefore never once executed (90 runs, 0 successes, 0 jobs scheduled). No apply path was lost — the one it advertised did not exist.
 
 Who can dispatch: anyone with `write` access to the repo can dispatch, but the dispatch flows through the `lab` GitHub environment which is owner-gated. The data-plane workload identity (`gh-oidc-purview-data-plane`) is the principal that mutates labels; portal UI changes by humans require membership in `sg-purview-information-protection-admins`.
 
@@ -932,7 +937,7 @@ app per workflow file**, not a single shared app:
 | Entra app (lab display name) | Bound workflow | Federated-credential subject |
 |---|---|---|
 | `gh-oidc-purview-control-plane` | [`deploy-infra.yml`](../.github/workflows/deploy-infra.yml) | `repo:<org>/<repo>:environment:lab` |
-| `gh-oidc-purview-data-plane` | [`deploy-data-plane.yml`](../.github/workflows/deploy-data-plane.yml) | `repo:<org>/<repo>:environment:lab` |
+| `gh-oidc-purview-data-plane` | the per-solution data-plane workflows — [`deploy-labels.yml`](../.github/workflows/deploy-labels.yml), [`deploy-label-policies.yml`](../.github/workflows/deploy-label-policies.yml), [`deploy-auto-label-policies.yml`](../.github/workflows/deploy-auto-label-policies.yml), [`deploy-dlp.yml`](../.github/workflows/deploy-dlp.yml), [`deploy-irm.yml`](../.github/workflows/deploy-irm.yml) — and their `sync-*-from-tenant.yml` reverse companions | `repo:<org>/<repo>:environment:lab` |
 | `gh-oidc-purview-kv-unlock` | [`kv-temp-unlock.yml`](../.github/workflows/kv-temp-unlock.yml) | `repo:<org>/<repo>:environment:kv-unlock` |
 
 > [!IMPORTANT]
@@ -990,7 +995,7 @@ Assignment UI: Purview portal → Data Map → Collections → root → **Role a
 Under **Settings → Secrets and variables → Actions**:
 
 - Secrets (Environment: `lab`):
-  - `AZURE_CLIENT_ID` = the `appId` your deploy workflows authenticate as (consumed by [`deploy-infra.yml`](../.github/workflows/deploy-infra.yml) and [`deploy-data-plane.yml`](../.github/workflows/deploy-data-plane.yml)). The shipped workflows share this one secret; [ADR 0010](adr/0010-automation-identity-subject-model.md) describes the intended per-plane split (`AZURE_CLIENT_ID_CONTROL_PLANE` / `AZURE_CLIENT_ID_DATA_PLANE`).
+  - `AZURE_CLIENT_ID` = the `appId` your deploy workflows authenticate as (consumed by [`deploy-infra.yml`](../.github/workflows/deploy-infra.yml) and by every per-solution data-plane workflow, such as [`deploy-labels.yml`](../.github/workflows/deploy-labels.yml) and [`deploy-dlp.yml`](../.github/workflows/deploy-dlp.yml)). The shipped workflows share this one secret; [ADR 0010](adr/0010-automation-identity-subject-model.md) describes the intended per-plane split (`AZURE_CLIENT_ID_CONTROL_PLANE` / `AZURE_CLIENT_ID_DATA_PLANE`).
   - `AZURE_CLIENT_ID_CONTROL_PLANE` = the **control-plane** app's `appId` (consumed by [`validate-oidc-auth.yml`](../.github/workflows/validate-oidc-auth.yml)).
   - `AZURE_TENANT_ID`
   - `AZURE_SUBSCRIPTION_ID`
@@ -1050,7 +1055,11 @@ pwsh ./scripts/Deploy-Collections.ps1 -AccountName purview-contoso-lab
 
 The [`/deploy-datamap`](../.github/prompts/deploy-datamap.prompt.md) prompt automates this exact guarded cycle for all five domains and enforces the stop-on-`Orphan`/`Conflict` rule for you — prefer it over running the scripts by hand.
 
-The normal day-2 path is to commit desired-state edits and let CI apply them: open a PR, merge to `main`, and the deploy workflow for whichever plane changed runs the reconcile (`deploy-infra` first when `infra/` changed, then `deploy-data-plane`). Run a local apply only when you deliberately deploy from your workstation — there is then no follow-up CI apply to expect.
+The normal day-2 path is to commit desired-state edits and let CI apply them: open a PR, merge to `main`, and the deploy workflow that owns whatever changed runs the reconcile (`deploy-infra` when `infra/` changed; the per-solution `deploy-<solution>` workflow when that surface's `data-plane/**` YAML or its reconciler changed).
+
+> **Not every surface has a CI apply path.** Only five surfaces own a per-solution workflow today — sensitivity labels, label policies, auto-labeling policies, DLP, and IRM. For the rest (collections, glossary, classifications, data sources, scans, administrative units, Purview role groups, audit retention, retention/DLM, records/file plan, IRM entity lists, unified catalog), there is **no automated apply path yet**: merging the YAML changes nothing on its own, and you must run the surface's [`scripts/Deploy-*.ps1`](../scripts/) reconciler locally. See [ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md); backfilling the missing workflows is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
+
+Run a local apply for a CI-covered surface only when you deliberately deploy from your workstation — there is then no follow-up CI apply to expect.
 
 ## 5. Day-2 workflow
 
@@ -1158,7 +1167,12 @@ plane) and the Microsoft Purview roles **Collection Admin**, **Data Curator**, a
 ### 5. Validate, then deploy
 
 Run `az bicep build --file infra/main.bicep` and `pwsh -File tests/Run-Pester.ps1` locally; both must
-pass. Then run the `deploy-infra` and `deploy-data-plane` workflows. Exact steps:
+pass. Then run the `deploy-infra` workflow, followed by the per-solution `deploy-<solution>` workflow
+for each data-plane surface you have adopted (`deploy-labels`, `deploy-label-policies`,
+`deploy-auto-label-policies`, `deploy-dlp`, `deploy-irm`). Surfaces without a per-solution workflow
+have **no automated apply path yet** — run their `scripts/Deploy-*.ps1` reconciler locally
+([ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md); backfill tracked in
+[#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80)). Exact steps:
 [tenant onboarding §6–§7](tenant-onboarding.md) and [Getting started §4](getting-started.md).
 
 ### 6. Adopt features, one at a time
@@ -1386,7 +1400,22 @@ Run the workflows from the **Actions** tab (or follow [Getting started §4](gett
 
 1. **`deploy-infra`** — provisions / reconciles the `Microsoft.Purview/accounts` resource and its
    dependencies. See [Microsoft.Purview/accounts (Bicep)](https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts).
-2. **`deploy-data-plane`** — applies the desired-state catalog content under `data-plane/`.
+2. **The per-solution `deploy-<solution>` workflows** — each applies the desired-state content for
+   exactly **one** data-plane surface under `data-plane/`, per
+   [ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md). Five exist today:
+   [`deploy-labels`](../.github/workflows/deploy-labels.yml),
+   [`deploy-label-policies`](../.github/workflows/deploy-label-policies.yml),
+   [`deploy-auto-label-policies`](../.github/workflows/deploy-auto-label-policies.yml),
+   [`deploy-dlp`](../.github/workflows/deploy-dlp.yml), and
+   [`deploy-irm`](../.github/workflows/deploy-irm.yml).
+
+   > **Every other data-plane surface has no automated apply path yet.** Collections, glossary,
+   > classifications, data sources, scans, administrative units, Purview role groups, audit
+   > retention, retention/DLM, records/file plan, IRM entity lists, and unified catalog are applied
+   > by running their [`scripts/Deploy-*.ps1`](../scripts/) reconciler **locally** from your
+   > workstation. This is the honest state of the repo, not an omission: backfilling the missing
+   > per-solution workflows is tracked in
+   > [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
 After the first deploy, the ongoing per-feature lifecycle is agent-led
 (`@idea-intake` → `@artifact-resolver` → `@owner-approval`); populate
