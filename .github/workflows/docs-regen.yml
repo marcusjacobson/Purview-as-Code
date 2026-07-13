@@ -74,16 +74,23 @@ jobs:
                   continue
               }
               
-              # Parse title (first h1 after potential frontmatter)
+              # Parse title (first h1 after potential frontmatter). The number
+              # prefix is stripped so the Title column does not repeat the number
+              # already carried by the linked "#" column. The separator is
+              # tolerant: em dash (—), en dash (–), double hyphen (--), or single
+              # hyphen (-) — the ADR set uses all four (e.g. 0039 "-", 0042 "--").
               $titleMatch = [regex]::Match($content, '^#\s+(.+)$', 'Multiline')
               $title = if ($titleMatch.Success) {
-                  $titleMatch.Groups[1].Value.Trim() -replace '^\d{4}\s+—\s+', ''
+                  $titleMatch.Groups[1].Value.Trim() -replace '^\d{4}\s+(?:—|–|--|-)\s+', ''
               } else {
                   $slug -replace '-', ' '
               }
-              
-              # Parse status (look for Status: line)
-              $statusMatch = [regex]::Match($content, '(?:^|\*\*)\s*Status:\*\*\s+(.+?)(?:\s|<!--)', 'Multiline')
+
+              # Parse status (look for Status: line). The capture runs to the end
+              # of the line (or to an inline HTML comment), NOT to the first space:
+              # a "Superseded by [ADR NNNN](...)" status must keep its pointer to
+              # the superseding ADR (ADRs 0008 and 0037).
+              $statusMatch = [regex]::Match($content, '(?:^|\*\*)\s*Status:\*\*\s+(.+?)\s*(?:<!--|$)', 'Multiline')
               $status = if ($statusMatch.Success) {
                   $statusMatch.Groups[1].Value.Trim()
               } else {
@@ -123,8 +130,12 @@ jobs:
           # Read current README
           $readme = Get-Content -Path $readmePath -Raw
           
-          # Replace the table between "## Current ADRs" and the next "##" or end
-          $pattern = '(?s)(## Current ADRs\r?\n\r?\n)(.*?)(\r?\n\r?\n(?:>|##))'
+          # Replace ONLY the table itself, anchored on its header row, so any
+          # prose between the "## Current ADRs" heading and the table (e.g. the
+          # "do not hand-edit" NOTE callout required by ADR 0050) survives a
+          # regeneration. Group 1 = heading + any preamble, group 2 = the table,
+          # group 3 = the blank line + next block ("##" or a "> [!NOTE]").
+          $pattern = '(?s)(## Current ADRs\r?\n\r?\n.*?)(\| # \| Title \| Status \| Gates \|.*?)(\r?\n\r?\n(?:>|##))'
           $replacement = "`$1$newTable`$3"
           
           if ($readme -match $pattern) {

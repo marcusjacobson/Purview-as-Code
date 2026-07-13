@@ -2,7 +2,7 @@
 
 - **Status:** Accepted <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
 - **Date:** 2026-06-20
-- **Gates:** Cross-cutting; no [`project-plan.md`](../project-plan.md) §5 / §8 row.
+- **Gates:** Cross-cutting; no [`project-plan.md`](../project-plan.md) §5 / §8 row. Establishes [`watch-list.yml`](watch-list.yml) and the currency watch loops; its trigger #1 has fired (cited by [ADR 0047](0047-unified-catalog-preview-api-coexistence.md)).
 - **Deciders:** contoso
 
 ## Context
