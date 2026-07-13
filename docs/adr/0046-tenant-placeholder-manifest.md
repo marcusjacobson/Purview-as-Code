@@ -1,6 +1,6 @@
 # 0046 — Tenant placeholder manifest for template tailoring
 
-- **Status:** Proposed <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
+- **Status:** Accepted <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
 - **Date:** 2026-07-04
 - **Gates:** Unblocks reliable `@operator-tenant` tailoring runs (the clone → tailor flow ratified by [ADR 0045](0045-template-kickoff-spinoff-model.md)). No `docs/project-plan.md` Progress-checklist row — this is template-maintenance infrastructure.
 - **Deciders:** @marcusjacobson

@@ -1,6 +1,6 @@
 # ADR 0045 — implementation plan
 
-Tracking plan for implementing [ADR 0045](0045-template-kickoff-spinoff-model.md) — the template
+Tracking plan for implementing [ADR 0045](../adr/0045-template-kickoff-spinoff-model.md) — the template
 kickoff and spin-off consumption model with a no-push-back guard. Each task below is its own
 GitHub issue and ships as its own agent-led item; the tasks are ordered so each one merges before
 the next starts.
@@ -10,7 +10,7 @@ Issue references (`#N`) are GitHub issue numbers in this repository.
 ## Lifecycle and gates
 
 Every task runs through the default agent flow — `@idea-intake` → `@artifact-resolver` →
-`@owner-approval` — one item at a time, per [ADR 0014](0014-agents-as-default-entry-point.md). The
+`@owner-approval` — one item at a time, per [ADR 0014](../adr/0014-agents-as-default-entry-point.md). The
 `needs-review` label is applied only when a task is actively started, not while it sits in the
 backlog. Each task's pull request must satisfy the cross-cutting
 [pre-commit checklist](../../.github/instructions/pre-commit.instructions.md) (secrets-scan, Learn
@@ -63,6 +63,6 @@ to the source). Blocked by #7 so the kickoff flow that references it is in place
 
 ## References
 
-- [ADR 0045 — Template kickoff and spin-off consumption model with a no-push-back guard](0045-template-kickoff-spinoff-model.md)
-- [ADR 0014 — Agents as the default entry point](0014-agents-as-default-entry-point.md)
+- [ADR 0045 — Template kickoff and spin-off consumption model with a no-push-back guard](../adr/0045-template-kickoff-spinoff-model.md)
+- [ADR 0014 — Agents as the default entry point](../adr/0014-agents-as-default-entry-point.md)
 - [Pre-commit checklist](../../.github/instructions/pre-commit.instructions.md)
