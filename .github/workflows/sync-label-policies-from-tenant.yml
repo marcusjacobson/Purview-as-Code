@@ -119,9 +119,18 @@ jobs:
           # label-policies.yaml has no fields that resolve to real tenant
           # identifiers (see header comment). -Force is required because
           # the file already declares policies.
+          # -Confirm:$false is REQUIRED, not decorative. ADR 0052 makes it the
+          # rule for every CI invocation of a reconciler: Deploy-LabelPolicies.ps1
+          # wraps its -ExportCurrentState YAML write in $PSCmdlet.ShouldProcess(...),
+          # so the moment its ConfirmImpact reaches 'High' (#83) an unbound call
+          # would raise a confirmation prompt no one can answer on a hosted runner
+          # and the job would hang. -Force does not cover this: it guards only the
+          # export file overwrite, never $ConfirmPreference.
+          # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
           ./scripts/Deploy-LabelPolicies.ps1 `
             -ExportCurrentState `
             -Force `
+            -Confirm:$false `
             -Path 'data-plane/information-protection/label-policies.yaml'
 
       - name: Filter cosmetic-only export diff (issue #508)

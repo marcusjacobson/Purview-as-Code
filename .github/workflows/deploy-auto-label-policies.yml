@@ -402,9 +402,18 @@ jobs:
         if: success() && env.DIRECTION_POLICY == 'portal-wins' && steps.enumerate.outputs.skip_count != '0'
         shell: pwsh
         run: |
+          # -Confirm:$false is REQUIRED, not decorative. ADR 0052 makes it the
+          # rule for every CI invocation of a reconciler: Deploy-AutoLabelPolicies.ps1
+          # wraps its -ExportCurrentState YAML write in $PSCmdlet.ShouldProcess(...),
+          # so the moment its ConfirmImpact reaches 'High' (#83) an unbound call
+          # would raise a confirmation prompt no one can answer on a hosted runner
+          # and the job would hang. -Force does not cover this: it guards only the
+          # export file overwrite, never $ConfirmPreference.
+          # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
           ./scripts/Deploy-AutoLabelPolicies.ps1 `
             -ExportCurrentState `
             -Force `
+            -Confirm:$false `
             -Path 'data-plane/information-protection/auto-label-policies.yaml'
 
       - name: Upload drift-back YAML artifact
