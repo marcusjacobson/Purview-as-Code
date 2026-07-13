@@ -4,9 +4,17 @@ on:
   pull_request:
     types: [labeled]
 
+# A top-level `permissions:` block is exhaustive: any scope not listed here is set to `none`,
+# so the two scopes below left `issues` at `none`. GitHub performs the `Closes #NN` linked-issue
+# closure as the *merging identity* — here `secrets.GITHUB_TOKEN` (`gh pr merge --auto`) — which
+# therefore had no permission to close the issue, and no ClosedEvent was ever raised. `issues: write`
+# is the minimum scope that lets the merging identity write the linked issue's state (issue #73).
+# Reference: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions
+# Reference: https://docs.github.com/en/actions/concepts/security/github_token
 permissions:
   pull-requests: write
   contents: write
+  issues: write
 
 jobs:
   auto-merge:
