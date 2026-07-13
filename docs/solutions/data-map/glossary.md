@@ -69,11 +69,15 @@ For a near-unattended end-to-end smoke that exercises Create → Read → Update
 
 ## ADR 0029 contract
 
-This reconciler conforms to [ADR 0029 — Source-of-truth direction policy](../../adr/0029-source-of-truth-direction-policy.md). The script accepts `-DirectionPolicy {audit, portal-wins, repo-wins}` and `-SkipNames <string[]>`; the [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) workflow exposes matching `glossary_direction_policy`, `confirm_overwrite_glossary`, and `skip_names_glossary` dispatch inputs with the `overwrite portal` typed-confirmation gate on `repo-wins`. The pre-flight gate-step refuses a `repo-wins` dispatch missing the token.
+This reconciler conforms to [ADR 0029 — Source-of-truth direction policy](../../adr/0029-source-of-truth-direction-policy.md). The script accepts `-DirectionPolicy {audit, portal-wins, repo-wins}` and `-SkipNames <string[]>`.
+
+> **No automated apply path yet.** No per-solution workflow owns the glossary, so merging `data-plane/glossary/**` applies nothing on its own. **Interim apply path: run [`scripts/Deploy-Glossary.ps1`](../../../scripts/Deploy-Glossary.ps1) locally.** The monolithic `deploy-data-plane.yml` that once advertised matching `glossary_direction_policy` / `confirm_overwrite_glossary` / `skip_names_glossary` dispatch inputs was retired by [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) — it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and therefore **never once executed** (90 runs, 0 successes, 0 jobs scheduled), so those inputs never applied anything. Nothing was lost. **Note that the `overwrite portal` typed-confirmation gate on `repo-wins` was a workflow pre-flight step, not a script parameter** — running the reconciler locally, `-DirectionPolicy repo-wins` is destructive with no typed-confirmation prompt, so preview with `-DirectionPolicy audit` first. Backfilling a `deploy-glossary.yml` (which restores that gate) is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
 ## Phase 3+4 drift-review notes (PR #644)
 
-The Phase 3+4 retrofit shipped: `-DirectionPolicy` / `-SkipNames` wired through the shared `scripts/modules/DirectionPolicy.psm1` module; `Validate glossary dispatch inputs` fail-fast gate; `deploy-data-plane.yml` `Deploy glossary` step driven by the three new dispatch inputs; `Invoke-GlossarySmokeTest.ps1` near-unattended wrapper; this runbook; and the Pester extension (7 new decision-matrix tests). The `-SkipNames` baseline ships empty — no permanent declared-orphan glossary terms exist in the tenant at the time of this retrofit.
+The Phase 3+4 retrofit shipped: `-DirectionPolicy` / `-SkipNames` wired through the shared `scripts/modules/DirectionPolicy.psm1` module; `Invoke-GlossarySmokeTest.ps1` near-unattended wrapper; this runbook; and the Pester extension (7 new decision-matrix tests). The `-SkipNames` baseline ships empty — no permanent declared-orphan glossary terms exist in the tenant at the time of this retrofit.
+
+The retrofit also shipped a `Validate glossary dispatch inputs` fail-fast gate and a `Deploy glossary` step in the monolithic data-plane workflow, driven by three dispatch inputs. **Both are gone**: that workflow was retired by [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md), having never once executed. The script-side `-DirectionPolicy` / `-SkipNames` contract above is unaffected and remains the live surface.
 
 ## References
 

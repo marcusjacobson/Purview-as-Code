@@ -63,7 +63,7 @@ The caller must have the repo's automation prerequisites for Security & Complian
 
 1. Do not apply policy authoring locally. A local run without `-PruneMissing` is a no-op with `policies: []`; a run with `-PruneMissing` is outside the approved posture.
 
-1. Do not rely on [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) for Communication Compliance today. The workflow does not run this script. If a future CI PR wires it in, the step must be a drift check only and must preserve the `policies: []` contract.
+1. **There is no automated apply path for Communication Compliance**, and for this surface that is by design as well as by circumstance: no per-solution workflow owns it, and the approved posture is drift-detection only. If a future per-solution workflow is backfilled ([#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80); see [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md)), it must be a **drift check only** and must preserve the `policies: []` contract.
 
 1. Verify the cmdlet surface with the [Communication Compliance cmdlet surface runbook](../../runbooks/communication-compliance-cmdlet-surface.md) when Microsoft Learn or the Exchange Online PowerShell module changes.
 

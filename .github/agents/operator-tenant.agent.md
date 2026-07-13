@@ -319,7 +319,8 @@ Only after explicit confirmation, apply the tailoring driven by
      (ownerSlug). The repo name `Purview-as-Code` in the header is not a tenant token; leave it.
    - **`.github/workflows/**`** — replace only the **functional** tenant values (missed pre-manifest,
      [ADR 0046](../../docs/adr/0046-tenant-placeholder-manifest.md)): the `KEY_VAULT_NAME:` env
-     default in `deploy-data-plane.yml` / `kv-temp-unlock.yml` / `validate-oidc-auth.yml` and the
+     default in every `deploy-<solution>.yml` and `sync-<solution>-from-tenant.yml` workflow, plus
+     `drift-detection.yml` / `kv-temp-unlock.yml` / `validate-oidc-auth.yml`, and the
      `TENANT_DOMAIN:` env in `validate-oidc-auth.yml`. The owner-login gate in
      `idea-intake-autoadd.yml` is **no longer a tenant surface** — it reads the
      `OWNER_APPROVAL_LOGIN` repository variable (the same variable `pr-auto-merge.yml` uses), so

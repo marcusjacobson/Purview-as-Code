@@ -129,7 +129,7 @@ ADR 0029 contract:
 
 - `irm_direction_policy` — `audit` / `portal-wins` (default) / `repo-wins`.
 - `confirm_overwrite_irm` — typed `overwrite portal` token, gates `repo-wins` per [ADR 0029](../../adr/0029-source-of-truth-direction-policy.md).
-- `skip_names_irm` — comma list passed through to `-SkipNames`; defaults to the 4-name [ADR 0036](../../adr/0036-irm-tenant-setting-immovable.md) baseline (byte-matched against `deploy-data-plane.yml` and `sync-irm-from-tenant.yml`).
+- `skip_names_irm` — comma list passed through to `-SkipNames`; defaults to the 4-name [ADR 0036](../../adr/0036-irm-tenant-setting-immovable.md) baseline. This default is byte-matched against [`sync-irm-from-tenant.yml`](../../../.github/workflows/sync-irm-from-tenant.yml) — a **two-way** lockstep. It was a three-way lockstep until [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) retired the monolithic `deploy-data-plane.yml`, whose copy was the third leg (and was dead code that never once ran).
 
 A fail-fast `Validate dispatch inputs` step runs before Azure login and
 rejects a `repo-wins` dispatch without the typed token. Workflow-scope
@@ -148,14 +148,23 @@ gh workflow run deploy-irm.yml
 gh workflow run deploy-irm.yml -f irm_direction_policy=repo-wins -f confirm_overwrite_irm='overwrite portal'
 ```
 
-### Monolithic step — `deploy-data-plane.yml`
+### The retired monolithic step
 
-The `Deploy IRM policies` step in [`.github/workflows/deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml)
-runs the same reconciler inside the shared `kv-open` / `kv-close` window,
-immediately after `Deploy file plan`, threading the same three
-`irm_direction_policy` / `confirm_overwrite_irm` / `skip_names_irm` inputs
-(mirroring the Records step shape, PR #588). Use it when applying the whole
-data plane together; use `deploy-irm.yml` when iterating on IRM alone.
+[`deploy-irm.yml`](../../../.github/workflows/deploy-irm.yml) is the **only**
+forward-apply path for IRM policies. The monolithic `deploy-data-plane.yml`,
+which once carried a `Deploy IRM policies` step threading the same three
+inputs, was retired by
+[ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md):
+it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap, so
+it failed at startup and **never once executed** (90 runs, 0 successes, 0 jobs
+scheduled). There is no "apply the whole data plane together" entry point, and a
+`deploy-all.yml` orchestrator is explicitly deferred as greenfield
+`workflow_call` work.
+
+This surface is in fact ADR 0051's own Evidence 3: `deploy-irm.yml` exists
+*because* a single-job monolith cannot apply one surface in isolation and goes
+red on surfaces whose prerequisites are absent, destroying the forward-apply
+evidence for the surface you actually wanted.
 
 ## Reverse drift-detection (Tier-3 — issue, not PR)
 
@@ -192,7 +201,8 @@ How it detects drift, without the pitfalls of the retired generic
   so the workflow does **not** pass `-SkipNames`. It removes the
   [ADR 0036](../../adr/0036-irm-tenant-setting-immovable.md) baseline
   names from the returned rows after the fact. The `skip_names_irm`
-  input default mirrors the `deploy-data-plane.yml` default verbatim.
+  input default mirrors the [`deploy-irm.yml`](../../../.github/workflows/deploy-irm.yml)
+  default verbatim — the surviving two-way byte-lockstep.
 - **Self-provisioned labels.** `gh issue create --label <name>` fails
   the whole call if a referenced label is missing (a fresh fork lacks
   `drift-detected`), so the issue step reads the existing label set and

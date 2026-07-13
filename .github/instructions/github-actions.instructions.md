@@ -33,7 +33,7 @@ Before adding or modifying any step, action, or authentication block:
 ## Environments and approvals
 
 - Deployments target a GitHub Environment (`lab`, `prod`, …). `prod` requires required reviewers. Environment protection rules are the only gate between a merged PR and a control-plane change.
-- `deploy-infra` and `deploy-data-plane` workflows must declare `environment: <name>`.
+- Every deploying workflow must declare `environment: <name>`: `deploy-infra` on the control plane, and each per-solution `deploy-<solution>` workflow on the data plane ([ADR 0051](../../docs/adr/0051-per-solution-workflow-unit-of-data-plane-apply.md)).
 
 ## Action supply chain
 

@@ -69,7 +69,9 @@ For a near-unattended end-to-end smoke that exercises Create → Read → Update
 
 ## ADR 0029 contract
 
-This reconciler conforms to [ADR 0029 — Source-of-truth direction policy](../../adr/0029-source-of-truth-direction-policy.md). The script accepts `-DirectionPolicy {audit, portal-wins, repo-wins}` and `-SkipNames <string[]>`; the [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) workflow exposes matching `collections_direction_policy`, `confirm_overwrite_collections`, and `skip_names_collections` dispatch inputs with the `overwrite portal` typed-confirmation gate on `repo-wins`. The pre-flight gate-step refuses a `repo-wins` dispatch missing the token.
+This reconciler conforms to [ADR 0029 — Source-of-truth direction policy](../../adr/0029-source-of-truth-direction-policy.md). The script accepts `-DirectionPolicy {audit, portal-wins, repo-wins}` and `-SkipNames <string[]>`.
+
+> **No automated apply path yet.** No per-solution workflow owns collections, so merging `data-plane/collections/**` applies nothing on its own. **Interim apply path: run [`scripts/Deploy-Collections.ps1`](../../../scripts/Deploy-Collections.ps1) locally.** The monolithic `deploy-data-plane.yml` that once advertised matching `collections_direction_policy` / `confirm_overwrite_collections` / `skip_names_collections` dispatch inputs was retired by [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) — it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and therefore **never once executed** (90 runs, 0 successes, 0 jobs scheduled), so those inputs never applied anything. Nothing was lost. **Note that the `overwrite portal` typed-confirmation gate on `repo-wins` was a workflow pre-flight step, not a script parameter** — running the reconciler locally, `-DirectionPolicy repo-wins` is destructive with no typed-confirmation prompt, so preview with `-DirectionPolicy audit` first. Backfilling a `deploy-collections.yml` (which restores that gate) is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
 ## Phase 1 drift-review evidence (PR #613)
 

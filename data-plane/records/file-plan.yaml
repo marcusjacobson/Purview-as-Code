@@ -75,10 +75,13 @@
 #   property objects into every tenant (3 authorities, 13 categories,
 #   5 citations, 10 departments). These cannot be deleted via any
 #   documented IPPS surface as of 2026-06-07; ADR-0035 ratifies them as
-#   permanent declared orphans. The reconciler skips them via the
-#   `skip_names_records` workflow input (default list maintained in
-#   .github/workflows/deploy-data-plane.yml; source of truth is the table
-#   in docs/adr/0035-records-seed-content-immovable.md).
+#   permanent declared orphans. The reconciler skips them via -SkipNames.
+#   The table in docs/adr/0035-records-seed-content-immovable.md is now the
+#   SOLE source of truth: the operational copy lived in the retired
+#   deploy-data-plane.yml `skip_names_records` input default (ADR 0051), and
+#   no per-solution workflow owns this surface yet (issue #80). A local run
+#   must therefore pass -SkipNames explicitly -- nothing supplies it for you,
+#   and -PruneMissing without it yields 31 Failed rows (#582 post-mortem).
 #   Empty `[]` lists below remain the desired-state for *lab-authored*
 #   property objects; the 31 seeds belong to Microsoft, not to this repo.
 #   Authorities  (3): Business, Legal, Regulatory

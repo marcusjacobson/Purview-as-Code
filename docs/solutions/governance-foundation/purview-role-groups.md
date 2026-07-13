@@ -94,7 +94,9 @@ Behavior:
 - Tenant-side audit logs attribute writes to your user identity, not the workload app.
 - Requires your user to hold the same Exchange role group membership the workload identity does (typically `Organization Management`).
 
-**CI must not use `-Interactive`.** The deploy-data-plane workflow runs unattended; the switch is rejected by review on any change to [`.github/workflows/deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) that introduces it.
+**CI must not use `-Interactive`.** Any workflow that runs this reconciler runs unattended, so the switch is rejected by review on any change that introduces it into `.github/workflows/**`.
+
+> **No automated apply path yet.** No per-solution workflow owns Purview role groups, so merging `data-plane/role-groups/**` applies nothing on its own. **Interim apply path: run [`scripts/Deploy-PurviewRoleGroups.ps1`](../../../scripts/Deploy-PurviewRoleGroups.ps1) locally.** The monolithic `deploy-data-plane.yml` that once claimed this surface was retired by [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) — it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and therefore **never once executed** (90 runs, 0 successes, 0 jobs scheduled). Nothing was lost: the apply path it advertised did not exist. Backfilling a `deploy-role-groups.yml` is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
 ## References
 

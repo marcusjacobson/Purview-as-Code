@@ -315,18 +315,20 @@ $rulesUsingAdvancedRule = Select-String `
 
 ### 10. CI workflow exercises the DLP reconciler
 
-Two CI paths now invoke `Deploy-DLPPolicies.ps1`:
+Exactly one CI path invokes `Deploy-DLPPolicies.ps1`:
 
 - [`deploy-dlp.yml`](../../.github/workflows/deploy-dlp.yml) — the
-  dedicated per-domain forward-apply workflow. Runs the surface in
-  isolation with the full ADR 0029 enumerate → apply → drift-back
-  ceremony (default `direction_policy=portal-wins`), plus a `push:`
-  trigger on the DLP data-plane paths. Preferred for DLP-only applies.
-- [`deploy-data-plane.yml`](../../.github/workflows/deploy-data-plane.yml) —
-  the monolithic `workflow_dispatch:`-only path that still carries a
-  `Deploy DLP policies` step inside the Key Vault firewall window
-  (shipped under issue #562); it reconciles every data-plane surface in
-  one run.
+  per-solution forward-apply workflow that owns this surface and nothing
+  else. Runs it in isolation with the full ADR 0029 enumerate → apply →
+  drift-back ceremony (default `direction_policy=portal-wins`), plus a
+  `push:` trigger on the DLP data-plane paths.
+
+The monolithic `deploy-data-plane.yml`, which once carried a second
+`Deploy DLP policies` step, was retired by
+[ADR 0051](../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md):
+it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap,
+so it failed at startup and **never once executed** (90 runs, 0 successes,
+0 jobs scheduled). There is no "reconcile every surface in one run" path.
 
 The reverse leg — [`sync-dlp-from-tenant.yml`](../../.github/workflows/sync-dlp-from-tenant.yml) —
 runs `-ExportCurrentState` on a daily schedule (07:00 UTC) plus

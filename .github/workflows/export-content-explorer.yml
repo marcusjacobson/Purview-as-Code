@@ -27,7 +27,7 @@ jobs:
   export:
     runs-on: ubuntu-latest
     environment: lab
-    # Slightly larger than the deploy-data-plane defaults because the
+    # Slightly larger than the per-solution deploy-*.yml defaults because the
     # exporter paginates per (item, workload) pair with a 1-second
     # throttle between calls (ADR 0021 Decision 7).
     timeout-minutes: 90

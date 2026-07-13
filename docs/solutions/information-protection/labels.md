@@ -43,10 +43,11 @@ this repo:
 3. Connect with `Connect-IPPSSession -AccessToken -Organization <tenant-domain> -ShowBanner:$false`.
 
 In CI, GitHub Actions uses `azure/login@v2` with OpenID Connect before the script signs the Security & Compliance
-PowerShell assertion. The labels step also appears in
-[`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml); use the dedicated
-[`deploy-labels.yml`](../../../.github/workflows/deploy-labels.yml) workflow when you need the ADR 0029
-`direction_policy` and label-prune ceremony.
+PowerShell assertion. Sensitivity labels are applied by
+[`deploy-labels.yml`](../../../.github/workflows/deploy-labels.yml) — the per-solution workflow that owns this
+surface and nothing else, per [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md). It is
+the **only** forward-apply path for labels, and it carries the full ADR 0029 `direction_policy` and label-prune
+ceremony.
 
 ## Inputs
 
@@ -125,13 +126,11 @@ PowerShell assertion. The labels step also appears in
      --field 'confirm_overwrite=overwrite portal'
    ```
 
-   The monolithic data-plane dispatch can plan or apply the taxonomy step, but it does not expose the full label
-   direction-policy surface:
-
-   ```pwsh
-   gh workflow run deploy-data-plane.yml --ref main --field plan_labels_only=true
-   gh workflow run deploy-data-plane.yml --ref main --field plan_labels_only=false
-   ```
+   `deploy-labels.yml` is the only dispatch for this surface. The monolithic data-plane workflow that once
+   carried a `plan_labels_only` taxonomy step was retired by
+   [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) — it never once executed, and it
+   never exposed the full label direction-policy surface anyway. Use `direction_policy=audit` above for a
+   read-only plan.
 
 5. **Verify.** Re-run audit mode and inspect the plan for `NoChange`, `Skip`, `Blocked`, or `NeedsPortalAction`.
    Use [`labels-direction-policy.md`](../../runbooks/labels-direction-policy.md) for the ADR 0029 workflow modes,

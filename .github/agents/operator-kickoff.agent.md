@@ -116,7 +116,7 @@ Present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pa
 3. `[Cancel]`
 
 > **Choosing between them.** Local-workspace mode has **no GitHub remote** — the deploy story
-> (`deploy-infra` / `deploy-data-plane` workflows, OIDC federated credentials, the `owner-approved`
+> (`deploy-infra` / per-solution `deploy-<solution>` workflows, OIDC federated credentials, the `owner-approved`
 > auto-merge gate) all assume a GitHub-backed repo. If the owner's goal is full CI/CD-driven
 > governance, steer them to **spin-off** mode (or **Use this template** on GitHub). Local mode is
 > for a disconnected, apply-by-hand workspace only.

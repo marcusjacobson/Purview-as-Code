@@ -129,7 +129,8 @@ automation:
     # Wave 0 #5b — control-plane Entra app. Bound to deploy-infra.yml.
     controlPlane:
       displayName: gh-oidc-purview-control-plane
-    # Wave 0 #5b — data-plane Entra app. Bound to deploy-data-plane.yml.
+    # Wave 0 #5b — data-plane Entra app. Bound to the per-solution
+    # deploy-<solution>.yml data-plane workflows (ADR 0051).
     # Wave 0 #5c adds the certificate credential + Key Vault RBAC to this
     # app; the control-plane app intentionally stays cert-free per
     # ADR 0011 decision #5.

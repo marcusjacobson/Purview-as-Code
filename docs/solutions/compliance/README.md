@@ -13,7 +13,7 @@ Operational documentation for the Microsoft Purview compliance features managed 
 
 - **Data plane.** YAML files under [`data-plane/`](../../../data-plane/) are the declared state for each reconciler. DLP, custom classifications, and adaptive scopes can produce apply plans; Communication Compliance is intentionally drift-detection only.
 - **Scripts.** PowerShell helpers under [`scripts/`](../../../scripts/) read the YAML, authenticate to either Microsoft Purview Data Map REST or Security & Compliance PowerShell, then emit categorized drift reports.
-- **CI/CD.** [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) currently applies DLP and custom classifications. SIT catalog sync, Communication Compliance drift checks, and adaptive scopes remain local/operator-run until a dedicated workflow step is added.
+- **CI/CD.** Only **DLP** has an automated apply path: [`deploy-dlp.yml`](../../../.github/workflows/deploy-dlp.yml), the per-solution workflow that owns that surface ([ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md)). **Custom classifications, SIT catalog sync, Communication Compliance drift checks, and adaptive scopes have no automated apply path yet** — they are local/operator-run via their `scripts/Deploy-*.ps1` reconciler until a per-solution workflow is backfilled ([#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80)).
 - **Operational runbooks.** End-to-end and probe procedures live under [`docs/runbooks/`](../../runbooks/). The pages here link to those runbooks when a smoke or validation procedure exists.
 
 ## Conventions

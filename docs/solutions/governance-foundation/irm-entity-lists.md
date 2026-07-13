@@ -93,13 +93,14 @@ Expected: 1 `Skipped` row, zero anything else.
 
 ## CI wiring
 
-The `Deploy IRM entity lists` step in [`.github/workflows/deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) runs the reconciler inside the shared `kv-open` / `kv-close` window, immediately after `Deploy IRM policies`. Three `workflow_dispatch` inputs thread the ADR 0029 contract through to the reconciler:
+> **No automated apply path yet.** IRM *policies* have a per-solution workflow ([`deploy-irm.yml`](../../../.github/workflows/deploy-irm.yml)); IRM **entity lists** do **not**. Merging `data-plane/irm/entity-lists.yaml` applies nothing on its own. **Interim apply path: run [`scripts/Deploy-IRMEntityLists.ps1`](../../../scripts/Deploy-IRMEntityLists.ps1) locally.** The monolithic `deploy-data-plane.yml` that once carried a `Deploy IRM entity lists` step (inputs `irm_entity_list_direction_policy`, `confirm_overwrite_irm_entity_list`, `skip_names_irm_entity_list`) was retired by [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) — it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and therefore **never once executed** (90 runs, 0 successes, 0 jobs scheduled), so that step never applied anything. Nothing was lost. Backfilling a `deploy-irm-entity-lists.yml` is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
-- `irm_entity_list_direction_policy` -- `audit` / `portal-wins` (default) / `repo-wins`.
-- `confirm_overwrite_irm_entity_list` -- typed `overwrite portal` token, gates `repo-wins` per [ADR 0029](../../adr/0029-source-of-truth-direction-policy.md).
-- `skip_names_irm_entity_list` -- comma list passed through to `-SkipNames`; defaults to `IRM-Lab-Priority-Users` per [ADR 0039](../../adr/0039-irm-entity-list-tracked-fields.md).
+The script-side contract is unaffected and remains the live surface:
 
-A fail-fast `Validate IRM entity list dispatch inputs` step runs before Azure login and rejects a `repo-wins` dispatch without the typed token.
+- `-DirectionPolicy` -- `audit` / `portal-wins` (default) / `repo-wins`, per [ADR 0029](../../adr/0029-source-of-truth-direction-policy.md).
+- `-SkipNames` -- pass `IRM-Lab-Priority-Users` per [ADR 0039](../../adr/0039-irm-entity-list-tracked-fields.md). **This was a workflow input default; with the workflow gone it is no longer applied for you** — supply it explicitly on the command line, or the declared orphan will surface as drift.
+
+**The typed `overwrite portal` confirmation that gated `repo-wins` was a workflow pre-flight step, not a script parameter** — locally, `-DirectionPolicy repo-wins` is destructive with no prompt. Preview with `-DirectionPolicy audit` first.
 
 ## Related ADRs and runbooks
 

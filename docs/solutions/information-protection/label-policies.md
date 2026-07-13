@@ -43,8 +43,9 @@ The script uses the Security & Compliance PowerShell app-only path shared with t
 
 CI uses GitHub Actions OpenID Connect for the Azure login context before the Security & Compliance PowerShell token
 is minted. Label policies are applied by the dedicated
-[`deploy-label-policies.yml`](../../../.github/workflows/deploy-label-policies.yml) workflow, not by the monolithic
-`deploy-data-plane.yml` label step.
+[`deploy-label-policies.yml`](../../../.github/workflows/deploy-label-policies.yml) workflow — the per-solution
+workflow that owns this surface and nothing else, per
+[ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md).
 
 ## Inputs
 

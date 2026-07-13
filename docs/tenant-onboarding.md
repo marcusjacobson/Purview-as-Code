@@ -169,7 +169,22 @@ Run the workflows from the **Actions** tab (or follow [Getting started §4](gett
 
 1. **`deploy-infra`** — provisions / reconciles the `Microsoft.Purview/accounts` resource and its
    dependencies. See [Microsoft.Purview/accounts (Bicep)](https://learn.microsoft.com/en-us/azure/templates/microsoft.purview/accounts).
-2. **`deploy-data-plane`** — applies the desired-state catalog content under `data-plane/`.
+2. **The per-solution `deploy-<solution>` workflows** — each applies the desired-state content for
+   exactly **one** data-plane surface under `data-plane/`, per
+   [ADR 0051](adr/0051-per-solution-workflow-unit-of-data-plane-apply.md). Five exist today:
+   [`deploy-labels`](../.github/workflows/deploy-labels.yml),
+   [`deploy-label-policies`](../.github/workflows/deploy-label-policies.yml),
+   [`deploy-auto-label-policies`](../.github/workflows/deploy-auto-label-policies.yml),
+   [`deploy-dlp`](../.github/workflows/deploy-dlp.yml), and
+   [`deploy-irm`](../.github/workflows/deploy-irm.yml).
+
+   > **Every other data-plane surface has no automated apply path yet.** Collections, glossary,
+   > classifications, data sources, scans, administrative units, Purview role groups, audit
+   > retention, retention/DLM, records/file plan, IRM entity lists, and unified catalog are applied
+   > by running their [`scripts/Deploy-*.ps1`](../scripts/) reconciler **locally** from your
+   > workstation. This is the honest state of the repo, not an omission: backfilling the missing
+   > per-solution workflows is tracked in
+   > [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
 After the first deploy, the ongoing per-feature lifecycle is agent-led
 (`@idea-intake` → `@artifact-resolver` → `@owner-approval`); populate

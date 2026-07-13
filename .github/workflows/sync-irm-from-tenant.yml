@@ -1,7 +1,8 @@
 name: sync-irm-from-tenant
 
-# Reverse drift-detection companion to the Insider Risk Management (IRM)
-# leg of deploy-data-plane.yml. Detects portal-only edits to the
+# Reverse drift-detection companion to deploy-irm.yml, the per-solution
+# forward-apply workflow for the Insider Risk Management (IRM) policy
+# surface (ADR 0051). Detects portal-only edits to the
 # Microsoft Purview Insider Risk Management policy surface in the
 # contoso.onmicrosoft.com tenant and opens (or refreshes) a GitHub
 # ISSUE describing the drift.
@@ -13,11 +14,11 @@ name: sync-irm-from-tenant
 # data-plane/irm/policies.yaml as a re-export pull request. Instead it
 # runs the reconciler in read-only ADR 0029 audit mode and opens a
 # GitHub issue so a human decides how to reconcile (accept into YAML,
-# overwrite the portal via deploy-data-plane.yml repo-wins, or ratify
-# via an ADR). This is the reverse leg the companion-workflow rule in
+# overwrite the portal via deploy-irm.yml repo-wins, or ratify via an
+# ADR). This is the reverse leg the companion-workflow rule in
 # .github/instructions/github-actions.instructions.md requires; the
-# forward apply leg lives in the `Deploy IRM policies` step of
-# deploy-data-plane.yml and is gated by its own ADR 0029 contract.
+# forward apply leg is deploy-irm.yml, which owns this surface and
+# nothing else and is gated by its own ADR 0029 contract.
 #
 # Why not the generic drift-detection.yml: that workflow greps a
 # "Plan: N adds/updates/removes" banner these compliance-plane
@@ -42,9 +43,10 @@ name: sync-irm-from-tenant
 # -SkipNames to the script. It instead removes the ADR 0036 skip
 # baseline names from the returned object rows after the fact. The
 # baseline default mirrors the `skip_names_irm` default in
-# deploy-data-plane.yml verbatim (1 Microsoft-managed
-# IRM_Tenant_Setting_* policy + 4 operator-authored mid-testing
-# policies; docs/adr/0036-irm-tenant-setting-immovable.md).
+# deploy-irm.yml verbatim -- a TWO-way byte-lockstep, reduced from
+# three-way when ADR 0051 retired deploy-data-plane.yml (1
+# Microsoft-managed IRM_Tenant_Setting_* policy + 4 operator-authored
+# mid-testing policies; docs/adr/0036-irm-tenant-setting-immovable.md).
 #
 # Self-provisioned issue labels: `gh issue create --label <name>`
 # fails the entire call (and creates nothing) if any referenced label
@@ -103,7 +105,8 @@ on:
           here: the reconciler classifies it NoChange via a name-prefix
           wildcard, so it never plans a mutation regardless of this list.
           Keep this default in lockstep with the `skip_names_irm` default
-          in deploy-data-plane.yml and ADR 0036's source-of-truth table.
+          in deploy-irm.yml (a TWO-way lockstep since ADR 0051 retired
+          deploy-data-plane.yml) and ADR 0036's source-of-truth table.
         type: string
         default: 'IRM Lab — Data leaks by priority users,IRM Lab — Data theft by departing users,IRM Lab — General data leaks,IRM Lab — Risky AI usage'
         required: false
@@ -248,8 +251,8 @@ jobs:
           [void]$sb.AppendLine('')
           [void]$sb.AppendLine('1. Review this run for the full audit-mode plan: ' + $runUrl)
           [void]$sb.AppendLine('2. Decide how to reconcile each drifted policy:')
-          [void]$sb.AppendLine('   - **Accept into source** — add / update the entry in `data-plane/irm/policies.yaml`, then let the `Deploy IRM policies` step of `deploy-data-plane.yml` converge.')
-          [void]$sb.AppendLine('   - **Overwrite the portal** — dispatch `deploy-data-plane.yml` with `irm_direction_policy=repo-wins` and the typed `confirm_overwrite_irm=overwrite portal` token.')
+          [void]$sb.AppendLine('   - **Accept into source** — add / update the entry in `data-plane/irm/policies.yaml`, then let `deploy-irm.yml` converge (it applies on merge via its `push:` path trigger).')
+          [void]$sb.AppendLine('   - **Overwrite the portal** — dispatch `deploy-irm.yml` with `irm_direction_policy=repo-wins` and the typed `confirm_overwrite_irm=overwrite portal` token.')
           [void]$sb.AppendLine('   - **Ratify the deviation** — extend the `skip_names_irm` baseline (and ADR 0036) if the policy is intentionally portal-owned.')
           [void]$sb.AppendLine('3. Close this issue once the drift is resolved. The next scheduled run reopens a fresh issue only if drift remains.')
           [void]$sb.AppendLine('')

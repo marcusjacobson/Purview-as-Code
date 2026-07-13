@@ -16,10 +16,14 @@ where the policy/rule blast radius is understood.
   [`data-plane/information-protection/`](../../../data-plane/information-protection/). The PowerShell
   reconcilers apply those YAML manifests through Security & Compliance PowerShell using the shared
   Key Vault-signed app-only authentication path.
-- **Workflows.** The monolithic [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml)
-  currently runs the sensitivity-label taxonomy step. Label publishing and service-side auto-labeling use
-  their dedicated workflows: [`deploy-label-policies.yml`](../../../.github/workflows/deploy-label-policies.yml)
-  and [`deploy-auto-label-policies.yml`](../../../.github/workflows/deploy-auto-label-policies.yml).
+- **Workflows.** Every surface in this area has its own per-solution workflow, the unit of data-plane apply
+  per [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md): the sensitivity-label
+  taxonomy uses [`deploy-labels.yml`](../../../.github/workflows/deploy-labels.yml), label publishing uses
+  [`deploy-label-policies.yml`](../../../.github/workflows/deploy-label-policies.yml), and service-side
+  auto-labeling uses [`deploy-auto-label-policies.yml`](../../../.github/workflows/deploy-auto-label-policies.yml).
+  Information Protection is the best-covered area in the repo — most other data-plane surfaces still have
+  **no automated apply path** and are applied by running their reconciler locally
+  ([#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80)).
 - **Runbooks.** Direction-policy, destructive label pruning, and manual portal follow-up procedures live under
   [`docs/runbooks/`](../../runbooks/). These solution pages describe steady-state operation and link to the
   runbooks where an operator needs a ceremony.

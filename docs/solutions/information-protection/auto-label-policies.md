@@ -45,8 +45,9 @@ reconciler:
 
 CI uses GitHub Actions OpenID Connect for Azure before the Security & Compliance PowerShell token is minted.
 Auto-label policies are applied by the dedicated
-[`deploy-auto-label-policies.yml`](../../../.github/workflows/deploy-auto-label-policies.yml) workflow, not by the
-monolithic `deploy-data-plane.yml` sensitivity-label step.
+[`deploy-auto-label-policies.yml`](../../../.github/workflows/deploy-auto-label-policies.yml) workflow — the
+per-solution workflow that owns this surface and nothing else, per
+[ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md).
 
 ## Inputs
 

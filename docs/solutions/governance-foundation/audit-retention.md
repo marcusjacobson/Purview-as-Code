@@ -84,11 +84,11 @@ Tenant policies : 0
 
 ## CI wiring
 
-The `Set audit retention policies` step in [`.github/workflows/deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) runs the reconciler inside the shared `kv-open` / `kv-close` window. Three dispatch inputs wire through the ADR 0029 contract: `audit_retention_direction_policy`, `confirm_overwrite_audit_retention`, and `skip_names_audit_retention`. A `Validate audit retention dispatch inputs` pre-flight step refuses a `repo-wins` dispatch missing the typed-confirmation token.
+> **No automated apply path yet.** No per-solution workflow owns audit retention, so merging `data-plane/audit/**` applies nothing on its own. **Interim apply path: run [`scripts/Set-AuditRetentionPolicy.ps1`](../../../scripts/Set-AuditRetentionPolicy.ps1) locally.** The monolithic `deploy-data-plane.yml` that once carried a `Set audit retention policies` step (inputs `audit_retention_direction_policy`, `confirm_overwrite_audit_retention`, `skip_names_audit_retention`) was retired by [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) — it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and therefore **never once executed** (90 runs, 0 successes, 0 jobs scheduled), so that step never applied anything. Nothing was lost. Backfilling a `deploy-audit-retention.yml` is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
 ## ADR 0029 contract
 
-This reconciler conforms to [ADR 0029 — Source-of-truth direction policy](../../adr/0029-source-of-truth-direction-policy.md). The script accepts `-DirectionPolicy {audit, portal-wins, repo-wins}` and `-SkipNames <string[]>`; the [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) workflow exposes matching `audit_retention_direction_policy`, `confirm_overwrite_audit_retention`, and `skip_names_audit_retention` dispatch inputs with the `overwrite portal` typed-confirmation gate on `repo-wins`. The pre-flight gate-step refuses a `repo-wins` dispatch missing the token.
+This reconciler conforms to [ADR 0029 — Source-of-truth direction policy](../../adr/0029-source-of-truth-direction-policy.md). The script accepts `-DirectionPolicy {audit, portal-wins, repo-wins}` and `-SkipNames <string[]>`. **The `overwrite portal` typed-confirmation gate on `repo-wins` was a workflow pre-flight step, not a script parameter** — running the reconciler locally, `-DirectionPolicy repo-wins` is destructive with no typed-confirmation prompt, so preview with `-DirectionPolicy audit` first. Restoring that gate is part of the per-solution workflow backfill ([#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80)).
 
 ## References
 

@@ -20,9 +20,22 @@ Every reconciler follows the same full-circle contract, so every feature is mana
 2. **Edit** — change the YAML to add, modify, or remove an item. Open a pull request.
 3. **Preview** — `./scripts/Deploy-<Domain>.ps1 -WhatIf` emits the drift report
    (Create / Update / NoChange / Orphan / Conflict). No writes.
-4. **Apply** — run the reconciler (locally, or dispatch the
-   [`deploy-data-plane`](../../.github/workflows/deploy-data-plane.yml) workflow). Destructive
-   pruning is opt-in behind `-PruneMissing` and the `destructive` PR label.
+4. **Apply** — how you apply depends on whether the surface has a **per-solution workflow**, which is
+   the unit of data-plane apply per
+   [ADR 0051](../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md):
+   - **Surfaces that have one** — sensitivity labels
+     ([`deploy-labels`](../../.github/workflows/deploy-labels.yml)), label policies
+     ([`deploy-label-policies`](../../.github/workflows/deploy-label-policies.yml)), auto-labeling
+     policies ([`deploy-auto-label-policies`](../../.github/workflows/deploy-auto-label-policies.yml)),
+     DLP ([`deploy-dlp`](../../.github/workflows/deploy-dlp.yml)), and IRM
+     ([`deploy-irm`](../../.github/workflows/deploy-irm.yml)) — apply on merge to `main` via the
+     workflow's `push:` path trigger, or by manual dispatch.
+   - **Every other surface** — **no automated apply path yet.** Run
+     `./scripts/Deploy-<Domain>.ps1` locally. Merging the YAML alone changes nothing. Backfilling the
+     missing per-solution workflows is tracked in
+     [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
+
+   Destructive pruning is opt-in behind `-PruneMissing` and the `destructive` PR label.
 5. **Verify** — run the feature's end-to-end smoke runbook under [`docs/runbooks/`](../runbooks/).
 
 The reconciler contract (switches, drift report, direction policy) is defined in

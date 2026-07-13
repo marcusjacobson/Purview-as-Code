@@ -71,7 +71,8 @@ Reference: [Authenticate for Purview APIs](https://learn.microsoft.com/en-us/pur
 
 - [`validate.yml`](../workflows/validate.yml) — runs on every PR and push to `main`.
 - [`deploy-infra.yml`](../workflows/deploy-infra.yml) — control plane; triggered by changes under `infra/**`.
-- [`deploy-data-plane.yml`](../workflows/deploy-data-plane.yml) — data plane; triggered by changes under `data-plane/**` or `scripts/**`.
+- **The per-solution `deploy-<solution>.yml` workflows** — data plane, **one workflow per surface** ([ADR 0051](../../docs/adr/0051-per-solution-workflow-unit-of-data-plane-apply.md)). Each is triggered by changes to the `data-plane/**` path and the single `scripts/Deploy-*.ps1` reconciler it owns. Five exist today: [`deploy-labels.yml`](../workflows/deploy-labels.yml), [`deploy-label-policies.yml`](../workflows/deploy-label-policies.yml), [`deploy-auto-label-policies.yml`](../workflows/deploy-auto-label-policies.yml), [`deploy-dlp.yml`](../workflows/deploy-dlp.yml), [`deploy-irm.yml`](../workflows/deploy-irm.yml).
+  - **Surfaces with no per-solution workflow have no CI apply path at all.** Do not tell an operator that merging their YAML applies it. The apply path is running the surface's `scripts/Deploy-*.ps1` reconciler locally. Backfill is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
 ## Rules for the agent
 

@@ -78,8 +78,11 @@
     `Connect-ExchangeOnline -UserPrincipalName`. Intended for local-dev
     runs from a workstation that cannot reach the Key Vault (PNA=
     Disabled, no private-link path). Opens a browser MFA flow. CI must
-    not use this switch; the deploy-data-plane workflow always runs
-    app-only via the KV-side JWT signing path.
+    not use this switch; any workflow running this reconciler always
+    runs app-only via the KV-side JWT signing path. NOTE: no
+    per-solution workflow owns the unified audit log today (ADR 0051;
+    backfill tracked in issue #80), so the documented apply path for
+    this surface is a LOCAL run of this script.
 
 .PARAMETER UserPrincipalName
     UPN to pre-populate in the interactive sign-in dialog. Used only

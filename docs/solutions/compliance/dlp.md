@@ -16,7 +16,7 @@ Do not add tenant IDs, object IDs, UPNs, or real sample payloads to this file. U
 
 ## Authentication
 
-This surface uses Security & Compliance PowerShell, not the Microsoft Purview Data Map REST token path. Locally, the script expects an active `az login` session and uses the lab automation identity to sign an app-only token with the Key Vault certificate resolved from `infra/parameters/lab.yaml`. In CI, [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) runs the same script inside the Key Vault open/close window.
+This surface uses Security & Compliance PowerShell, not the Microsoft Purview Data Map REST token path. Locally, the script expects an active `az login` session and uses the lab automation identity to sign an app-only token with the Key Vault certificate resolved from `infra/parameters/lab.yaml`. In CI, [`deploy-dlp.yml`](../../../.github/workflows/deploy-dlp.yml) — the per-solution workflow that owns this surface ([ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md)) — runs the same script inside the Key Vault open/close window.
 
 The script resolves `-VaultName`, `-CertificateName`, `-DataPlaneAppDisplayName`, and `-TenantDomain` from the parameters file when they are not passed explicitly.
 
@@ -91,10 +91,13 @@ The script resolves `-VaultName`, `-CertificateName`, `-DataPlaneAppDisplayName`
      -f confirm_overwrite='overwrite portal'
    ```
 
-   The monolithic [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml)
-   still carries a `Deploy DLP policies` step (inputs `dlp_direction_policy`,
-   `confirm_overwrite_dlp`, `skip_names_dlp`) when you need to reconcile
-   every data-plane surface in one run.
+   [`deploy-dlp.yml`](../../../.github/workflows/deploy-dlp.yml) is the **only**
+   forward-apply path for DLP. The monolithic `deploy-data-plane.yml`, which
+   once carried a `Deploy DLP policies` step, was retired by
+   [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md):
+   it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and
+   so never once executed. There is no "reconcile every surface in one run"
+   entry point, and an `deploy-all.yml` orchestrator is explicitly deferred.
 
 1. Detect portal drift with the reverse companion
    [`sync-dlp-from-tenant.yml`](../../../.github/workflows/sync-dlp-from-tenant.yml),

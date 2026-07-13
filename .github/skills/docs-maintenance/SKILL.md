@@ -73,9 +73,17 @@ reference. Sections, in order:
    full-circle switches (`-WhatIf`, `-PruneMissing`, `-Force`, `-ExportCurrentState`) and the
    direction-policy parameters (`-DirectionPolicy`, `-SkipNames`) where present.
 7. **`## Manage <feature> with this repo`** — numbered end-to-end steps that cover add / change /
-   remove: hydrate (`-ExportCurrentState`) → edit YAML → preview (`-WhatIf`) → apply (local or
-   `deploy-data-plane` dispatch) → verify (smoke runbook link). Use concrete `pwsh` commands with
-   the account-name placeholder `purview-contoso-lab`.
+   remove: hydrate (`-ExportCurrentState`) → edit YAML → preview (`-WhatIf`) → apply → verify (smoke
+   runbook link). Use concrete `pwsh` commands with the account-name placeholder
+   `purview-contoso-lab`.
+
+   For the **apply** step, name the surface's own per-solution `deploy-<solution>.yml` workflow
+   ([ADR 0051](../../../docs/adr/0051-per-solution-workflow-unit-of-data-plane-apply.md)). If the
+   surface has **no** per-solution workflow, say so plainly — "no automated apply path yet" — name
+   the local `scripts/Deploy-*.ps1` reconciler as the interim path, and link the backfill tracker
+   [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80). **Never** paper over the gap
+   by silently omitting the apply step: a doc that hides a missing apply path is worse than one that
+   names it.
 8. **`## References`** — the evidence block (see below).
 
 Area `README.md` index pages mirror

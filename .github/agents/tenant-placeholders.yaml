@@ -219,8 +219,9 @@ tenantSurfaces:
     note: >-
       Workflows carry a FEW functional tenant values that MUST be replaced
       (missed by the pre-manifest edit list, ADR 0046). Replace only these:
-        * `KEY_VAULT_NAME: kv-contoso-lab-01` (env: in deploy-data-plane.yml,
-          kv-temp-unlock.yml, validate-oidc-auth.yml).
+        * `KEY_VAULT_NAME: kv-contoso-lab-01` (env: in every per-solution
+          deploy-<solution>.yml and sync-<solution>-from-tenant.yml, plus
+          drift-detection.yml, kv-temp-unlock.yml, validate-oidc-auth.yml).
         * `TENANT_DOMAIN: contoso.onmicrosoft.com` (env: in validate-oidc-auth.yml).
       The owner-login gate in idea-intake-autoadd.yml is NO LONGER a tenant
       surface: it now reads the `OWNER_APPROVAL_LOGIN` repository variable (the

@@ -107,7 +107,7 @@ Adaptive scopes use Security & Compliance PowerShell. Locally, the scripts expec
      -WhatIf
    ```
 
-1. Do not rely on [`deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) for adaptive scopes today. The workflow does not currently run `Deploy-AdaptiveScopes.ps1`. A future CI wiring PR should mirror the DLP direction-policy inputs and keep `-PruneMissing` off by default.
+1. Apply locally — **there is no automated apply path for adaptive scopes.** No per-solution workflow owns this surface, so merging `data-plane/adaptive-scopes/scopes.yaml` applies nothing on its own. Run [`scripts/Deploy-AdaptiveScopes.ps1`](../../../scripts/Deploy-AdaptiveScopes.ps1) from your workstation. Backfilling a `deploy-adaptive-scopes.yml` (mirroring the [`deploy-dlp.yml`](../../../.github/workflows/deploy-dlp.yml) direction-policy input shape, with `-PruneMissing` off by default) is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80); see [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md).
 
 1. Verify with another read-only plan.
 

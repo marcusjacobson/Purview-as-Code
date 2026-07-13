@@ -92,13 +92,9 @@ Orphan → Prune lifecycle), follow [`docs/runbooks/dlm-end-to-end-smoke.md`](..
 
 ## CI wiring
 
-The `Deploy retention policies` step in [`.github/workflows/deploy-data-plane.yml`](../../../.github/workflows/deploy-data-plane.yml) runs the reconciler inside the shared `kv-open` / `kv-close` window, immediately after `Set audit retention policies`. Three `workflow_dispatch` inputs thread the ADR 0029 contract through to the reconciler, mirroring the DLP step shape (PR #557 / #567):
+> **No automated apply path yet.** No per-solution workflow owns retention / data lifecycle management, so merging `data-plane/retention/**` applies nothing on its own. **Interim apply path: run [`scripts/Deploy-RetentionPolicies.ps1`](../../../scripts/Deploy-RetentionPolicies.ps1) locally.** The monolithic `deploy-data-plane.yml` that once carried a `Deploy retention policies` step (inputs `retention_direction_policy`, `confirm_overwrite_retention`, `skip_names_retention`) was retired by [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) — it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and therefore **never once executed** (90 runs, 0 successes, 0 jobs scheduled), so that step never applied anything. Nothing was lost. Backfilling a `deploy-retention.yml` is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
-- `retention_direction_policy` — `audit` / `portal-wins` (default) / `repo-wins`.
-- `confirm_overwrite_retention` — typed `overwrite portal` token, gates `repo-wins` per [ADR 0029](../../adr/0029-source-of-truth-direction-policy.md).
-- `skip_names_retention` — optional comma list passed through to `-SkipNames`.
-
-The `Validate retention dispatch inputs` pre-flight step fails the run cheap when `repo-wins` is selected without the typed-confirmation token. With desired state at `policies: []` the apply itself is a no-op; the inputs are scaffolding for the day the first retention policy is declared.
+The script-side ADR 0029 contract is unaffected and remains the live surface: pass `-DirectionPolicy {audit, portal-wins, repo-wins}` and `-SkipNames <string[]>` on the local command line. **The typed `overwrite portal` confirmation that gated `repo-wins` was a workflow pre-flight step, not a script parameter** — locally, `-DirectionPolicy repo-wins` is destructive with no prompt, so preview with `-DirectionPolicy audit` first. With desired state at `policies: []` the apply is a no-op regardless; the contract is scaffolding for the day the first retention policy is declared.
 
 ## ADR 0029 source-of-truth direction policy
 

@@ -31,7 +31,7 @@ From an empty copy to a tailored, deployable repo in six steps.
 3. **Tailor it.** Run the **Tenant Intake** agent [`@operator-tenant`](.github/agents/operator-tenant.agent.md). It interviews you for your tenant values and writes them into [`infra/parameters/lab.yaml`](infra/parameters/lab.yaml) and the identity-boundary statements.
 4. **Review the diff** the agent produced, then commit it on a branch.
 5. **Wire up identity.** Create the Microsoft Entra app + OIDC federated credential, set the GitHub Environment secrets, and set the `OWNER_APPROVAL_LOGIN` repository variable — see [Getting started §1–§2](docs/getting-started.md).
-6. **Validate and deploy.** Run `az bicep build` and the Pester suite, then the `deploy-infra` / `deploy-data-plane` workflows — see the [Tenant onboarding guide](docs/tenant-onboarding.md) and [Getting started §4](docs/getting-started.md).
+6. **Validate and deploy.** Run `az bicep build` and the Pester suite, then the `deploy-infra` workflow and the per-solution `deploy-<solution>` workflows — see the [Tenant onboarding guide](docs/tenant-onboarding.md) and [Getting started §4](docs/getting-started.md).
 
 ## Why two planes?
 
@@ -55,7 +55,7 @@ References:
 ```text
 .
 ├── .github/
-│   ├── workflows/  # CI (validate) and CD (deploy-infra, deploy-data-plane)
+│   ├── workflows/  # CI (validate) and CD (deploy-infra, per-solution deploy-*)
 │   ├── instructions/  # Path-scoped Copilot rules (Bicep, PowerShell, YAML, ...)
 │   ├── prompts/  # Reusable /-invoked task templates
 │   └── agents/  # Workspace-scoped Squad agents (personas)
@@ -114,7 +114,7 @@ References:
 2. **Create the deployment service principal** and grant it the required Purview data plane roles (one-time) — see [Authenticate for APIs](https://learn.microsoft.com/en-us/purview/data-gov-api-rest-data-plane).
 3. **Configure GitHub secrets/variables**: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `PURVIEW_ACCOUNT_NAME`.
 4. **Provision control plane**: push to `main`, the `deploy-infra` workflow runs `az deployment group create` against [`infra/main.bicep`](infra/main.bicep).
-5. **Deploy data plane**: `deploy-data-plane` workflow renders YAML under [`data-plane/`](data-plane/) into REST API calls.
+5. **Deploy data plane**: each surface is applied by its **own** per-solution workflow — [`deploy-labels`](.github/workflows/deploy-labels.yml), [`deploy-label-policies`](.github/workflows/deploy-label-policies.yml), [`deploy-auto-label-policies`](.github/workflows/deploy-auto-label-policies.yml), [`deploy-dlp`](.github/workflows/deploy-dlp.yml), [`deploy-irm`](.github/workflows/deploy-irm.yml) — which render the YAML under [`data-plane/`](data-plane/) into REST / Security & Compliance PowerShell calls. Every other surface has **no automated apply path yet**: run its [`scripts/Deploy-*.ps1`](scripts/) reconciler locally. See [ADR 0051](docs/adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) and the backfill tracker [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
 
 ## Design principles
 

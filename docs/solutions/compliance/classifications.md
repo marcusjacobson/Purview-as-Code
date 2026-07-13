@@ -129,13 +129,13 @@ The confidence analyzer is local-only because it reads files already exported to
      -WhatIf
    ```
 
-1. Apply through the data-plane workflow for custom classifications.
+1. Apply locally — **there is no automated apply path for custom classifications.**
 
    ```pwsh
-   gh workflow run deploy-data-plane.yml
+   ./scripts/Deploy-Classifications.ps1 -AccountName purview-contoso-lab
    ```
 
-   The current workflow runs `Deploy-Classifications.ps1` with the workflow `PURVIEW_ACCOUNT` environment value. It does not run `Sync-SITCatalog.ps1` or `Invoke-SITConfidenceAnalysis.ps1`; those remain local/operator-run steps.
+   No per-solution workflow owns this surface, so merging `data-plane/classifications/**` applies nothing on its own; the reconciler must be run from your workstation. `Sync-SITCatalog.ps1` and `Invoke-SITConfidenceAnalysis.ps1` are likewise local/operator-run. Backfilling a `deploy-classifications.yml` is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80); see [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md).
 
 1. Verify classification drift and SIT signal.
 
