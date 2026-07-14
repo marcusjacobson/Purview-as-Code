@@ -55,7 +55,11 @@ if (-not (Test-Path $resultDir)) {
 }
 
 $config = New-PesterConfiguration
-$config.Run.Path             = (Join-Path $PSScriptRoot 'scripts')
+# Discover every *.Tests.ps1 under tests/, not just tests/scripts/. Widened by
+# ADR 0055 so tests/data-plane/ — the guard tests that read the SHIPPED YAMLs
+# rather than a fixture — are actually run. Before that ADR, zero tests loaded a
+# shipped data-plane YAML, and the hazard was in the data.
+$config.Run.Path             = $PSScriptRoot
 $config.Run.Exit             = $true
 $config.Run.Throw            = $false
 $config.TestResult.Enabled   = $true

@@ -1698,7 +1698,7 @@ Describe 'Export-path advancedSettings GUID -> composite-key inverse (issue #497
 
             $script:RefKeys = @('OutlookDefaultLabel', 'teamworkdefaultlabelid')
             $script:Inverse = @{
-                '00000000-0000-0000-0000-000000000000' = 'Public'
+                '00000000-0000-0000-0000-000000000010' = 'Public'
                 '00000000-0000-0000-0000-000000000011' = 'Confidential/Partner'
             }
         }
@@ -1706,7 +1706,7 @@ Describe 'Export-path advancedSettings GUID -> composite-key inverse (issue #497
         It 'GUID-shaped value on a label-reference key resolves to the composite key (a)' {
             $out = & $script:TranslateAdvancedSettingValue `
                 -Key 'OutlookDefaultLabel' `
-                -Value '00000000-0000-0000-0000-000000000000' `
+                -Value '00000000-0000-0000-0000-000000000010' `
                 -LabelRefKeys $script:RefKeys `
                 -GuidToKey $script:Inverse
             $out | Should -Be 'Public'
@@ -1733,10 +1733,10 @@ Describe 'Export-path advancedSettings GUID -> composite-key inverse (issue #497
         It 'GUID-shaped value on a non-label-reference key still passes through (defensive)' {
             $out = & $script:TranslateAdvancedSettingValue `
                 -Key 'HideBarByDefault' `
-                -Value '00000000-0000-0000-0000-000000000000' `
+                -Value '00000000-0000-0000-0000-000000000010' `
                 -LabelRefKeys $script:RefKeys `
                 -GuidToKey $script:Inverse
-            $out | Should -Be '00000000-0000-0000-0000-000000000000'
+            $out | Should -Be '00000000-0000-0000-0000-000000000010'
         }
 
         It 'GUID not in the tenant lookup falls through verbatim (c)' {
@@ -1759,7 +1759,7 @@ Describe 'Export-path advancedSettings GUID -> composite-key inverse (issue #497
 
         It 'round-trip: composite-key YAML -> Resolve to GUID -> export back to composite (d)' {
             $forwardLookup = @{
-                'Public'              = '00000000-0000-0000-0000-000000000000'
+                'Public'              = '00000000-0000-0000-0000-000000000010'
                 'Confidential/Partner' = '00000000-0000-0000-0000-000000000011'
             }
             $yamlValue = 'Public'

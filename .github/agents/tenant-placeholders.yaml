@@ -27,7 +27,7 @@
 # This file contains ONLY Microsoft-documented fictitious placeholders and
 # interview-field references. It never contains a real tenant value.
 
-schemaVersion: 2
+schemaVersion: 3
 
 # -----------------------------------------------------------------------------
 # tokens — ordered longest-match-first. The operator MUST apply replacements in
@@ -247,11 +247,32 @@ tenantSurfaces:
 # residual scan EXCLUDES these so a leftover match anywhere else is a genuine
 # missed tenant surface, not sample-data noise. Expressed as git pathspecs for
 # `git grep -- <pathspec>` (":!" = exclude).
+#
+# SCOPE OF THIS LIST — read before adding to it (ADR 0055):
+#   These excludes apply to the TOKEN-shaped `residualScan` ONLY. They do NOT
+#   apply to the `identifierScan` below, which has NO path excludes at all, by
+#   design. A path exclusion is what hid the ADR 0055 disclosure: the entry
+#   `:!data-plane` was written for sample *catalog content* and silently also
+#   excluded the two live desired-state files that carried real Entra group
+#   object IDs. Never add a directory-level exclude here on the assumption that
+#   it also protects the identifier surface — it does not, and the identifier
+#   surface is the one that leaks.
 # -----------------------------------------------------------------------------
 intentionalSamples:
   - ":!docs/adr"                 # decision records quote the placeholders verbatim
   - ":!CHANGELOG.md"             # historical entries reference the placeholders
-  - ":!data-plane"               # sample catalog content (stcontosolabblob, sql-contosolab-demo, sample UPNs)
+  # --- data-plane: NARROWED from a blanket ":!data-plane" (ADR 0055) ----------
+  # The blanket exclude hid data-plane/purview-role-groups/role-groups.yaml and
+  # data-plane/entra-directory-roles/role-assignments.yaml — the two files that
+  # carried the disclosure. Only the genuinely sample-content files are excluded
+  # now; every other data-plane file is scanned. The ~7 header-comment matches
+  # this surfaces ("...the `contoso.onmicrosoft.com` tenant") are real
+  # stale-after-tailoring prose and the operator SHOULD confirm them.
+  - ":!data-plane/**/*.schema.json"                        # JSON-Schema `$id` namespace URIs (purview-as-code.contoso-lab/...) — not tenant surfaces
+  - ":!data-plane/data-sources/data-sources.yaml"          # sample source names (stcontosolabblob, sql-contosolab-demo)
+  - ":!data-plane/scans/scans.yaml"                        # sample scan targets over the same sample sources
+  - ":!data-plane/information-protection/labels.yaml"      # sample label descriptions / sample UPNs
+  - ":!data-plane/collections/collections.yaml"            # rootCollection is the account name (sample catalog content)
   - ":!tests"                    # Pester fixtures assert against synthetic identifiers
   - ":!docs/runbooks"            # illustrative end-to-end examples
   - ":!docs/solutions"           # solution guides use synthetic examples
@@ -289,6 +310,185 @@ intentionalSamples:
 residualScan:
   pattern: 'contoso|onmicrosoft\.com|OWNER-PLACEHOLDER'
   # excludePathspecs = the intentionalSamples list above (single source).
+  #
+  # LIMIT OF THIS SCAN (ADR 0055): this pattern is TOKEN-shaped. It can only
+  # find values that genericization *substituted* — literal strings. It cannot
+  # find identifier-shaped data (raw GUIDs), because a GUID contains none of
+  # these tokens. It is NOT, and never was, a check that the repo is free of
+  # real tenant identifiers. `identifierScan` below is that check.
+
+# -----------------------------------------------------------------------------
+# identifierScan — the IDENTIFIER-shaped pass (ADR 0055; amends ADR 0046).
+#
+# WHY THIS EXISTS. ADR 0046 claimed: "Scanning everything except these paths
+# means any remaining match is a genuine missed tenant surface." That claim was
+# unsound. A token-shaped scan cannot verify the ABSENCE of identifier-shaped
+# data. Real Entra group object IDs sat in ACTIVE desired-state lists in this
+# public template repo and `residualScan` could not see them for two independent
+# reasons, either of which alone was fatal:
+#   1. `intentionalSamples` blanket-excluded the whole `data-plane/` tree — the
+#      exact directory the desired state lives in. (Narrowed above.)
+#   2. `residualScan.pattern` is token-shaped. Even with the exclusion removed,
+#      `contoso|onmicrosoft\.com|OWNER-PLACEHOLDER` matches no GUID.
+#
+# DESIGN — the allow-list, not the regex, is the hard part. There are 384
+# distinct non-zero GUIDs in this repo and almost all are legitimate,
+# tenant-INDEPENDENT Microsoft constants. A scan that cries wolf 384 times gets
+# disabled, which is worse than no scan. So a non-zero GUID is allowed ONLY if
+# one of the four rules below claims it. EVERYTHING ELSE FAILS — including a
+# GUID in a file nobody has looked at, under a key nobody has enumerated. That
+# fail-closed property is the whole point: a scan that only knows the places we
+# already looked would have missed this leak too.
+#
+# NOTE: there are deliberately NO path excludes here. Not for `tests/`, not for
+# `docs/`, not for `data-plane/`. A path exclusion is what caused the leak.
+# -----------------------------------------------------------------------------
+identifierScan:
+  # The shape being hunted. Anything matching this is guilty until a rule
+  # below acquits it.
+  guidPattern: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+
+  # --- Rule 1 — SYNTHETIC SHAPES ------------------------------------------------
+  # Acquits by SHAPE, so it cannot be satisfied by a real identifier: every
+  # pattern here describes a GUID that is structurally impossible to mistake for
+  # one Entra or Azure would mint. This is what replaces a `:!tests` path
+  # exclusion — fixtures are acquitted for LOOKING synthetic, not for LIVING in
+  # tests/. A real OID pasted into tests/ still fails.
+  syntheticShapes:
+    - id: zero-guid
+      pattern: '^00000000-0000-0000-0000-000000000000$'
+      note: The sanctioned placeholder (copilot-instructions.md, "Environment and identifier boundaries").
+    - id: reserved-synthetic-namespace
+      pattern: '^00000000-0000-0000-0000-[0-9a-f]{12}$'
+      note: >-
+        Zero-prefixed fixture namespace — the zero GUID with a counter in the
+        node field (...0001, ...0010, ...). Already the de-facto convention in
+        tests/; ratified by ADR 0055. New fixtures MUST use this namespace.
+    - id: repeated-nibble
+      pattern: '^([0-9a-f])\1{7}-\1{4}-\1{4}-\1{4}-\1{12}$'
+      note: All-same-hex-digit fixtures (11111111-..., aaaaaaaa-..., ffffffff-...).
+    - id: documented-synthetic-literal
+      pattern: '^(deadbeef-dead-beef-dead-beefdeadbeef|abcdef01-1234-5678-9abc-def012345678)$'
+      note: Two named, obviously-synthetic literals used by the identifier-formatting tests.
+
+  # --- Rule 2 — CATALOG KEYS ----------------------------------------------------
+  # Acquits by (file, key). A GUID is a Microsoft catalog identifier if it
+  # appears as the value of one of these keys IN one of these files. The
+  # resulting VALUE SET is then allowed to be cited anywhere in the repo (docs
+  # prose, ADRs, script defaults, test fixtures) — once a GUID is established as
+  # a Microsoft-published catalog constant it is public, and re-listing it in
+  # five places would be noise.
+  #
+  # WHY KEYS, NOT VALUES: sit-catalog.yaml alone holds 333 built-in SIT and
+  # rule-pack IDs. Enumerating them by value would make every SIT-catalog
+  # refresh an allow-list PR, which trains reviewers to rubber-stamp allow-list
+  # additions — and a reviewer in the habit of rubber-stamping allow-list
+  # additions is exactly how a real OID gets waved through. Four reviewable
+  # (file, key) pairs are safer than a 333-line value list nobody reads.
+  #
+  # WHY THIS IS STILL FAIL-CLOSED: the match is anchored to `<key>: <guid>` as
+  # the WHOLE value. The disclosure was a bare YAML sequence item under
+  # `members:` — `- <guid>  # sg-...` — which carries no key and therefore
+  # cannot be acquitted by this rule, in any file. Per ADR 0023 a principal is
+  # named by `displayName`, never by a raw object ID, so no legitimate key ever
+  # carries one.
+  catalogKeys:
+    - path: data-plane/classifications/sit-catalog.yaml
+      keys: [id, rulePackId]
+      note: >-
+        Microsoft built-in Sensitive Information Type IDs and their owning
+        rule-pack IDs. Identical in every tenant; documented at
+        https://learn.microsoft.com/en-us/purview/sit-sensitive-information-type-entity-definitions
+        This file is machine-generated by scripts/Sync-SITCatalog.ps1
+        -ExportCurrentState from the SIT API, which cannot return a group OID.
+    - path: data-plane/dlp/policies.yaml
+      keys: [guid]
+      note: Built-in SIT + trainable-classifier IDs referenced by DLP rules.
+    - path: data-plane/information-protection/auto-label-policies.yaml
+      keys: [sitId]
+      note: Built-in SIT IDs referenced by auto-labeling rules.
+    - path: data-plane/information-protection/labels.autoApplicationOf.fixture.yaml
+      keys: [sitId]
+      note: Built-in SIT IDs in the label auto-application fixture (ADR 0017).
+
+  # --- Rule 3 — MICROSOFT CONSTANTS ---------------------------------------------
+  # Acquits by exact VALUE. For the GUIDs that have no enclosing key to hang a
+  # rule on — Bicep `var` declarations, PowerShell string literals, prose in a
+  # comment. These are Microsoft-published and tenant-independent: the same GUID
+  # in every tenant on Earth. The list is short, every entry is named, and every
+  # entry is citable — which is precisely why enumerating THESE by value is
+  # sound while enumerating 333 SIT IDs by value is not.
+  microsoftConstants:
+    # Entra built-in directory-role template IDs.
+    # https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/permissions-reference
+    - value: 17315797-102d-40b4-93e0-432062caca18
+      name: Compliance Administrator (Entra directory role template)
+    - value: e6d1a23a-da11-4be4-9570-befc86d067a7
+      name: Compliance Data Administrator (Entra directory role template)
+    - value: 7495fdc4-34c4-4d15-a289-98788ce399fd
+      name: Information Protection Administrator (Entra directory role template)
+    # Azure RBAC built-in role definition IDs.
+    # https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles
+    - value: b24988ac-6180-42a0-ab88-20f7382dd24c
+      name: Contributor (Azure RBAC built-in role)
+    - value: 12338af0-0e69-4776-bea7-57ae8d297424
+      name: Key Vault Crypto User (Azure RBAC built-in role)
+    - value: f25e0fa2-a7c8-4377-a976-54943a77a395
+      name: Key Vault Contributor (Azure RBAC built-in role)
+    - value: db79e9a7-68ee-4b58-9aeb-b90e7c24fcba
+      name: Key Vault Certificate User (Azure RBAC built-in role)
+    - value: a4417e6f-fecd-4de8-b567-7b0420556985
+      name: Key Vault Certificates Officer (Azure RBAC built-in role)
+    # Microsoft first-party application / app-role IDs.
+    # https://learn.microsoft.com/en-us/troubleshoot/entra/entra-id/governance/verify-first-party-apps-sign-in
+    - value: 00000002-0000-0ff1-ce00-000000000000
+      name: Office 365 Exchange Online (Microsoft first-party application ID)
+    # https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2
+    - value: dc50a0fb-09a3-484d-be87-e023b12c6440
+      name: Exchange.ManageAsApp (application permission / app-role ID)
+
+  # --- Rule 4 — REVIEW REQUIRED (quarantine) ------------------------------------
+  # Identifiers of UNRESOLVED provenance. Reported as `Review` rows (loud
+  # warnings, CI annotations) rather than `Finding` rows, so the scan can go
+  # green on a repo that is not yet perfectly clean WITHOUT laundering an
+  # unknown identifier into "Microsoft constant" — which would be the exact
+  # rubber-stamp failure this design exists to prevent.
+  #
+  # Entries are keyed by SHA-256 of the lower-cased GUID, NOT by value: the
+  # manifest deliberately does not restate an identifier whose provenance is in
+  # doubt. Compute with:
+  #   $s=[IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes('<guid>'.ToLower()))
+  #   (Get-FileHash -InputStream $s -Algorithm SHA256).Hash.ToLower()
+  #
+  # THIS LIST IS PINNED BY A PESTER TEST. It cannot grow without also editing
+  # tests/scripts/Test-IdentifierResidue.Tests.ps1 — a deliberate, visible
+  # review signal. It is a quarantine, not an escape hatch.
+  reviewRequired:
+    - sha256: 6bb5e87d3144d4e6dac9e6d5dfc4b47999cb63df062eef342567ccaddf8e5068
+      location: docs/adr/0035-records-seed-content-immovable.md
+      ownerDecision: >-
+        Verify whether Microsoft provisions the same seed File Plan property
+        GUID in every tenant. If yes → promote to microsoftConstants with a
+        Learn citation. If no → redact in ADR 0035 (an owner call: ADRs are
+        immutable, docs/adr/README.md line 5).
+      note: >-
+        File Plan property `Guid`, pasted verbatim from an interactive
+        `Get-FilePlanPropertyDepartment` probe against the owner's live tenant.
+        ADR 0035 argues the seed properties are Microsoft-managed (and therefore
+        that this is a Microsoft constant), but that is an inference, not a
+        verified fact. LOW severity — a records-management property GUID
+        discloses no admin topology. Deliberately NOT filed under
+        microsoftConstants: that would launder "we don't know" into "Microsoft
+        says so", which is the failure mode ADR 0055 exists to prevent.
+    - sha256: 53fc1662c3b2d2b3c056cf9e9513b8ef5da860141b468fb8d547a23a1dab41a8
+      location: docs/adr/0035-records-seed-content-immovable.md
+      ownerDecision: >-
+        Same decision as the entry above; both GUIDs came from the same probe
+        and resolve together.
+      note: >-
+        File Plan property `Policy` GUID from the same probe. ADR 0035 line 61
+        asserts it "identifies a Microsoft-managed policy scope" — same
+        unverified inference. Same severity, same owner decision.
 
 # -----------------------------------------------------------------------------
 # functionalWorkflowScan — the FEW functional tenant values in .github/workflows
