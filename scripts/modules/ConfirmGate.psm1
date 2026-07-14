@@ -33,6 +33,40 @@
     Reaching the gate is the caller's job; the caller must not reach it
     under `-WhatIf` (see `-IsWhatIf` below).
 
+    KEY THE GATE ON THE PLAN, NOT ON THE POLICY
+    -------------------------------------------
+    The caller decides *whether to call* this gate. That decision MUST be
+    keyed on the set of objects the run will actually destroy or
+    overwrite -- the PLAN -- and never on `-DirectionPolicy`:
+
+        if ($overwrites.Count -gt 0) { ...gate... }          # CORRECT
+        if ($DirectionPolicy -eq 'repo-wins' -and            # WRONG
+            $overwrites.Count -gt 0) { ...gate... }
+
+    The `$DirectionPolicy -eq 'repo-wins'` conjunct is either redundant
+    or dangerous, and never useful:
+
+      * REDUNDANT where `portal-wins` genuinely skips drifted objects --
+        the overwrite list can then only populate under `repo-wins`, so
+        the policy test adds nothing.
+      * DANGEROUS where it does not. `Deploy-UnifiedCatalogPolicies.ps1`
+        passed a hardcoded `-HasDrift $false` into
+        `Resolve-DirectionPolicyAction`, and that function only skips
+        when `$HasDrift -and $Policy -eq 'portal-wins'`. So `portal-wins`
+        never skipped: drifted role assignments were overwritten under
+        BOTH policies. With the policy conjunct, the overwrite list
+        populated, `$DirectionPolicy -eq 'repo-wins'` was `$false`, the
+        gate NEVER FIRED, and a *permissions* surface was overwritten
+        with no confirmation. (That `-HasDrift` bug is fixed; the keying
+        rule is what stops the next one mattering.)
+
+    This is the same principle ADR 0052 settled when it chose
+    `ShouldContinue` over `ShouldProcess`: THE GUARD MUST NOT DEPEND ON A
+    NEGOTIABLE PROXY. `$DirectionPolicy` is a proxy for "will this
+    overwrite?" and a fallible one. The plan is ground truth. A guard
+    that can pass vacuously is worse than no guard, because it is
+    believed.
+
     Suppression, in precedence order:
 
       1. `-IsWhatIf`  -- a dry run never prompts. Returns `$true` so the
@@ -53,12 +87,13 @@
     trips both the overwrite gate and the prune gate prompts once and
     carries the answer forward. One prompt per run, never one per object.
 
-    Consumers (ADR 0052 reference implementations):
+    Consumers (ADR 0052 reference implementations, all plan-keyed):
       * `scripts/Deploy-Labels.ps1`
       * `scripts/Deploy-FilePlan.ps1`
       * `scripts/Deploy-DLPPolicies.ps1`
+      * `scripts/Deploy-UnifiedCatalogPolicies.ps1`
 
-    Rollout to the remaining 18 reconcilers is issue #83; the repo-wide
+    Rollout to the remaining 17 reconcilers is issue #83; the repo-wide
     guard test that asserts no reconciler ships `ConfirmImpact = 'Medium'`
     is issue #84.
 
@@ -69,6 +104,7 @@
 
     References:
       ADR:  docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+      ADR:  docs/adr/0053-overwrite-foreign-author-switch.md
       ADR:  docs/adr/0029-source-of-truth-direction-policy.md
       Rule: .github/instructions/powershell.instructions.md
             #destructive-operation-confirmation-gate-adr-0052
@@ -126,10 +162,10 @@ function Assert-DestructiveOperationConfirmed {
     .PARAMETER Force
         The caller's `-Force` switch value. Suppresses the prompt.
 
-        Per ADR 0052, `-Force` on a reconciler has exactly one meaning,
-        stated at the level of abstraction that covers both parameter
-        sets: "suppress the safety guard that would otherwise block or
-        question this operation."
+        Per ADR 0052 section 6 as amended by ADR 0053 section 2, `-Force` on a
+        reconciler has exactly one meaning, stated at the level of
+        abstraction that covers both parameter sets: "suppress the safety
+        guard that would otherwise block or question this operation."
 
           * Apply mode  -- the guard is this confirmation prompt.
           * Export mode -- the guard is `-ExportCurrentState`'s refusal to
@@ -140,13 +176,29 @@ function Assert-DestructiveOperationConfirmed {
         parameter set.
 
         The third historical meaning -- "allow overwriting objects whose
-        `lastModifiedBy` is not the current deploy principal" -- is
-        RETIRED by ADR 0052, not reassigned. It was never implemented in
-        any of the 21 reconcilers because the IPPS / S&C cmdlets do not
-        return a `lastModifiedBy` to diff against. If a future Purview
-        surface exposes one, it gets its OWN switch
-        (`-OverwriteForeignAuthor`); it must not be folded back onto
-        `-Force`.
+        `lastModifiedBy` is not the current deploy principal" -- is NOT
+        retired, and the claim previously made here (that it "was never
+        implemented in any of the 21 reconcilers", because the IPPS / S&C
+        cmdlets return no `lastModifiedBy` to diff against) was FALSE.
+        ADR 0053 established that it is implemented in SIX reconcilers
+        today -- Glossary, DataSources, Classifications, Scans,
+        UnifiedCatalog, UnifiedCatalogPolicies -- which diff a real
+        authorship field on the Atlas / Data Map / Scanning / Unified
+        Catalog REST surface (`updatedBy` / `createdBy` /
+        `systemData.lastModifiedBy`). ADR 0052 sampled only the IPPS
+        surface, where the impossibility claim is true, and generalised
+        it to a repo that spans two authoring surfaces.
+
+        That meaning now has its own switch, `-OverwriteForeignAuthor`
+        (ADR 0053 section 1), on the Apply parameter set of those six scripts.
+        It is NOT folded back onto `-Force`, and it is NOT this
+        parameter: `-Force` suppresses THIS prompt and nothing else.
+        An operator who types `-Force` to skip a delete confirmation does
+        not thereby authorise clobbering a portal-authored object.
+
+        `-OverwriteForeignAuthor` grants permission, not silence: the
+        `Conflict` row is emitted whether or not it is supplied
+        (ADR 0053 section 3).
 
     .PARAMETER IsWhatIf
         The caller's `$WhatIfPreference`. A dry run must never block on

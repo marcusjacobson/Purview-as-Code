@@ -1070,11 +1070,17 @@ try {
                 continue
             }
             # decision.Action is 'Update' for non-Skip rows; the only
-            # Write-Warning we owe here is the repo-wins overwrite
-            # warning when we are about to overwrite tenant drift.
-            if ($row.Action -eq 'Update' -and $DirectionPolicy -eq 'repo-wins') {
+            # Write-Warning we owe here is the overwrite warning when we
+            # are about to overwrite tenant drift.
+            #
+            # Keyed on the row surviving the policy as an Update -- the PLAN --
+            # not on $DirectionPolicy. Whatever policy let this row through, it
+            # IS going to be overwritten, so it belongs in the list the ADR 0052
+            # gate names. See ConfirmGate.psm1 "KEY THE GATE ON THE PLAN, NOT ON
+            # THE POLICY".
+            if ($row.Action -eq 'Update') {
                 $fieldsText = ($row.Reason -replace '^Drift in: ', '')
-                Write-Warning ("repo-wins overwriting tenant on retention label '{0}' fields: {1}" -f $row.Name, $fieldsText)
+                Write-Warning ("Overwriting tenant on retention label '{0}' fields: {1}" -f $row.Name, $fieldsText)
                 # ADR 0052: feed the destructive-operation confirmation gate below.
                 $repoWinsOverwrites.Add([string]$row.Name)
             }
@@ -1102,6 +1108,10 @@ try {
     # prompts unconditionally; ShouldProcess only prompts when
     # ConfirmImpact >= $ConfirmPreference, which is the comparison that
     # silently defeated this gate before issue #85.
+    #
+    # Both gates are keyed on the PLAN -- the set of objects this run will
+    # actually overwrite or delete -- and never on $DirectionPolicy. See
+    # ConfirmGate.psm1 "KEY THE GATE ON THE PLAN, NOT ON THE POLICY".
     #
     # The $yesToAll / $noToAll pair is shared by both gates, so a run that
     # trips the overwrite gate AND the prune gate prompts once, not twice,
@@ -1133,8 +1143,8 @@ try {
         ConfirmValue = $confirmValue
     }
 
-    if ($DirectionPolicy -eq 'repo-wins' -and $repoWinsOverwrites.Count -gt 0) {
-        $overwriteQuery = "repo-wins will OVERWRITE tenant fields on {0} shared retention label(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+    if ($repoWinsOverwrites.Count -gt 0) {
+        $overwriteQuery = "This run will OVERWRITE tenant fields on {0} shared retention label(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
             $repoWinsOverwrites.Count, (($repoWinsOverwrites | Sort-Object) -join ', ')
         if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
             throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'

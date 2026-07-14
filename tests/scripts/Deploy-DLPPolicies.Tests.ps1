@@ -3227,13 +3227,13 @@ Describe 'Apply-path direction policy branches (ADR 0029) -- DLP' {
         # in the policy direction-policy pass with the comma-joined
         # drifted-field set. Wording must include "DLP policy" so a
         # run-log grep can disambiguate from sibling reconcilers.
-        $script:ScriptText | Should -Match 'Write-Warning \("repo-wins overwriting tenant on DLP policy '''
+        $script:ScriptText | Should -Match 'Write-Warning \("Overwriting tenant on DLP policy '''
     }
 
     It 'emits one Write-Warning per drifted DLP rule on repo-wins' {
         # DLP policies and rules are planned separately; warnings
         # must use kind-specific wording for the same reason.
-        $script:ScriptText | Should -Match 'Write-Warning \("repo-wins overwriting tenant on DLP rule '''
+        $script:ScriptText | Should -Match 'Write-Warning \("Overwriting tenant on DLP rule '''
     }
 
     It 'emits a [ADR0029-SKIP] marker per skipped object for workflow consumption' {

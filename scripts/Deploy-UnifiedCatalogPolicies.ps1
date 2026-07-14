@@ -126,6 +126,7 @@ if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
 }
 Import-Module 'powershell-yaml' -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules\DirectionPolicy.psm1') -Force -Scope Local -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules\ConfirmGate.psm1') -Force -Scope Local -ErrorAction Stop
 #endregion
 
 $script:UnifiedCatalogApiVersion = '2026-03-20-preview'
@@ -881,6 +882,12 @@ function Invoke-DirectionPolicyPlan {
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Plan,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Report
     )
+    # Initialised before the audit short-circuit so the ADR 0052 gate can read
+    # `.Count` on it unconditionally. Under `audit` the plan is emptied and no
+    # overwrite is ever recorded, so both gates see zero and stay silent --
+    # which is correct: audit writes nothing.
+    $script:RepoWinsOverwrites = New-Object 'System.Collections.Generic.List[string]'
+
     if ($DirectionPolicy -eq 'audit') {
         Write-Information '[ADR0029-AUDIT] DirectionPolicy=audit - no writes would have fired. Plan above is read-only.' -InformationAction Continue
         $Plan.Clear()
@@ -890,13 +897,40 @@ function Invoke-DirectionPolicyPlan {
     $keptPlan = New-Object 'System.Collections.Generic.List[object]'
     $skippedNames = New-Object 'System.Collections.Generic.List[string]'
     foreach ($entry in $Plan.ToArray()) {
-        $decision = Resolve-DirectionPolicyAction -Policy $DirectionPolicy -SkipList $script:SkipNameList -DisplayName ([string]$entry.Name) -HasDrift $false
+        # Only an Update entry represents shared-property drift, and drift is
+        # the only thing -DirectionPolicy arbitrates (ADR 0029). A Create has
+        # no tenant object to preserve; a Remove is governed by -PruneMissing,
+        # not by the direction policy. Passing both through the drift arm
+        # would make `portal-wins` -- the DEFAULT -- skip every create and
+        # every prune, silently turning this reconciler into a no-op.
+        #
+        # This filter is why -HasDrift can be $true below. It previously read
+        # `-HasDrift $false` with no filter at all, which meant
+        # Resolve-DirectionPolicyAction's `$HasDrift -and $Policy -eq
+        # 'portal-wins'` skip arm could never be reached: `portal-wins` never
+        # skipped, `repo-wins` was indistinguishable from it, and EVERY
+        # drifted role assignment was overwritten regardless of policy, on a
+        # permissions surface. Mirrors Deploy-UnifiedCatalog.ps1's loop, which
+        # has had the filter all along.
+        # Reference: docs/adr/0029-source-of-truth-direction-policy.md
+        if ($entry.Action -ne 'Update') {
+            $keptPlan.Add($entry) | Out-Null
+            continue
+        }
+        $decision = Resolve-DirectionPolicyAction -Policy $DirectionPolicy -SkipList $script:SkipNameList -DisplayName ([string]$entry.Name) -HasDrift $true
         if ($decision.Action -eq 'Skip') {
             $skippedNames.Add([string]$entry.Name) | Out-Null
             $Report.Add((ConvertTo-ReportRow -Category 'Skip' -Kind $entry.Kind -Name ([string]$entry.Name) -Reason $decision.Reason -Fields $entry.Fields)) | Out-Null
             Write-Information ("[ADR0029-SKIP] {0}" -f $entry.Name) -InformationAction Continue
             continue
         }
+        # Survived the policy: this run WILL overwrite the tenant's principal
+        # set on this role assignment. Collect it so the ADR 0052 gate can
+        # name the objects and the count. The gate is keyed on THIS LIST --
+        # the plan -- never on $DirectionPolicy. See ConfirmGate.psm1
+        # "KEY THE GATE ON THE PLAN, NOT ON THE POLICY".
+        Write-Warning ("Overwriting tenant principals on {0} '{1}' fields: {2}" -f $entry.Kind, $entry.Name, (@($entry.Fields) -join ','))
+        $script:RepoWinsOverwrites.Add([string]$entry.Name) | Out-Null
         $keptPlan.Add($entry) | Out-Null
     }
 
@@ -1207,6 +1241,61 @@ Show-PlanSummary -Report $report.ToArray()
 
 if ($blockedRows.Count -gt 0) {
     throw ("Reconciliation aborted: {0} blocked item(s)." -f $blockedRows.Count)
+}
+
+# ---- ADR 0052: destructive-operation confirmation gate ----
+# The last point before the write loop at which nothing has been PUT.
+# `Invoke-DirectionPolicyPlan` has already run, so `$plan` and
+# `$script:RepoWinsOverwrites` are the FINAL plan -- what this run will
+# actually do. Both gates are keyed on that plan and NEVER on
+# `$DirectionPolicy`; see ConfirmGate.psm1 "KEY THE GATE ON THE PLAN, NOT
+# ON THE POLICY". This script is the reason that rule exists: its
+# hardcoded `-HasDrift $false` meant `portal-wins` never skipped, so a
+# policy-keyed gate would have sat silent while a *permissions* surface
+# was overwritten.
+#
+# ShouldContinue, not ShouldProcess: it performs no
+# ConfirmImpact/$ConfirmPreference comparison, so it cannot be silently
+# defeated (issue #85). The $yesToAll/$noToAll pair is shared by both
+# gates, so a run that trips the overwrite gate AND the prune gate
+# prompts once, not twice, and never once per object.
+#
+# Suppressed by -Force, by an explicit -Confirm:$false (the CI path), and
+# skipped under -WhatIf -- where the branch is still WALKED so the
+# per-write ShouldProcess calls render their "What if:" preview lines.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+$yesToAll = $false
+$noToAll = $false
+$confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+$confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+$gateArgs = @{
+    Cmdlet       = $PSCmdlet
+    Caption      = 'Destructive operation (ADR 0052)'
+    YesToAll     = ([ref]$yesToAll)
+    NoToAll      = ([ref]$noToAll)
+    Force        = $Force.IsPresent
+    IsWhatIf     = [bool]$WhatIfPreference
+    ConfirmBound = $confirmBound
+    ConfirmValue = $confirmValue
+}
+
+if ($script:RepoWinsOverwrites.Count -gt 0) {
+    $overwriteNames = @($script:RepoWinsOverwrites | Sort-Object -Unique)
+    $overwriteQuery = "This run will OVERWRITE the tenant principal set on {0} Unified Catalog role assignment(s) with the values from YAML: {1}. Principals granted in the portal but absent from YAML LOSE ACCESS. Continue?" -f `
+        $overwriteNames.Count, ($overwriteNames -join ', ')
+    if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
+        throw 'Aborted by operator at the overwrite confirmation gate (ADR 0052). No tenant writes were made.'
+    }
+}
+
+$prunePlan = @($plan | Where-Object { $_.Action -eq 'Remove' })
+if ($prunePlan.Count -gt 0) {
+    $pruneNames = @($prunePlan | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
+    $pruneQuery = "-PruneMissing will REVOKE {0} orphan Unified Catalog role assignment(s) from the tenant: {1}. The principals holding them lose access. This cannot be undone. Continue?" -f `
+        $pruneNames.Count, ($pruneNames -join ', ')
+    if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+        throw 'Aborted by operator at the -PruneMissing revoke confirmation gate (ADR 0052). No tenant writes were made.'
+    }
 }
 
 $planByPolicy = @($plan | Group-Object { if ($_.Desired) { [string]$_.Desired.PolicyId } else { [string]$_.Tenant.PolicyId } })

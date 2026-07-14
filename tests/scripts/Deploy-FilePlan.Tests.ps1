@@ -89,7 +89,7 @@ Describe 'Apply-path direction policy branches (ADR 0029) -- Records' {
     }
 
     It 'emits one Write-Warning per drifted retention label on repo-wins' {
-        $script:ScriptText | Should -Match 'Write-Warning \("repo-wins overwriting tenant on retention label '''
+        $script:ScriptText | Should -Match 'Write-Warning \("Overwriting tenant on retention label '''
     }
 
     It 'emits a [ADR0029-SKIP] marker per skipped object for workflow consumption' {

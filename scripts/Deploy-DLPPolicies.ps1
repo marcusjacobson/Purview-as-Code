@@ -2591,8 +2591,11 @@ try {
                 continue
             }
             $fieldsText = [string]$row.Fields
-            Write-Warning ("repo-wins overwriting tenant on DLP policy '{0}' fields: {1}" -f $displayName, $fieldsText)
-            if ($DirectionPolicy -eq 'repo-wins') { $repoWinsOverwrites.Add(("policy '{0}'" -f $displayName)) }
+            Write-Warning ("Overwriting tenant on DLP policy '{0}' fields: {1}" -f $displayName, $fieldsText)
+            # Keyed on the PLAN, not on $DirectionPolicy: whatever policy let
+            # this row through, it IS going to be overwritten. See
+            # ConfirmGate.psm1 "KEY THE GATE ON THE PLAN, NOT ON THE POLICY".
+            $repoWinsOverwrites.Add(("policy '{0}'" -f $displayName))
         }
 
         # Pass 2: rules. SkipNames is matched against rule.Name (NOT
@@ -2618,8 +2621,10 @@ try {
                 continue
             }
             $fieldsText = [string]$row.Fields
-            Write-Warning ("repo-wins overwriting tenant on DLP rule '{0}' fields: {1}" -f $displayName, $fieldsText)
-            if ($DirectionPolicy -eq 'repo-wins') { $repoWinsOverwrites.Add(("rule '{0}'" -f $displayName)) }
+            Write-Warning ("Overwriting tenant on DLP rule '{0}' fields: {1}" -f $displayName, $fieldsText)
+            # Keyed on the PLAN, not on $DirectionPolicy. See ConfirmGate.psm1
+            # "KEY THE GATE ON THE PLAN, NOT ON THE POLICY".
+            $repoWinsOverwrites.Add(("rule '{0}'" -f $displayName))
         }
 
         # Machine-readable marker per skipped object for the workflow's
@@ -2656,6 +2661,10 @@ try {
     # ConfirmImpact >= $ConfirmPreference, which is the comparison that
     # silently defeated this gate before issue #85.
     #
+    # Both gates are keyed on the PLAN -- the set of objects this run will
+    # actually overwrite or delete -- and never on $DirectionPolicy. See
+    # ConfirmGate.psm1 "KEY THE GATE ON THE PLAN, NOT ON THE POLICY".
+    #
     # The $yesToAll / $noToAll pair is shared by both gates, so a run that
     # trips the overwrite gate AND the prune gate prompts once, not twice,
     # and never once per object.
@@ -2680,8 +2689,8 @@ try {
         ConfirmValue = $confirmValue
     }
 
-    if ($DirectionPolicy -eq 'repo-wins' -and $repoWinsOverwrites.Count -gt 0) {
-        $overwriteQuery = "repo-wins will OVERWRITE tenant fields on {0} shared DLP object(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+    if ($repoWinsOverwrites.Count -gt 0) {
+        $overwriteQuery = "This run will OVERWRITE tenant fields on {0} shared DLP object(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
             $repoWinsOverwrites.Count, (($repoWinsOverwrites | Sort-Object) -join ', ')
         if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
             throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'

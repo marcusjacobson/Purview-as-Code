@@ -691,7 +691,7 @@ Describe 'Apply-path direction policy branches (ADR 0029)' {
         # Source-text assertion: the per-label warning is the audit signal
         # that lets a reviewer of the run log see which tenant fields were
         # overwritten and on which labels.
-        $script:ScriptText | Should -Match 'Write-Warning \("repo-wins overwriting tenant on label '''
+        $script:ScriptText | Should -Match 'Write-Warning \("Overwriting tenant on label '''
     }
 
     It 'emits a [ADR0029-SKIP] marker per skipped label for workflow consumption' {

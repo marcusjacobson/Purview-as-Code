@@ -1804,8 +1804,12 @@ try {
             # this run will overwrite, with the drifted field set, per
             # ADR 0029 §"repo-wins mode".
             $fieldsText = @($p.Fields) -join ','
-            Write-Warning ("repo-wins overwriting tenant on label '{0}' fields: {1}" -f $displayName, $fieldsText)
-            if ($DirectionPolicy -eq 'repo-wins') { $repoWinsOverwrites.Add($displayName) }
+            Write-Warning ("Overwriting tenant on label '{0}' fields: {1}" -f $displayName, $fieldsText)
+            # Collect every label this run WILL overwrite, whatever policy let
+            # it through. The ADR 0052 gate is keyed on this list -- the plan --
+            # and never on $DirectionPolicy. See ConfirmGate.psm1 "KEY THE GATE
+            # ON THE PLAN, NOT ON THE POLICY".
+            $repoWinsOverwrites.Add($displayName)
             $keptPolicyPlan += $p
         }
         if ($skipDecisions.Count -gt 0) {
@@ -1927,6 +1931,13 @@ try {
     # ConfirmImpact >= $ConfirmPreference, which is precisely the
     # comparison that silently defeated this gate before issue #85.
     #
+    # Both gates are keyed on the PLAN -- the set of objects this run will
+    # actually overwrite or delete -- and never on $DirectionPolicy. A policy
+    # conjunct (`$DirectionPolicy -eq 'repo-wins' -and ...`) is redundant where
+    # portal-wins genuinely skips drifted objects and DANGEROUS where it does
+    # not, because the gate then sits silent while the overwrite proceeds. See
+    # ConfirmGate.psm1 "KEY THE GATE ON THE PLAN, NOT ON THE POLICY".
+    #
     # The $yesToAll / $noToAll pair is shared by both gates, so a run that
     # trips the overwrite gate AND the prune gate prompts once, not twice,
     # and never once per object.
@@ -1950,8 +1961,8 @@ try {
         ConfirmValue = $confirmValue
     }
 
-    if ($DirectionPolicy -eq 'repo-wins' -and $repoWinsOverwrites.Count -gt 0) {
-        $overwriteQuery = "repo-wins will OVERWRITE tenant fields on {0} shared sensitivity label(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+    if ($repoWinsOverwrites.Count -gt 0) {
+        $overwriteQuery = "This run will OVERWRITE tenant fields on {0} shared sensitivity label(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
             $repoWinsOverwrites.Count, (($repoWinsOverwrites | Sort-Object) -join ', ')
         if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
             throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'
