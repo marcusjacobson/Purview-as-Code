@@ -1,0 +1,280 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked 4-tier sensitivity-label taxonomy for
+# data-plane/information-protection/labels.yaml, which ships `labels: []` in the template.
+# Copy from here deliberately; prefer running `./scripts/Deploy-Labels.ps1
+# -ExportCurrentState` against your own tenant first.
+#
+# Sensitivity labels are TENANT-WIDE and several of these ENCRYPT content. That is why the
+# template ships none.
+#
+# Taxonomy:
+#   1. Public                       (leaf)
+#   2. General                      (default / internal-by-default, leaf)
+#   3. Confidential                 -> Internal | Partner | External
+#   4. Highly Confidential          -> Internal (Restricted) | Partner (Restricted)
+#                                      | External (Restricted)
+#
+# Sub-label `displayName` values are GLOBALLY UNIQUE tenant-wide — Microsoft Purview does
+# NOT scope displayName by parent. That is why the tier-4 leaves carry the `(Restricted)`
+# suffix: without it, the second `New-Label` silently no-ops server-side and every
+# composite-key reference from label-policies.yaml becomes unresolvable.
+#
+# SCRUBBED, two ways:
+#
+#  1. THE `Pilot — … (Lab)` LABELS ARE DELETED. Three of them shipped in the lab export.
+#     Their own comments read "Remove during lab teardown", and one named a real Entra
+#     security group as its Co-Owner rights holder. A teardown artifact has no value as an
+#     example, and a real group name has negative value in a public repo. Deleted, not
+#     relocated.
+#
+#  2. THE RIGHTS HOLDERS ARE NOW DISTINCT. The lab export listed `user@contoso.com` FIVE
+#     times inside a single label's `rightsDefinitions`, each time with a different rights
+#     string. That is a genericization collapse: five real principals were substituted to
+#     the same synthetic token, which destroys the one thing the block is trying to teach.
+#     Here each rights tier binds to its own synthetic group, which is both honest and
+#     what you actually want in production: bind rights to GROUPS, never to individuals
+#     (`security.instructions.md` rule 4, least privilege).
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/sensitivity-labels
+#   https://learn.microsoft.com/en-us/purview/encryption-sensitivity-labels
+#   https://learn.microsoft.com/en-us/powershell/module/exchange/new-label
+#   https://learn.microsoft.com/en-us/powershell/module/exchange/set-label
+
+labels:
+  # ---- Tier 1-2: parents, no encryption -------------------------------------------
+  - displayName: Public
+    tooltip: Business data that is specifically prepared and approved for public consumption.
+    comment: No protection or encryption — only for content acceptable for unrestricted distribution.
+    contentType:
+      - Email
+      - File
+      - Site
+      - Teamwork
+      - UnifiedGroup
+    contentMarking:
+      footer:
+        enabled: true
+        text: This document has been labeled for public consumption
+        fontSize: 10
+        fontColor: '#000000'
+        alignment: Left
+        layout: ""
+
+  - displayName: General
+    tooltip: Default label for everyday internal collaboration. Change to Public to share externally.
+    comment: DEFAULT tier — applied to all new content unless escalated. No encryption; encryption begins at Tier 3 (Confidential).
+    contentType:
+      - Email
+      - File
+      - Teamwork
+
+  # ---- Tier 3: Confidential --------------------------------------------------------
+  - displayName: Confidential
+    tooltip: Sensitive business data that could cause damage if shared with unauthorized people. Examples include contracts, security reports, forecast summaries, and sales account data.
+    comment: 'Tier 3 — sensitive business data. Three sublabels keyed on audience (Internal / Partner / External).'
+
+  - displayName: Internal
+    parent: Confidential
+    tooltip: Confidential content for employees only — blocked from external sharing.
+    comment: 'Confidential / Internal. `protectionType: Template` with three rights tiers, each bound to its OWN group.'
+    contentType:
+      - Email
+      - File
+      - Teamwork
+    contentMarking:
+      footer:
+        enabled: true
+        text: CONFIDENTIAL — Internal use only. Do not share outside the organization.
+        fontSize: 10
+        fontColor: '#000000'
+        alignment: Left
+        layout: ""
+    encryption:
+      enabled: true
+      protectionType: Template
+      contentExpiredOnDateInDaysOrNever: Never
+      offlineAccessDays: -1
+      doNotForward: false
+      encryptOnly: false
+      rightsDefinitions:
+        - Identity: sg-label-owners@contoso.com
+          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+        - Identity: sg-label-coauthors@contoso.com
+          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+        - Identity: sg-label-viewers@contoso.com
+          Rights: OBJMODEL,VIEW,VIEWRIGHTSDATA
+
+  - displayName: Partner
+    parent: Confidential
+    tooltip: Confidential content shareable with named external partners under NDA; encrypted for everyone else.
+    comment: 'Confidential / Partner — named-partner audience under NDA.'
+    contentType:
+      - Email
+      - File
+      - Teamwork
+    contentMarking:
+      footer:
+        enabled: true
+        text: CONFIDENTIAL — Partner-restricted. Recipients are bound by NDA.
+        fontSize: 10
+        fontColor: '#000000'
+        alignment: Left
+        layout: ""
+    encryption:
+      enabled: true
+      protectionType: Template
+      contentExpiredOnDateInDaysOrNever: Never
+      offlineAccessDays: -1
+      doNotForward: false
+      encryptOnly: false
+      rightsDefinitions:
+        - Identity: sg-label-owners@contoso.com
+          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+        - Identity: sg-partner-coauthors@fabrikam.com
+          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+        - Identity: sg-partner-viewers@fabrikam.com
+          Rights: OBJMODEL,VIEW,VIEWRIGHTSDATA
+
+  - displayName: External
+    parent: Confidential
+    tooltip: Confidential content released to a broader external audience; recipients can read but not forward or print.
+    comment: 'Confidential / External — wider external audience; unlimited offline access.'
+    contentType:
+      - Email
+      - File
+      - Teamwork
+    contentMarking:
+      footer:
+        enabled: true
+        text: CONFIDENTIAL — External release. Do not forward.
+        fontSize: 10
+        fontColor: '#000000'
+        alignment: Left
+        layout: ""
+    encryption:
+      enabled: true
+      protectionType: Template
+      contentExpiredOnDateInDaysOrNever: Never
+      offlineAccessDays: -1
+      doNotForward: false
+      encryptOnly: false
+      rightsDefinitions:
+        - Identity: sg-label-owners@contoso.com
+          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+        - Identity: sg-external-viewers@adatum.com
+          Rights: OBJMODEL,VIEW,VIEWRIGHTSDATA
+
+  # ---- Tier 4: Highly Confidential --------------------------------------------------
+  - displayName: Highly Confidential
+    tooltip: Very sensitive business data that would cause damage if shared with unauthorized people. Examples include employee and customer information, passwords, source code, and pre-announced financial reports.
+    comment: 'Tier 4 — highest sensitivity. Sublabels are suffixed `(Restricted)` so displayName stays globally unique.'
+
+  - displayName: Internal (Restricted)
+    parent: Highly Confidential
+    tooltip: Highly confidential content readable only by employees; heavy watermark, no external sharing.
+    comment: Highly Confidential / Internal (Restricted). Red watermark + footer.
+    contentType:
+      - Email
+      - File
+      - Teamwork
+    contentMarking:
+      footer:
+        enabled: true
+        text: HIGHLY CONFIDENTIAL — Internal use only.
+        fontSize: 10
+        fontColor: '#FF0000'
+        alignment: Left
+        layout: ""
+      watermark:
+        enabled: true
+        text: RESTRICTED — INTERNAL
+        fontSize: 20
+        fontColor: '#FF0000'
+        alignment: ""
+        layout: Diagonal
+    encryption:
+      enabled: true
+      protectionType: Template
+      contentExpiredOnDateInDaysOrNever: Never
+      offlineAccessDays: -1
+      doNotForward: false
+      encryptOnly: false
+      rightsDefinitions:
+        - Identity: sg-label-owners@contoso.com
+          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+        - Identity: sg-label-coauthors@contoso.com
+          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+
+  - displayName: Partner (Restricted)
+    parent: Highly Confidential
+    tooltip: Highly confidential content shareable only with named external partners under NDA; watermarked and time-bound.
+    comment: 'Highly Confidential / Partner (Restricted) — named-partner audience at tier 4 under NDA.'
+    contentType:
+      - Email
+      - File
+      - Teamwork
+    contentMarking:
+      footer:
+        enabled: true
+        text: HIGHLY CONFIDENTIAL — Partner-restricted. NDA required.
+        fontSize: 10
+        fontColor: '#FF0000'
+        alignment: Left
+        layout: ""
+      watermark:
+        enabled: true
+        text: RESTRICTED — PARTNER
+        fontSize: 20
+        fontColor: '#FF0000'
+        alignment: ""
+        layout: Diagonal
+    encryption:
+      enabled: true
+      protectionType: Template
+      contentExpiredOnDateInDaysOrNever: Never
+      offlineAccessDays: -1
+      doNotForward: false
+      encryptOnly: false
+      rightsDefinitions:
+        - Identity: sg-label-owners@contoso.com
+          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+        - Identity: sg-partner-coauthors@fabrikam.com
+          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+
+  - displayName: External (Restricted)
+    parent: Highly Confidential
+    tooltip: Highly confidential content released only to named individuals.
+    comment: 'Highly Confidential / External (Restricted) — narrowly-scoped external release. Red diagonal watermark + footer.'
+    contentType:
+      - Email
+      - File
+      - Teamwork
+    contentMarking:
+      footer:
+        enabled: true
+        text: HIGHLY CONFIDENTIAL — Authorized recipients only.
+        fontSize: 10
+        fontColor: '#000000'
+        alignment: Left
+        layout: ""
+      watermark:
+        enabled: true
+        text: RESTRICTED — EXTERNAL
+        fontSize: 20
+        fontColor: '#FF0000'
+        alignment: ""
+        layout: Diagonal
+    encryption:
+      enabled: true
+      protectionType: Template
+      contentExpiredOnDateInDaysOrNever: Never
+      offlineAccessDays: -1
+      doNotForward: false
+      encryptOnly: false
+      rightsDefinitions:
+        - Identity: sg-label-owners@contoso.com
+          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+        - Identity: sg-external-viewers@adatum.com
+          Rights: OBJMODEL,VIEW,VIEWRIGHTSDATA

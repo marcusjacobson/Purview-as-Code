@@ -1,0 +1,213 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked scan + scan-ruleset set for data-plane/scans/scans.yaml, which ships
+# `scans: []` and `scanRulesets: []` in the template. Copy from here deliberately; prefer
+# running `./scripts/Deploy-Scans.ps1 -ExportCurrentState` against your own tenant.
+#
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/scans
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/scan-rulesets
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/triggers
+#
+# Notes:
+# - Each scan binds to a data source by `dataSource` — the source `name` from
+#   examples/data-plane/data-sources/data-sources.yaml. The reconciler rejects a scan
+#   whose dataSource is not registered in the tenant.
+# - `properties.collection.referenceName` must target an existing collection.
+# - Omit `trigger` to make the scan on-demand only.
+#
+# SCRUBBED, and heavily trimmed. The lab export carried 17 scans, several of them
+# duplicates over the same source (`Scan-Scenario1` … `Scan-Scenario4`) and one with a
+# misspelling — `Scan-DataLakeModerninzation` — which is exactly the tell that this was an
+# EXPORT of a live tenant and not authored sample content. No curated sample ships a typo.
+# The duplicates and the typo are deleted. What remains is one representative scan per
+# source kind, which is what an example is for.
+#
+# Also scrubbed: a real Databricks workspace URL and SQL-warehouse path, a real Dataverse
+# organization endpoint, and the lab's own managed-VNet and integration-runtime names.
+
+scanRulesets:
+  - name: AzureFiles
+    kind: AzureFileService
+    properties:
+      temporaryResourceFilters:
+        - resourceFilterPattern: '(_SUCCESS|_started_\d*|_committed_\d*|_committed_vacuum\d*)$'
+          dataSamplingPattern: top
+          ingestTemporaryResource: true
+          rowCountToSelect: 128
+      scanningRule:
+        fileExtensions:
+          - CSV
+          - JSON
+          - PARQUET
+          - AVRO
+          - ORC
+          - TXT
+          - XML
+          - PDF
+          - DOCX
+          - XLSX
+          - PPTX
+        customFileExtensions: null
+      collection: null
+      description: ""
+      excludedSystemClassifications: []
+      includedCustomClassificationRuleNames: []
+
+scans:
+  # Azure Blob Storage — system ruleset, scanned through a managed VNet.
+  - dataSource: AzureBlob-SampleData
+    name: Scan-BlobSampleData
+    kind: AzureStorageMsi
+    properties:
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      scanRulesetName: AzureStorage
+      collection:
+        referenceName: blob-storage
+      connectedVia:
+        # SCRUBBED: the lab's own managed-VNet / integration-runtime names were here.
+        managedVNetName: ManagedVnet-Contoso-EastUS
+        integrationRuntimeType: Managed
+        referenceName: IntegrationRuntime-Contoso-EastUS
+        shirSupportKubernetes: false
+      scanScopeType: AutoDetect
+
+  # ADLS Gen2 — same shape, different source kind.
+  - dataSource: AzureDataLakeStorage-SampleData
+    name: Scan-DataLakeModernization
+    kind: AdlsGen2Msi
+    properties:
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      scanRulesetName: AdlsGen2
+      collection:
+        referenceName: adls-gen2
+      connectedVia:
+        managedVNetName: ManagedVnet-Contoso-EastUS
+        integrationRuntimeType: Managed
+        referenceName: IntegrationRuntime-Contoso-EastUS
+        shirSupportKubernetes: false
+      scanScopeType: AutoDetect
+
+  # Azure SQL Database — note `enableLineage`, which is the only field that differs
+  # between an ordinary scan and a lineage-emitting one.
+  - dataSource: AzureSqlDatabase-SampleData
+    name: Scan-SqlSampleData-with-Lineage
+    kind: AzureSqlDatabaseMsi
+    properties:
+      serverEndpoint: sql-contosolab-demo.database.windows.net
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      scanRulesetName: AzureSqlDatabase
+      collection:
+        referenceName: azure-sql
+      enableLineage: true
+      databaseName: sqldb-contoso-demo
+      connectedVia:
+        managedVNetName: ManagedVnet-Contoso-EastUS
+        integrationRuntimeType: Managed
+        referenceName: IntegrationRuntime-Contoso-EastUS
+        shirSupportKubernetes: false
+      scanScopeType: AutoDetect
+
+  # Synapse — the `resourceTypes` map is how a multi-endpoint source is scoped.
+  - dataSource: AzureSynapseAnalytics-SampleData
+    name: Scan-SynapseServerless
+    kind: AzureSynapseWorkspaceMsi
+    properties:
+      resourceTypes:
+        AzureSynapseServerlessSql:
+          scanRulesetName: AzureSynapseSQL
+          resourceNameFilter:
+            resources:
+              - contoso_analytics
+          scanRulesetType: System
+      domain: purview-contoso-lab
+      collection:
+        referenceName: synapse
+      queryTimeout: 0
+      credential: null
+      connectedVia:
+        managedVNetName: ManagedVnet-Contoso-EastUS
+        integrationRuntimeType: Managed
+        referenceName: IntegrationRuntime-Contoso-EastUS
+        shirSupportKubernetes: false
+      scanScopeType: AutoDetect
+
+  # Azure Data Explorer.
+  - dataSource: AzureDataExplorer-SampleData
+    name: Scan-DataExplorer
+    kind: AzureDataExplorerMsi
+    properties:
+      scanRulesetName: AzureDataExplorer
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      database: null
+      collection:
+        referenceName: azure-sql
+      scanScopeType: AutoDetect
+
+  # Databricks Unity Catalog — credential-based, not MSI.
+  - dataSource: DatabricksUnityCatalog-SampleData
+    name: Scan-UnityCatalog
+    kind: DatabricksUnityCatalogCredential
+    properties:
+      domain: purview-contoso-lab
+      collection:
+        referenceName: databricks
+      enableLineage: true
+      credential: null
+      connectionProperties:
+        # SCRUBBED: a real workspace URL and SQL-warehouse ID were here.
+        httpPath: "/sql/1.0/warehouses/0000000000000000"
+        dataSourceReference: DatabricksUnityCatalog-SampleData
+        workspaceUrl: adb-0000000000000000.0.azuredatabricks.net
+        credentialReference:
+          credentialType: ServicePrincipal
+          referenceName: cred-databricks-uc
+      scanScopeType: AutoDetect
+
+  # Dataverse.
+  - dataSource: Dataverse-SampleData
+    name: Scan-Customer360
+    kind: DataverseMsi
+    properties:
+      scanRulesetType: System
+      domain: purview-contoso-lab
+      scanRulesetName: Dataverse
+      collection:
+        referenceName: dataverse
+      # SCRUBBED: a real Dataverse org endpoint was here.
+      webApiEndpoint: https://org00000000.crm.dynamics.com/api/data/v9.2
+      scanScopeType: AutoDetect
+
+  # Microsoft Fabric — note `includePersonalWorkspaces`, which widens the blast radius
+  # of the scan considerably. Default it to false and opt in deliberately.
+  - dataSource: Fabric-SampleData
+    name: Scan-FabricWorkspaces
+    kind: FabricMsi
+    properties:
+      collection:
+        referenceName: fabric
+      domain: purview-contoso-lab
+      includePersonalWorkspaces: false
+
+  # PostgreSQL — credential-based (Basic auth via a Key Vault reference).
+  - dataSource: PostgreSQL-SampleData
+    name: Scan-PostgreSql
+    kind: PostgreSqlCredential
+    properties:
+      port: 0
+      driverLocation: null
+      collection:
+        referenceName: postgresql
+      domain: purview-contoso-lab
+      database: contosodemodb
+      mitiCache: null
+      maximumMemoryAllowedInGb: "20"
+      schema: null
+      credential:
+        credentialType: BasicAuth
+        referenceName: cred-postgresql
+      isTroubleshooting: false
+      host: null

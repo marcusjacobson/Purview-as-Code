@@ -5,23 +5,18 @@
 
 glossary: Glossary
 
-terms:
-  - name: Customer
-    shortDescription: A person or organization that purchases goods or services.
-    longDescription: |
-      Any external party with an active or prior commercial relationship with the
-      organization. Customers are uniquely identified by CustomerId.
-    status: Approved
-    expert: []
-    steward: []
-
-  - name: PII
-    shortDescription: Personally Identifiable Information.
-    longDescription: |
-      Any data that can be used to identify a specific individual, including but not
-      limited to names, email addresses, phone numbers, and government identifiers.
-    status: Approved
-
-  - name: RevenueRecognition
-    shortDescription: Policy governing when revenue is recorded.
-    status: Draft
+# TEMPLATE DEFAULT -- EMPTY ROOT LIST (ADR 0056: the template ships empty desired state).
+#
+# The three terms this file used to carry (Customer, PII, RevenueRecognition) were
+# GENERIC -- they disclosed nothing. They are emptied anyway, and that is the point:
+# ADR 0056 Decision 1 makes the rule UNIFORM precisely so that "is this one safe enough
+# to ship?" is never asked again. A per-file judgment call is exactly how an enforcing
+# tenant-wide SSN auto-labeling policy shipped from this same directory.
+#
+# `Deploy-Glossary.ps1` builds its plan by iterating THIS list, so zero entries means
+# zero Create and zero Update rows. Delete rows require an explicit `-PruneMissing`.
+#
+# A worked example lives at:
+#   examples/data-plane/glossary/glossary.yaml
+# -- under a tree that NO workflow, script, or schema reads. Copy from there deliberately.
+terms: []

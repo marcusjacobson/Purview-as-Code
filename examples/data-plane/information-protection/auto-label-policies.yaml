@@ -1,0 +1,83 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked auto-labeling policy for
+# data-plane/information-protection/auto-label-policies.yaml, which ships `policies: []`
+# and `rules: []` in the template. Copy from here deliberately; prefer running
+# `./scripts/Deploy-AutoLabelPolicies.ps1 -ExportCurrentState` against your own tenant.
+#
+# =============================================================================
+# READ THIS BEFORE COPYING ANYTHING OUT OF THIS FILE.
+#
+# The file this example derives from is the reason ADR 0056 exists. It shipped, in a
+# PUBLIC template, in a directory a reconciler reads:
+#
+#     - name: Lab-AutoLabel-SSN
+#       mode: Enable                     # not TestWithoutNotifications
+#       applyLabel: Confidential/Partner
+#       exchangeLocation: [All]          # every mailbox
+#
+# A live, enforcing, tenant-wide policy that stamps an ENCRYPTED label on any mail
+# containing a U.S. Social Security Number. Anyone who clicked "Use this template", ran
+# kickoff as designed, and dispatched the deploy workflow got it in THEIR tenant.
+#
+# THAT POLICY IS DELETED. It is not preserved here, not in comments, not in any form.
+# What survives is the CreditCards policy — which shipped at
+# `mode: TestWithoutNotifications`, proving simulation mode was known and available and
+# simply was not used for the SSN one.
+#
+# `mode` is the whole ballgame, and there is no separate `-StartSimulation` switch:
+#   TestWithoutNotifications  ->  simulate; nothing is applied, nobody is told.
+#   TestWithNotifications     ->  simulate; the user sees what WOULD have happened.
+#   Enable                    ->  ENFORCING. Labels are applied for real.
+#
+# Promotion path: TestWithoutNotifications -> TestWithNotifications -> Enable, one PR per
+# step, and promotion to `Enable` requires the `destructive` PR label (ADR 0016).
+# =============================================================================
+#
+# Shape (ADR 0016):
+#   policies[].name             — unique.
+#   policies[].mode             — see above.
+#   policies[].applyLabel       — composite key (`<parent>/<displayName>` for a sublabel).
+#                                 Resolved to a label GUID via Get-Label at apply time.
+#   policies[].exchangeLocation — `[All]` or a list of mailbox SMTP addresses. The KEY
+#                                 must be present; the array may be empty for a
+#                                 SharePoint/OneDrive-only policy.
+#   policies[].advancedSettings — MUST be empty ({}). The allowlist is `@()`.
+#
+#   rules[].name                — unique.
+#   rules[].policy              — foreign key to policies[].name.
+#   rules[].workload            — `Exchange` here; write-only at create time.
+#   rules[].contentContainsSensitiveInformation — one entry per SIT:
+#       sitId / minCount / minConfidence.
+#
+# `sitId` GUIDs are Microsoft BUILT-IN Sensitive Information Type IDs — identical in every
+# tenant, published by Microsoft, and validated against
+# data-plane/classifications/sit-catalog.yaml by the reconciler, which ERRORS if a sitId
+# is not in the catalog. They are not tenant identifiers, which is why the ADR 0055
+# identifier scan acquits them under `catalogKeys` (this file, key `sitId`).
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/apply-sensitivity-label-automatically
+#   https://learn.microsoft.com/en-us/purview/sit-defn-credit-card-number
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-autosensitivitylabelpolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-autosensitivitylabelrule
+
+policies:
+  - name: Example-AutoLabel-CreditCards
+    # SIMULATION. Promote deliberately, one step at a time, never straight to Enable.
+    mode: TestWithoutNotifications
+    applyLabel: Confidential/Partner
+    exchangeLocation:
+      - All
+    advancedSettings: {}
+
+rules:
+  - name: Example-AutoLabel-CreditCards-Rule
+    policy: Example-AutoLabel-CreditCards
+    workload: Exchange
+    contentContainsSensitiveInformation:
+      # Credit Card Number; Microsoft built-in SIT, identical in every tenant.
+      # Reference: https://learn.microsoft.com/en-us/purview/sit-defn-credit-card-number
+      - sitId: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+        minCount: 1
+        minConfidence: 75

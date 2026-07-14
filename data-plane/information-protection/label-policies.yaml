@@ -128,42 +128,20 @@
 #     available, in which case the value flows through ParametersFile,
 #     not through committed YAML.
 
-labelPolicies:
-  - name: Global sensitivity label policy
-    mode: Enable
-    exchangeLocation:
-      - All
-    modernGroupLocation: []
-    includedAdministrativeUnits: []
-    powerBIComplianceInformation: true
-    labels:
-      - General
-      - Public
-    advancedSettings:
-      DefaultLabel: "General"
-      OutlookDefaultLabel: "General"
-      RequireDowngradeJustification: "true"
-      teamworkdefaultlabelid: "General"
-  - name: Lab Confidential + HC
-    mode: Enable
-    exchangeLocation:
-      - All
-    modernGroupLocation: []
-    includedAdministrativeUnits: []
-    powerBIComplianceInformation: true
-    labels:
-      - Confidential
-      - Confidential/External
-      - Confidential/Internal
-      - Confidential/Partner
-      - General
-      - Highly Confidential
-      - Highly Confidential/External (Restricted)
-      - Highly Confidential/Internal (Restricted)
-      - Highly Confidential/Partner (Restricted)
-      - Public
-    advancedSettings:
-      DefaultLabel: "General"
-      OutlookDefaultLabel: "General"
-      RequireDowngradeJustification: "true"
-      teamworkdefaultlabelid: "General"
+# TEMPLATE DEFAULT -- EMPTY ROOT LIST (ADR 0056: the template ships empty desired state).
+#
+# An empty ROOT list is the ONLY shape that is a true no-op. `Deploy-LabelPolicies.ps1`
+# short-circuits on it (line ~1498) and plans zero Create / Update / Delete rows.
+#
+# Do NOT restore a "harmless sample" entry here. A populated list in this file is
+# DEPLOYABLE DESIRED STATE: it PUBLISHES labels to end users tenant-wide. This file
+# previously shipped two `mode: Enable`, `exchangeLocation: [All]` policies from the
+# owner's live lab.
+#
+# A worked, fully-scrubbed example lives at:
+#   examples/data-plane/information-protection/label-policies.yaml
+# -- under a tree that NO workflow, script, or schema reads. Copy from there deliberately.
+#
+# To adopt this solution: run `./scripts/Deploy-LabelPolicies.ps1 -ExportCurrentState`
+# first (mandatory first-run bootstrap), review the drift report in a PR, then merge.
+labelPolicies: []

@@ -23,7 +23,7 @@ jobs:
         run: az bicep build --file infra/main.bicep --outfile infra/main.json
 
   yaml:
-    name: Validate data-plane YAML
+    name: Validate data-plane and examples YAML
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,9 +31,13 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install yamllint
+      # examples/ is linted alongside data-plane/ (ADR 0056). The worked content moved
+      # there and nothing else reads it, so without this it would be the one YAML tree in
+      # the repo that nothing validates -- and an example that does not parse is worse
+      # than no example, because someone will copy it.
       - name: Run yamllint
         run: |
-          yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable}}' data-plane/
+          yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable}}' data-plane/ examples/
 
   powershell:
     name: Analyze PowerShell

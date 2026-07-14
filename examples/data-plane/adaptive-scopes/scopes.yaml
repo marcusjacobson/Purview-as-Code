@@ -1,0 +1,45 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked adaptive policy scope for data-plane/adaptive-scopes/scopes.yaml, which ships
+# `scopes: []` in the template. Copy from here deliberately; prefer running
+# `./scripts/Deploy-AdaptiveScopes.ps1 -ExportCurrentState` against your own tenant.
+#
+# This entry was ALREADY SYNTHETIC in the shipped file — it disclosed nothing. It was
+# emptied out of `data-plane/**` anyway, and the reason is the sharpest illustration of
+# ADR 0056 Decision 1 in the repo: a SYNTHETIC entry is still DEPLOYABLE desired state.
+# It creates a real adaptive scope in the consumer's tenant, bound to a filter that
+# matches nothing they meant, which other policies can then bind to. "Harmless because
+# it is fake" is not the same as "harmless because it does nothing", and only the empty
+# root list is the second one.
+#
+# See ADR 0034 (docs/adr/0034-adaptive-scope-schema.md) for the YAML / cmdlet boundary.
+#
+# Shape (ADR 0034):
+#   name             — unique. MUST start with `lab-as-` (pattern enforced by
+#                      scopes.schema.json) so the scope is identifiable in the
+#                      tenant-wide Microsoft 365 admin surface.
+#   locationType     — User | Group | Site. IMMUTABLE per Microsoft Learn; changing it
+#                      requires delete + recreate.
+#   filterConditions — a JSON STRING, passed unchanged to
+#                      `New-AdaptiveScope -FilterConditions`. The cmdlet REJECTS
+#                      hashtable input; only a JSON string works (ADR 0034 Decision 1).
+#                      Outer wrapper: { "Conjunction": "And", "Conditions": [ … ] }.
+#                      Each leaf: { "Name": "<attr>", "Value": "<v>",
+#                      "Operator": "Equals" }.
+#                      User-scope `Name` allowlist (probed against a live tenant):
+#                      Alias | Department | Title | Office | City.
+#                      UserPrincipalName / Mail are NOT accepted by the cmdlet even
+#                      though Microsoft Learn examples show them.
+#   comment          — YAML-only documentation. The cmdlet has no `-Comment` parameter,
+#                      so this field is never tracked for drift.
+#
+# Schema: data-plane/adaptive-scopes/scopes.schema.json (Draft-07).
+
+scopes:
+  - name: lab-as-finance-department
+    locationType: User
+    filterConditions: '{"Conjunction":"And","Conditions":[{"Name":"Department","Value":"Finance","Operator":"Equals"}]}'
+    comment: |
+      Every user whose Entra `Department` attribute is exactly "Finance". Retention, DLP,
+      and label policies can bind to this scope by NAME; the membership is resolved
+      dynamically by the service, not enumerated here.

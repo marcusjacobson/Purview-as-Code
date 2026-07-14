@@ -57,22 +57,22 @@
 #
 # Schema: data-plane/adaptive-scopes/scopes.schema.json (Draft-07).
 
-scopes:
-
-  # Example entry mirroring the synthetic shape probed during PR #549.
-  # Comment-out, edit, or replace before the first live-tenant apply.
-  # All identifiers in this example are synthetic per sample-data.instructions.md
-  # (Microsoft fictitious-company example values, RFC 2606 example.com domain).
-  - name: lab-as-mailbox-example
-    locationType: User
-    # The Value field carries a synthetic user@example.com per RFC 2606.
-    # Replace with a real lab-tenant UPN before applying. The Name leaf
-    # key must come from the ADR 0034 Decision 2 allowlist
-    # (Alias | Department | Title | Office | City for User scopes);
-    # UserPrincipalName / Mail are NOT accepted by the cmdlet even though
-    # Microsoft Learn examples show them.
-    filterConditions: '{"Conjunction":"And","Conditions":[{"Name":"Alias","Value":"example","Operator":"Equals"}]}'
-    comment: |
-      Synthetic example scope. Replace the filterConditions Value before applying.
-      See ADR 0034 for why filterConditions is a JSON string and which
-      Name attributes the cmdlet accepts.
+# TEMPLATE DEFAULT -- EMPTY ROOT LIST (ADR 0056: the template ships empty desired state).
+#
+# The single entry this file used to carry (`lab-as-mailbox-example`) was already
+# SYNTHETIC -- it disclosed nothing. It is emptied anyway, and that is the point:
+# ADR 0056 Decision 1 makes the rule UNIFORM precisely so that "is this one safe enough
+# to ship?" is never asked again. A synthetic entry is still DEPLOYABLE desired state --
+# it creates a real adaptive scope in the consumer's tenant, bound to a filter that
+# matches nothing they meant.
+#
+# `Deploy-AdaptiveScopes.ps1` short-circuits on the empty root list (line ~822) and plans
+# zero Create / Update / Delete rows.
+#
+# A worked example lives at:
+#   examples/data-plane/adaptive-scopes/scopes.yaml
+# -- under a tree that NO workflow, script, or schema reads. Copy from there deliberately.
+#
+# To adopt this solution: run `./scripts/Deploy-AdaptiveScopes.ps1 -ExportCurrentState`
+# first (mandatory first-run bootstrap), review the drift report in a PR, then merge.
+scopes: []

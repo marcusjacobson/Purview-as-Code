@@ -151,277 +151,30 @@
 #   (section: "Runtime: pwsh 7.4+ only, and the Connect-IPPSSession
 #   auth constraint").
 
-labels:
-  - displayName: Confidential
-    tooltip: Sensitive business data that could cause damage if shared with unauthorized people. Examples include contracts, security reports, forecast summaries, and sales account data.
-    comment: 'Tier 3 — sensitive business data. Three sublabels keyed on audience (Internal / Partner / External) per issue #223.'
-  - displayName: General
-    tooltip: Default label for everyday internal collaboration. Change to Public to share externally.
-    comment: DEFAULT tier — applied to all new content unless escalated. No encryption per the file header (lines 32, 42-49); encryption begins at Tier 3 (Confidential).
-    contentType:
-      - Email
-      - File
-      - Teamwork
-  - displayName: Highly Confidential
-    tooltip: Very sensitive business data that would cause damage if shared with unauthorized people. Examples include employee and customer information, passwords, source code, and pre-announced financial reports.
-    comment: 'Tier 4 — highest sensitivity. Three sublabels keyed on audience, suffixed with `(Restricted)` so displayName stays globally unique (Purview rule per issue #220).'
-  - displayName: Pilot — Confidential A0 (Lab)
-    tooltip: 'Lab fixture: encrypted label — user-assigned permissions (A0). Applying in Word prompts you to specify recipients and rights. In Outlook, presents Do Not Forward and Encrypt-Only. Do not apply to production content.'
-    comment: Lab — IP 2×2 A0 (user-perm) fixture. Used in cells A0B0 and A0B1. Remove during lab teardown.
-    contentType:
-      - Email
-      - File
-    encryption:
-      enabled: true
-      protectionType: UserDefined
-      contentExpiredOnDateInDaysOrNever: Never
-      offlineAccessDays: 0
-      doNotForward: true
-      encryptOnly: false
-      rightsDefinitions: []
-  - displayName: Pilot — Confidential A1 (Lab)
-    tooltip: 'Lab fixture: encrypted label — admin-pre-assigned permissions (A1). Applying this label silently encrypts the content with Co-Owner rights — no user prompt. Rights are visible in the Office Information pane. Do not apply to production content.'
-    comment: 'Lab — IP 2×2 A1 (admin-perm) fixture. Co-Owner principal: sg-lab-ip-pilot-rights-holders. Used in cells A1B0 and A1B1. Remove during lab teardown.'
-    contentType:
-      - Email
-      - File
-    encryption:
-      enabled: true
-      protectionType: Template
-      contentExpiredOnDateInDaysOrNever: Never
-      offlineAccessDays: -1
-      doNotForward: false
-      encryptOnly: false
-      rightsDefinitions:
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-  - displayName: Pilot — General (Lab)
-    tooltip: 'Lab fixture: base label, no encryption. Used as the silent default label in B0 policies (A0B0, A1B0). Do not apply to production content.'
-    comment: Lab — IP 2×2 Pre-work fixture. Default label for policies Lab — IP A0B0 and Lab — IP A1B0. Remove during lab teardown.
-    contentType:
-      - Email
-      - File
-  - displayName: Public
-    tooltip: Business data that is specifically prepared and approved for public consumption.
-    comment: No protection or encryption — only for content acceptable for unrestricted distribution.
-    contentType:
-      - Email
-      - File
-      - Site
-      - Teamwork
-      - UnifiedGroup
-    contentMarking:
-      footer:
-        enabled: true
-        text: This document has been labeled for public consumption
-        fontSize: 10
-        fontColor: '#000000'
-        alignment: Left
-        layout: ""
-  - displayName: External
-    parent: Confidential
-    tooltip: Confidential content released to a broader external audience; recipients can read but not forward or print.
-    comment: 'Confidential / External — wider external audience. `protectionType: Template` with three named rights tiers (view-only, co-author, owner); unlimited offline access (`offlineAccessDays: -1`).'
-    contentType:
-      - Email
-      - File
-      - Teamwork
-    contentMarking:
-      footer:
-        enabled: true
-        text: CONFIDENTIAL — External release. Do not forward.
-        fontSize: 10
-        fontColor: '#000000'
-        alignment: Left
-        layout: ""
-    encryption:
-      enabled: true
-      protectionType: Template
-      contentExpiredOnDateInDaysOrNever: Never
-      offlineAccessDays: -1
-      doNotForward: false
-      encryptOnly: false
-      rightsDefinitions:
-        - Identity: user@contoso.com
-          Rights: OBJMODEL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: OBJMODEL,VIEW,VIEWRIGHTSDATA
-  - displayName: External (Restricted)
-    parent: Highly Confidential
-    tooltip: Highly confidential content released only to named individuals. Auto-applied when payment card data is detected.
-    comment: 'Highly Confidential / External (Restricted) — narrowly-scoped external release. `protectionType: Template` with two named rights tiers (co-author, owner); red diagonal watermark + footer. The Automatic-mode CCN auto-apply rule lives in the Microsoft Purview portal only (not in this YAML) per ADR 0027; see header block.'
-    contentType:
-      - Email
-      - File
-      - Teamwork
-    contentMarking:
-      footer:
-        enabled: true
-        text: HIGHLY CONFIDENTIAL — Authorized recipients only.
-        fontSize: 10
-        fontColor: '#000000'
-        alignment: Left
-        layout: ""
-      watermark:
-        enabled: true
-        text: RESTRICTED — EXTERNAL
-        fontSize: 20
-        fontColor: '#FF0000'
-        alignment: ""
-        layout: Diagonal
-    encryption:
-      enabled: true
-      protectionType: Template
-      contentExpiredOnDateInDaysOrNever: Never
-      offlineAccessDays: -1
-      doNotForward: false
-      encryptOnly: false
-      rightsDefinitions:
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,FORWARD,OBJMODEL,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: OBJMODEL,VIEW,VIEWRIGHTSDATA
-  - displayName: Internal
-    parent: Confidential
-    tooltip: Confidential content for employees only — blocked from external sharing.
-    comment: 'Confidential / Internal — internal-only audience. `protectionType: Template` with three named rights tiers (owner, co-author, view-only); unlimited offline access (`offlineAccessDays: -1`).'
-    contentType:
-      - Email
-      - File
-      - Teamwork
-    contentMarking:
-      footer:
-        enabled: true
-        text: CONFIDENTIAL — Internal use only. Do not share outside the organization.
-        fontSize: 10
-        fontColor: '#000000'
-        alignment: Left
-        layout: ""
-    encryption:
-      enabled: true
-      protectionType: Template
-      contentExpiredOnDateInDaysOrNever: Never
-      offlineAccessDays: -1
-      doNotForward: false
-      encryptOnly: false
-      rightsDefinitions:
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,FORWARD,OBJMODEL,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-  - displayName: Internal (Restricted)
-    parent: Highly Confidential
-    tooltip: Highly confidential content readable only by employees; heavy watermark, no external sharing.
-    comment: Highly Confidential / Internal (Restricted) — internal-only audience at tier 4. Red watermark + footer.
-    contentType:
-      - Email
-      - File
-      - Teamwork
-    contentMarking:
-      footer:
-        enabled: true
-        text: HIGHLY CONFIDENTIAL — Internal use only.
-        fontSize: 10
-        fontColor: '#FF0000'
-        alignment: Left
-        layout: ""
-      watermark:
-        enabled: true
-        text: RESTRICTED — INTERNAL
-        fontSize: 20
-        fontColor: '#FF0000'
-        alignment: ""
-        layout: Diagonal
-    encryption:
-      enabled: true
-      protectionType: Template
-      contentExpiredOnDateInDaysOrNever: Never
-      offlineAccessDays: -1
-      doNotForward: false
-      encryptOnly: false
-      rightsDefinitions:
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,FORWARD,OBJMODEL,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-  - displayName: Partner
-    parent: Confidential
-    tooltip: Confidential content shareable with named external partners under NDA; encrypted for everyone else.
-    comment: 'Confidential / Partner — named-partner audience under NDA. `protectionType: Template` with two named rights tiers (co-author, owner); unlimited offline access (`offlineAccessDays: -1`). The Recommend-mode CCN auto-apply rule lives in the Microsoft Purview portal only (not in this YAML) per ADR 0027; see header block.'
-    contentType:
-      - Email
-      - File
-      - Teamwork
-    contentMarking:
-      footer:
-        enabled: true
-        text: CONFIDENTIAL — Partner-restricted. Recipients are bound by NDA.
-        fontSize: 10
-        fontColor: '#000000'
-        alignment: Left
-        layout: ""
-    encryption:
-      enabled: true
-      protectionType: Template
-      contentExpiredOnDateInDaysOrNever: Never
-      offlineAccessDays: -1
-      doNotForward: false
-      encryptOnly: false
-      rightsDefinitions:
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: OBJMODEL,VIEW,VIEWRIGHTSDATA
-  - displayName: Partner (Restricted)
-    parent: Highly Confidential
-    tooltip: Highly confidential content shareable only with named external partners under NDA; watermarked and time-bound.
-    comment: 'Highly Confidential / Partner (Restricted) — named-partner audience at tier 4 under NDA. `protectionType: Template` with two named rights tiers (co-author, owner); red diagonal watermark + footer; unlimited offline access (`offlineAccessDays: -1`).'
-    contentType:
-      - Email
-      - File
-      - Teamwork
-    contentMarking:
-      footer:
-        enabled: true
-        text: HIGHLY CONFIDENTIAL — Partner-restricted. NDA required.
-        fontSize: 10
-        fontColor: '#FF0000'
-        alignment: Left
-        layout: ""
-      watermark:
-        enabled: true
-        text: RESTRICTED — PARTNER
-        fontSize: 20
-        fontColor: '#FF0000'
-        alignment: ""
-        layout: Diagonal
-    encryption:
-      enabled: true
-      protectionType: Template
-      contentExpiredOnDateInDaysOrNever: Never
-      offlineAccessDays: -1
-      doNotForward: false
-      encryptOnly: false
-      rightsDefinitions:
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
-        - Identity: user@contoso.com
-          Rights: DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA
+# TEMPLATE DEFAULT -- EMPTY ROOT LIST (ADR 0056: the template ships empty desired state).
+#
+# An empty ROOT list is the ONLY shape that is a true no-op. `Deploy-Labels.ps1`
+# short-circuits on it (line ~1542, `if ($desiredHashes.Count -eq 0) { return @() }`)
+# BEFORE the first `Get-Label`, and plans zero Create / Update / Delete rows.
+#
+# Do NOT restore a "harmless sample" entry here. A populated list in this file is
+# DEPLOYABLE DESIRED STATE: labels are TENANT-WIDE and several of them ENCRYPT content.
+# This file previously shipped 13 labels exported from the owner's live lab, including
+# three `Pilot -- ... (Lab)` fixtures whose own comments read "Remove during lab teardown"
+# and which named a real Entra security group as a rights holder. Those are DELETED, not
+# preserved: a teardown artifact has no value as an example.
+#
+# NOTE -- the SIT catalog is UNAFFECTED and stays populated.
+# `data-plane/classifications/sit-catalog.yaml` is a Microsoft built-in REFERENCE catalog,
+# not desired state; no script creates, updates, or prunes a SIT. `Deploy-Labels.ps1`
+# (line ~1262) ERRORS and returns if a label's `autoApplicationOf.sitId` is absent from
+# it, so emptying the catalog would break every label deploy that uses auto-application.
+# ADR 0056 Decision 3 carves it out BY NAME, WITH THAT REASON.
+#
+# A worked, fully-scrubbed example lives at:
+#   examples/data-plane/information-protection/labels.yaml
+# -- under a tree that NO workflow, script, or schema reads. Copy from there deliberately.
+#
+# To adopt this solution: run `./scripts/Deploy-Labels.ps1 -ExportCurrentState` first
+# (mandatory first-run bootstrap), review the drift report in a PR, then merge.
+labels: []

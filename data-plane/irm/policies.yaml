@@ -67,12 +67,22 @@
 #   ADR 0036 (tenant-setting + mid-testing skip baseline):
 #     docs/adr/0036-irm-tenant-setting-immovable.md
 
-policies:
-  - name: pac-lab-irm-data-leaks
-    description: >
-      Permanent YAML-managed lab policy for as-code governance of the
-      LeakOfInformation scenario. Managed by Deploy-IRMPolicies.ps1;
-      distinct from the operator-authored "IRM Lab—General data leaks"
-      policy. Authored via issue #605.
-    scenario: LeakOfInformation
-    enabled: false
+# TEMPLATE DEFAULT -- EMPTY ROOT LIST (ADR 0056: the template ships empty desired state).
+#
+# An empty ROOT list is the ONLY shape that is a true no-op. `Deploy-IRMPolicies.ps1`
+# builds its plan by iterating THIS list, so zero entries means zero Create and zero
+# Update rows. Delete rows are reachable only under an explicit `-PruneMissing`.
+#
+# Do NOT restore a "harmless sample" entry here. A populated list in this file is
+# DEPLOYABLE DESIRED STATE: an Insider Risk policy profiles real employees. This file
+# previously shipped the owner's lab policy `pac-lab-irm-data-leaks`.
+#
+# A worked, fully-scrubbed example lives at:
+#   examples/data-plane/irm/policies.yaml
+# -- under a tree that NO workflow, script, or schema reads. Copy from there deliberately.
+#
+# The ADR 0036 skip baseline is unaffected: it is a skip list, not desired state.
+#
+# To adopt this solution: run `./scripts/Deploy-IRMPolicies.ps1 -ExportCurrentState` first
+# (mandatory first-run bootstrap), review the drift report in a PR, then merge.
+policies: []

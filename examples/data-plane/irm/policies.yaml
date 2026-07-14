@@ -1,0 +1,37 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked Insider Risk Management policy for data-plane/irm/policies.yaml, which ships
+# `policies: []` in the template. Copy from here deliberately; prefer running
+# `./scripts/Deploy-IRMPolicies.ps1 -ExportCurrentState` against your own tenant.
+#
+# An IRM policy PROFILES REAL EMPLOYEES. It is not a thing a public template should create
+# in a stranger's tenant on a first dispatch, which is why `data-plane/irm/policies.yaml`
+# ships empty.
+#
+# Schema: data-plane/irm/policies.schema.json (Draft-07).
+#
+# Fields (the conservative subset that is stable across module versions):
+#   name        — unique; becomes `-Name`.
+#   description — free-form; maps to `-Comment`.
+#   scenario    — IRM template name; maps to `-InsiderRiskScenario`. See the schema for
+#                 the verified enum.
+#   enabled     — optional boolean. Omit to take the cmdlet default (typically created
+#                 in a disabled / staging state, which is what you want).
+#
+# `priority` is deliberately NOT a managed field: `Get-InsiderRiskPolicy` returns a
+# `Priority` property, but neither `New-` nor `Set-InsiderRiskPolicy` accepts a
+# `-Priority` parameter (verified against a live S&C PowerShell session).
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/insider-risk-management
+#   https://learn.microsoft.com/en-us/purview/insider-risk-management-configure
+#   https://learn.microsoft.com/en-us/powershell/module/exchange/new-insiderriskpolicy
+
+policies:
+  - name: example-irm-data-leaks
+    description: >
+      Worked example of as-code governance for the LeakOfInformation scenario. Ships
+      disabled: an IRM policy profiles real people, so it is created in a staging state
+      and enabled deliberately, after the scope and the alert volume have been reviewed.
+    scenario: LeakOfInformation
+    enabled: false

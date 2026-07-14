@@ -4,8 +4,21 @@
 # The root collection shares the name of the Purview account and is managed by Azure.
 # Children listed here are created/updated under it. Removing an entry DOES NOT delete
 # the collection (deletion is opt-in; see scripts/Deploy-Collections.ps1 -PruneMissing).
+#
+# TEMPLATE DEFAULT — EMPTY ROOT LIST (ADR 0056). See the block above `collections:`.
 
-rootCollection: purview-contoso-lab
+# rootCollection — the Purview ACCOUNT NAME, not desired state.
+#
+# Ships UNSET (null). It is a tenant identifier, and with `collections: []` there is
+# nothing to root, so a shipped value would be pure disclosure with zero function:
+# `Deploy-Collections.ps1` treats this key as optional and INFORMATIONAL (line ~852) and
+# always binds the account from `-PurviewAccountName` / `infra/parameters/lab.yaml`, the
+# single source of truth (ADR 0046). When present it is a copy-paste guard: the
+# reconciler errors if it disagrees with the target account.
+#
+# A spin-off that POPULATES `collections:` below should set this to its own account name
+# to re-arm that guard. The template cannot: it has no account. (ADR 0056 Decision 5.)
+rootCollection: null
 
 # Optional allow-list of tenant collections that must NEVER be deleted by
 # `-PruneMissing`. Use this for system-managed or service-created collections
@@ -15,74 +28,24 @@ rootCollection: purview-contoso-lab
 # Reference: https://learn.microsoft.com/en-us/rest/api/purview/accountdataplane/collections/delete-collection
 protected: []
 
-collections:
-  - name: c8iacz
-    friendlyName: Non-Prod
-    description: Sample and Testing data
-    parent: purview-contoso-lab
-    children:
-      - name: chfb1r
-        friendlyName: Platform Data
-        children:
-          - name: cqyzoe
-            friendlyName: Dataverse
-      - name: euvfmr
-        friendlyName: Relational
-        description: Relational Databases
-        children:
-          - name: "85cv3o"
-            friendlyName: MySQL
-          - name: a5oe4c
-            friendlyName: PostgreSQL
-          - name: bbot46
-            friendlyName: AzureSQL
-      - name: ev04jw
-        friendlyName: Storage
-        children:
-          - name: jprasm
-            friendlyName: Blob Storage
-          - name: js1tih
-            friendlyName: ADLS Gen2
-      - name: o41l3i
-        friendlyName: Analytics Platform
-        children:
-          - name: c0fsrh
-            friendlyName: Synapse
-          - name: ncu25o
-            friendlyName: Fabric
-      - name: ppjrrw
-        friendlyName: NoSQL & Analytics
-        children:
-          - name: "4khzmw"
-            friendlyName: Azure Data Explorer -Kusto
-      - name: voxgql
-        friendlyName: Integration
-        children:
-          - name: "4k3yky"
-            friendlyName: Databricks
-  - name: enterprise
-    friendlyName: Enterprise Catalog
-    description: Top-level collection for enterprise data assets.
-    parent: purview-contoso-lab
-    children:
-      - name: finance
-        friendlyName: Finance
-        description: Finance domain data sources and assets.
-      - name: human-resources
-        friendlyName: Human Resources
-        description: HR domain data sources and assets.
-      - name: sales
-        friendlyName: Sales
-        description: Sales and CRM domain assets.
-  - name: sandbox
-    friendlyName: Sandbox
-    description: Experimental / non-production assets.
-    parent: purview-contoso-lab
-  - name: "1lfhuf"
-    friendlyName: HR
-    description: Highly sensitive PII data
-    parent: purview-contoso-lab
-  - name: "9vsaza"
-    friendlyName: Finance
-    description: Regulated, sensitive business data
-    parent: purview-contoso-lab
+# TEMPLATE DEFAULT — EMPTY ROOT LIST (ADR 0056: the template ships empty desired state).
+#
+# An empty ROOT list is the ONLY shape that is a true no-op. `Deploy-Collections.ps1`
+# builds its plan by iterating THIS list (`ConvertTo-DesiredCollectionList` returns `@()`
+# when it is empty), so zero entries means zero Create and zero Update rows. Delete rows
+# are reachable only under an explicit `-PruneMissing`.
+#
+# Do NOT restore a "harmless sample" entry here. A populated list in this file is
+# DEPLOYABLE DESIRED STATE: a consumer who clicks "Use this template" and dispatches the
+# deploy workflow gets every entry created in THEIR tenant. This file previously shipped
+# the owner's live lab hierarchy — including Purview's auto-generated 6-character
+# collection IDs (`c8iacz`, `chfb1r`, …), which nobody hand-authors and which are useless
+# to anyone else.
+#
+# A worked, fully-scrubbed example lives at:
+#   examples/data-plane/collections/collections.yaml
+# — under a tree that NO workflow, script, or schema reads. Copy from there deliberately.
+#
+# To adopt this solution: run `./scripts/Deploy-Collections.ps1 -ExportCurrentState` first
+# (mandatory first-run bootstrap), review the drift report in a PR, then merge.
+collections: []

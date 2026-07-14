@@ -10,20 +10,27 @@
 # `\b` word boundaries, uses bounded repetition (`{N}`, `{0,N}`), and
 # avoids nested unbounded quantifier shapes such as `(x+)+`.
 
-classifications:
-  - name: CUSTOM.EmployeeId
-    description: Internal employee identifier (EMP-####).
+# TEMPLATE DEFAULT -- BOTH ROOT LISTS EMPTY (ADR 0056: the template ships empty
+# desired state).
+#
+# The one custom classification this file used to carry (CUSTOM.EmployeeId, `EMP-####`)
+# was GENERIC -- it disclosed nothing. It is emptied anyway, and that is the point:
+# ADR 0056 Decision 1 makes the rule UNIFORM precisely so that "is this one safe enough
+# to ship?" is never asked again.
+#
+# `Deploy-Classifications.ps1` builds its plan by iterating these lists, so zero entries
+# means zero Create and zero Update rows. Delete rows require an explicit `-PruneMissing`.
+#
+# NOT AFFECTED: `sit-catalog.yaml`, alongside this file, is a Microsoft built-in
+# REFERENCE catalog (327 entries, every one `publisher: Microsoft Corporation`), not
+# desired state. `Deploy-Classifications.ps1` never opens it; the scripts that do only
+# READ it, and `Deploy-Labels.ps1` (line ~1262) ERRORS if a label's `autoApplicationOf`
+# sitId is missing from it. Emptying it would BREAK label deploys. ADR 0056 Decision 3
+# carves it out by name, with that reason.
+#
+# A worked example lives at:
+#   examples/data-plane/classifications/classifications.yaml
+# -- under a tree that NO workflow, script, or schema reads. Copy from there deliberately.
+classifications: []
 
-rules:
-  - name: CUSTOM.EmployeeIdRule
-    classificationName: CUSTOM.EmployeeId
-    ruleStatus: Enabled
-    kind: Regex
-    minimumPercentageMatch: 60
-    regex:
-      pattern: '\bEMP-\d{4}\b'
-      regexFlags:
-        ignoreCase: true
-    columnPatterns:
-      - kind: Regex
-        pattern: '(?i)\bemployee[_\s-]{0,3}id\b'
+rules: []

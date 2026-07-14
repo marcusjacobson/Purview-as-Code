@@ -261,18 +261,24 @@ tenantSurfaces:
 intentionalSamples:
   - ":!docs/adr"                 # decision records quote the placeholders verbatim
   - ":!CHANGELOG.md"             # historical entries reference the placeholders
-  # --- data-plane: NARROWED from a blanket ":!data-plane" (ADR 0055) ----------
-  # The blanket exclude hid data-plane/purview-role-groups/role-groups.yaml and
-  # data-plane/entra-directory-roles/role-assignments.yaml — the two files that
-  # carried the disclosure. Only the genuinely sample-content files are excluded
-  # now; every other data-plane file is scanned. The ~7 header-comment matches
-  # this surfaces ("...the `contoso.onmicrosoft.com` tenant") are real
-  # stale-after-tailoring prose and the operator SHOULD confirm them.
+  # --- data-plane: the four "sample" excludes are GONE (ADR 0056) --------------
+  # ADR 0055 narrowed a blanket ":!data-plane" down to four files, on the claim that
+  # those four were sample content. THEY WERE NOT. They were the four carrying the
+  # owner's live lab config — a real Databricks workspace, a real Dataverse org, a real
+  # Entra group named as a label rights holder, and Purview's auto-generated collection
+  # IDs. The exclusions were the assertion "these are samples", and the assertion was
+  # false; they are removed rather than re-scoped.
+  #
+  # ADR 0056 removes the need for them at the root: data-plane/** now ships EMPTY root
+  # lists, so there is no sample content left in the tree to exclude. The scrubbed worked
+  # examples live under examples/**, which is deliberately NOT excluded here either — a
+  # path exclusion is the mechanism that hid the last disclosure, and relocating content
+  # behind one would just move the blind spot. examples/** stays in BOTH scans.
+  #
+  # The remaining header-comment matches across data-plane/** ("...the
+  # `contoso.onmicrosoft.com` tenant") are real stale-after-tailoring prose and the
+  # operator SHOULD confirm them.
   - ":!data-plane/**/*.schema.json"                        # JSON-Schema `$id` namespace URIs (purview-as-code.contoso-lab/...) — not tenant surfaces
-  - ":!data-plane/data-sources/data-sources.yaml"          # sample source names (stcontosolabblob, sql-contosolab-demo)
-  - ":!data-plane/scans/scans.yaml"                        # sample scan targets over the same sample sources
-  - ":!data-plane/information-protection/labels.yaml"      # sample label descriptions / sample UPNs
-  - ":!data-plane/collections/collections.yaml"            # rootCollection is the account name (sample catalog content)
   - ":!tests"                    # Pester fixtures assert against synthetic identifiers
   - ":!docs/runbooks"            # illustrative end-to-end examples
   - ":!docs/solutions"           # solution guides use synthetic examples
@@ -403,13 +409,41 @@ identifierScan:
         -ExportCurrentState from the SIT API, which cannot return a group OID.
     - path: data-plane/dlp/policies.yaml
       keys: [guid]
-      note: Built-in SIT + trainable-classifier IDs referenced by DLP rules.
+      note: >-
+        Built-in SIT + trainable-classifier IDs referenced by DLP rules. Ships an EMPTY
+        root list per ADR 0056, so it currently contributes NOTHING to the value set. The
+        entry stays because a spin-off that populates its own DLP policies will reference
+        the same Microsoft built-in IDs and must not have to re-litigate this rule.
     - path: data-plane/information-protection/auto-label-policies.yaml
       keys: [sitId]
-      note: Built-in SIT IDs referenced by auto-labeling rules.
+      note: >-
+        Built-in SIT IDs referenced by auto-labeling rules. Ships an EMPTY root list per
+        ADR 0056; same reasoning as dlp/policies.yaml above.
     - path: data-plane/information-protection/labels.autoApplicationOf.fixture.yaml
       keys: [sitId]
       note: Built-in SIT IDs in the label auto-application fixture (ADR 0017).
+    # --- examples/** (ADR 0056) ---------------------------------------------------
+    # The worked examples moved OUT of data-plane/** and into examples/**, a tree no
+    # workflow, script, or schema reads. They carry the same Microsoft built-in SIT and
+    # trainable-classifier IDs, under the same keys, and they are NOT excluded from this
+    # scan — examples/** is scanned like everything else, because a path exclusion is
+    # what hid the last disclosure. So the (file, key) rule must follow the content.
+    #
+    # This is the SAME rule, not a new escape hatch: still anchored to `<key>: <guid>` as
+    # the whole value, so a bare sequence item under `members:` is still unacquittable in
+    # these files, and every non-SIT GUID in examples/** still fails closed.
+    - path: examples/data-plane/dlp/policies.yaml
+      keys: [guid]
+      note: >-
+        Built-in SIT + trainable-classifier IDs in the worked DLP example (ADR 0056).
+        Microsoft-published, identical in every tenant.
+        https://learn.microsoft.com/en-us/purview/sit-sensitive-information-type-entity-definitions
+    - path: examples/data-plane/information-protection/auto-label-policies.yaml
+      keys: [sitId]
+      note: >-
+        Built-in SIT IDs in the worked auto-labeling example (ADR 0056). The enforcing
+        Lab-AutoLabel-SSN policy is DELETED, not relocated; only the simulation-mode
+        credit-card example survives.
 
   # --- Rule 3 — MICROSOFT CONSTANTS ---------------------------------------------
   # Acquits by exact VALUE. For the GUIDs that have no enclosing key to hang a
