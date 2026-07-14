@@ -164,12 +164,28 @@ A script that hardcodes a resource name, resource group, region, or tag default 
 |---|---|---|
 | `-WhatIf` | off | Produce the drift report; make no writes. Built into `[CmdletBinding(SupportsShouldProcess)]`. |
 | `-PruneMissing` | `$false` | Allow deletion of objects that are in Purview but not in YAML. Without it, orphans are reported and skipped. Deletion is gated by the [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) confirmation prompt. |
-| `-Force` | `$false` | **Suppress the safety guard that would otherwise block or question this operation.** In the **Apply** parameter set that guard is the [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) destructive-operation confirmation prompt. In the **Export** parameter set it is `-ExportCurrentState`'s refusal to clobber a non-empty managed block. The two parameter sets are disjoint, so the meaning is unambiguous at any call site. |
+| `-Force` | `$false` | **Suppress the safety guard that would otherwise block or question this operation.** In the **Apply** parameter set that guard is the [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) destructive-operation confirmation prompt. In the **Export** parameter set it is `-ExportCurrentState`'s refusal to clobber a non-empty managed block. The two parameter sets are disjoint, so the meaning is unambiguous at any call site. **`-Force` does not authorize an authorship overwrite and does not suppress `Conflict` rows** — see `-OverwriteForeignAuthor` below ([ADR 0053](../../docs/adr/0053-overwrite-foreign-author-switch.md)). |
 | `-ExportCurrentState` | off | Read the live tenant and write its current state into the corresponding `data-plane/**` YAML. Makes no writes to Purview. Used to bootstrap a YAML file from an existing tenant so the first reconciler run does not look like drift. Must fail if the YAML already has non-empty managed content, unless `-Force` is also specified. |
 
 A script that does not expose these four switches is rejected by review.
 
-> **`-Force` does *not* mean "overwrite objects whose `lastModifiedBy` is not the deploy principal."** That definition was retired by [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) §6. It described a capability the IPPS / Security & Compliance cmdlets cannot support — they do not return a `lastModifiedBy` to diff against — and no reconciler ever implemented it. If a future Purview surface exposes one, that override gets its **own** switch (`-OverwriteForeignAuthor`); do not fold it back onto `-Force`.
+### `-OverwriteForeignAuthor` — surface-conditional, Apply parameter set only (ADR 0053)
+
+| Switch | Default | Effect |
+|---|---|---|
+| `-OverwriteForeignAuthor` | `$false` | Permit `Update` writes against tenant objects whose authorship field (`updatedBy` / `createdBy` / `lastModifiedBy` / `systemData.lastModifiedBy`) differs from the current deploy principal. Without it, such an object is reported as a `Conflict` row and **left untouched**. |
+
+**Required on exactly the reconcilers whose API surface returns a per-object authorship field — no more, no fewer.** That is the six **Atlas / Data Map / Scanning / Unified Catalog REST** reconcilers: `Deploy-Glossary.ps1`, `Deploy-DataSources.ps1`, `Deploy-Classifications.ps1`, `Deploy-Scans.ps1`, `Deploy-UnifiedCatalog.ps1`, `Deploy-UnifiedCatalogPolicies.ps1`.
+
+The **IPPS / Security & Compliance** cmdlet surface returns no authorship field, so its reconcilers (`Deploy-Labels.ps1`, `Deploy-LabelPolicies.ps1`, `Deploy-FilePlan.ps1`, `Deploy-DLPPolicies.ps1`, `Deploy-PurviewRoleGroups.ps1`, …) do **not** get this switch — there is genuinely nothing to diff. Microsoft Graph exposes no per-administrative-unit authorship either, so `Deploy-AdministrativeUnits.ps1` does not get it.
+
+Binding rules:
+
+1. **Apply parameter set only.** Never add it to the Export set: the export path writes a local YAML file, so no tenant object's authorship is in question.
+2. **The `Conflict` row is emitted either way.** The switch authorizes the overwrite; it must **not** suppress the finding. A reconciler that hides the `Conflict` row when the switch is supplied is rejected by review — that is the exact defect ADR 0053 repaired.
+3. **Never bind it from `$Force`.** `-Force` and `-OverwriteForeignAuthor` are independent. Re-conflating them is how this repo got here, twice.
+
+> **`-Force` does *not* mean "overwrite objects whose `lastModifiedBy` is not the deploy principal."** [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) §6 retired that definition as *unimplementable*, on the false premise that no Purview surface returns an authorship field. [**ADR 0053**](../../docs/adr/0053-overwrite-foreign-author-switch.md) corrects the premise — the Atlas / Data Map / Unified Catalog REST surface **does** return one, and six reconcilers have diffed it all along — and un-retires the capability under its **own** switch, `-OverwriteForeignAuthor`, exactly as ADR 0052 line 120 pre-authorized. The prohibition that survives is the important half: **do not fold the authorship override back onto `-Force`.**
 
 ### Direction-policy contract (ADR 0029)
 
@@ -320,7 +336,8 @@ Every `-WhatIf` run must emit a categorized report. The five categories, in orde
 2. **Update** — in both; content differs.
 3. **NoChange** — in both; content identical.
 4. **Orphan** — in Purview, not in YAML. Would be deleted only with `-PruneMissing` *and* an answered [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) confirmation.
-5. **Conflict** — **reserved; not currently emitted by any reconciler.** This row assumed a per-object `lastModifiedBy` that the IPPS / Security & Compliance cmdlets do not return, so no reconciler can populate it. Retired as a `-Force` trigger by [ADR 0052](../../docs/adr/0052-destructive-confirmation-gate-at-script-layer.md) §6. Do not emit a fabricated `Conflict` row; if a future Purview surface exposes an authorship field, reinstate this row alongside a dedicated `-OverwriteForeignAuthor` switch.
+5. **Conflict** — in both; tracked-field drift **and** the tenant object's authorship field differs from the deploy principal. **Emitted today by six reconcilers** (`Deploy-Glossary.ps1`, `Deploy-DataSources.ps1`, `Deploy-Classifications.ps1`, `Deploy-Scans.ps1`, `Deploy-UnifiedCatalog.ps1`, `Deploy-UnifiedCatalogPolicies.ps1`) — the Atlas / Data Map / Scanning / Unified Catalog REST surface returns `updatedBy` / `createdBy` / `systemData.lastModifiedBy` to diff against. Would be overwritten only with `-OverwriteForeignAuthor`; the row is emitted **whether or not** that switch is supplied ([ADR 0053](../../docs/adr/0053-overwrite-foreign-author-switch.md)). Reconcilers on the IPPS / Security & Compliance surface cannot populate this row — those cmdlets return no authorship field — and must not fabricate one.
+   > **`Conflict` is currently overloaded, and [ADR 0053](../../docs/adr/0053-overwrite-foreign-author-switch.md) §7 documents it as a known follow-up.** Two scripts emit `Category = 'Conflict'` for a **shape** mismatch, not an authorship one: `Deploy-EntraDirectoryRoles.ps1` ("declared member is not a security-enabled, role-assignable Entra group") and `Deploy-RoleGroupBackingEntraGroups.ps1` ("tenant group is not a pure security group"). Do not write a guard test that asserts a single `Conflict` semantic — there isn't one. Scope authorship assertions to the six reconcilers named above. The rename is deferred.
 
 **Per-object rows, not aggregate counts.** The report is one `PSCustomObject` per object with the columns `Category`, `Kind`, `Name`, `Reason`, emitted as a pipeline (not `Write-Host`) so the caller can pipe it to `Format-Table`, `Out-File`, `ConvertTo-Json`, or `>> $GITHUB_STEP_SUMMARY`. A short summary banner (`Plan: 3 Create, 1 Update, 12 NoChange`) may follow the table but never replaces it. A reconciler that only prints a banner and a short-circuit message is rejected — `-WhatIf` must enumerate every object it would touch.
 
@@ -394,6 +411,8 @@ Run before opening a PR that touches `scripts/**`. Paste the output of each comm
 
 - [ ] `Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning -EnableExit` exits 0
 - [ ] Every touched `Deploy-*.ps1` exposes `-WhatIf`, `-PruneMissing`, `-Force`, and `-ExportCurrentState`
+- [ ] If the touched reconciler diffs an authorship field, it exposes `-OverwriteForeignAuthor` in the **Apply parameter set only**, emits the `Conflict` row regardless of the switch, and never binds the switch from `$Force` (ADR 0053). Check with `grep -nE 'ForceEnabled|AllowConflictOverwrite:\$Force' scripts/` — both patterns must return zero
+- [ ] No `Deploy-*.ps1` contains an ambient `$ConfirmPreference = 'None'` self-disarm. Check with `grep -rInE "ConfirmPreference\s*=\s*'None'" scripts/` — must return zero (ADR 0053 §4)
 - [ ] Every touched `Deploy-*.ps1` declares `ConfirmImpact = 'High'` — **never `'Medium'`**, which never prompts against the default `$ConfirmPreference = 'High'` (ADR 0052). Check with `grep -rInE "ConfirmImpact\s*=\s*'Medium'" scripts/` — the on-disk spelling has spaces around the `=`
 - [ ] Every state-changing call in the touched script is individually wrapped in `$PSCmdlet.ShouldProcess(...)`
 - [ ] The `-PruneMissing` delete branch and the `-DirectionPolicy repo-wins` overwrite branch are each gated by `$PSCmdlet.ShouldContinue()` via `scripts/modules/ConfirmGate.psm1` — one prompt per run, suppressed by `-Force` / `-Confirm:$false`, skipped under `-WhatIf` (ADR 0052)

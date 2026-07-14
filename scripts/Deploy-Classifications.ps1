@@ -31,7 +31,7 @@
         reference aborts the plan with a named error before any write.
       * Every Regex rule pattern (both row-level `regex.pattern` and
         each `columnPatterns[].pattern`) is validated for shape per
-        `.github/instructions/sample-data.instructions.md` §"Regex
+        `.github/instructions/sample-data.instructions.md` section "Regex
         rules for classification patterns":
           - Must be anchored (`^`, `$`, or `\b`).
           - Must not be unanchored AND contain unbounded `.*` / `.+`.
@@ -107,8 +107,31 @@
     Remove tenant types/rules not present in YAML. Default `$false`.
 
 .PARAMETER Force
-    Allow overwriting conflict rows (`updatedBy` differs from deploy
-    principal) and allow overwriting a non-empty YAML on export.
+    Suppress the safety guard on the operation you asked for. In the
+    Export parameter set that guard is `-ExportCurrentState`'s refusal
+    to clobber a non-empty managed block in the target YAML. In the
+    Apply parameter set it is the ADR 0052 destructive-operation
+    confirmation prompt.
+    `-Force` does NOT authorize overwriting a foreign-authored tenant
+    object, and it does NOT suppress `Conflict` rows -- that meaning was
+    split out to `-OverwriteForeignAuthor` by ADR 0053.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
+
+.PARAMETER OverwriteForeignAuthor
+    Apply parameter set only. Permit `Update` writes against tenant
+    classification types and rules whose authorship (`updatedBy` /
+    `modifiedBy` / `createdBy`) differs from the current deploy principal.
+    Without it, such an object is reported as a `Conflict` row and left
+    untouched.
+    The `Conflict` row is emitted either way -- this switch authorizes the
+    overwrite, it does not hide the finding. A write over a foreign-authored
+    object is ALWAYS reported as a `Conflict` row, never laundered into a
+    plain `Update`.
+    Requires `-DirectionPolicy repo-wins` to have any effect: the direction
+    policy and the authorship override are independent axes and both must
+    permit the write. Under the default `portal-wins` a drifted object is
+    skipped whatever its authorship. Default `$false`.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
 
 .PARAMETER ExportCurrentState
     Export live tenant classification typedefs and rules to YAML and
@@ -141,6 +164,12 @@ param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
     [switch]$Force,
+
+    # ADR 0053: the foreign-author overwrite override is its own switch and
+    # lives in the Apply parameter set only. The Export path has no tenant
+    # object to be authored by anyone, so there is nothing for it to mean there.
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$OverwriteForeignAuthor,
 
     [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
     [switch]$ExportCurrentState,
@@ -251,16 +280,70 @@ function Get-LastModifiedByIdentity {
 }
 
 function Test-ConflictRow {
+    # ADR 0053: a PURE authorship predicate. It knows nothing about any override
+    # switch, by design.
+    #
+    # Before ADR 0053 this function opened with `if ($ForceEnabled) { return
+    # $false }`, bound to $Force.IsPresent -- so -Force suppressed the Conflict
+    # classification AT SOURCE: the row was never emitted, the type/rule fell
+    # through to a plain Update, and the portal-authored object was silently
+    # overwritten with no record anywhere in the drift report.
+    #
+    # Merely renaming that parameter to -OverwriteForeignAuthor would have kept
+    # the defect and relabelled it -- the alternative ADR 0053 section Alternatives-5
+    # rejects by name ("the switch grants permission, not silence"). The override
+    # decision therefore lives in Resolve-ConflictPlanAction, NOT here.
     param(
         [Parameter(Mandatory = $true)]$TenantRaw,
-        [Parameter(Mandatory = $true)][string]$DeployIdentity,
-        [Parameter(Mandatory = $true)][bool]$ForceEnabled
+        [Parameter(Mandatory = $true)][string]$DeployIdentity
     )
-    if ($ForceEnabled) { return $false }
     if ([string]::IsNullOrWhiteSpace($DeployIdentity)) { return $false }
     $last = Get-LastModifiedByIdentity -Raw $TenantRaw
     if ([string]::IsNullOrWhiteSpace($last)) { return $false }
     return ($last -notlike "*$DeployIdentity*")
+}
+
+function Resolve-ConflictPlanAction {
+    # ADR 0053: the authorship-override decision, isolated and pure.
+    #
+    # The Conflict row is emitted whenever authorship differs -- with OR without
+    # -OverwriteForeignAuthor. The switch decides only whether the WRITE
+    # proceeds; it never buys silence. A write over a foreign-authored object is
+    # therefore never laundered into a plain `Update` row.
+    #
+    # Mirrors Deploy-UnifiedCatalog.ps1's Get-ReconciliationPlan (Mechanism B),
+    # which had this shape right from the start.
+    param(
+        [Parameter(Mandatory = $true)][bool]$IsConflict,
+        [Parameter(Mandatory = $true)][bool]$OverwriteForeignAuthor,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$DriftText,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Who
+    )
+
+    if (-not $IsConflict) {
+        return [pscustomobject]@{
+            Action   = 'Update'
+            Category = 'Update'
+            Conflict = $false
+            Reason   = ('Drift in: {0}' -f $DriftText)
+        }
+    }
+
+    if ($OverwriteForeignAuthor) {
+        return [pscustomobject]@{
+            Action   = 'Update'
+            Category = 'Conflict'
+            Conflict = $true
+            Reason   = ("Drift in: {0}; updatedBy '{1}' differs from deploy principal. Conflict will be overwritten because -OverwriteForeignAuthor was supplied." -f $DriftText, $Who)
+        }
+    }
+
+    return [pscustomobject]@{
+        Action   = 'Conflict'
+        Category = 'Conflict'
+        Conflict = $true
+        Reason   = ("Drift in: {0}; updatedBy '{1}' differs from deploy principal. Re-run with -OverwriteForeignAuthor to overwrite." -f $DriftText, $Who)
+    }
 }
 
 function Test-IsSystemType {
@@ -275,7 +358,7 @@ function Test-IsSystemType {
 
 #region Helpers — regex safety
 # Reference: .github/instructions/sample-data.instructions.md
-#   §"Regex rules for classification patterns"
+#   section "Regex rules for classification patterns"
 # Reference: https://learn.microsoft.com/en-us/purview/create-a-custom-classification-and-classification-rule
 
 function Test-RegexSafetyViolation {
@@ -793,7 +876,7 @@ foreach ($r in $desiredRules) {
 }
 if ($regexViolations.Count -gt 0) {
     foreach ($v in $regexViolations) { Write-Error $v -ErrorAction Continue }
-    Write-Error ("Regex-safety validation failed ({0} violation(s)). Plan aborted before any write. See `.github/instructions/sample-data.instructions.md` §`Regex rules for classification patterns`." -f $regexViolations.Count)
+    Write-Error ("Regex-safety validation failed ({0} violation(s)). Plan aborted before any write. See `.github/instructions/sample-data.instructions.md` section `Regex rules for classification patterns`." -f $regexViolations.Count)
     return
 }
 
@@ -870,13 +953,17 @@ foreach ($d in ($desiredTypes | Sort-Object -Property { $_.name.ToLowerInvariant
         if ($diffs.Count -eq 0) {
             $plan.Add([pscustomobject]@{ Kind = 'Type'; Action = 'NoChange'; Name = $d.name; Desired = $d; Reason = 'In sync with tenant.' }) | Out-Null
         } else {
-            $isConflict = Test-ConflictRow -TenantRaw $tenantTypeRawByName[$key] -DeployIdentity $deployIdentity -ForceEnabled $Force.IsPresent
-            if ($isConflict) {
-                $who = Get-LastModifiedByIdentity -Raw $tenantTypeRawByName[$key]
-                $plan.Add([pscustomobject]@{ Kind = 'Type'; Action = 'Conflict'; Name = $d.name; Desired = $d; Reason = ("Drift in: {0}; updatedBy '{1}' differs from deploy principal." -f ($diffs -join ', '), $who) }) | Out-Null
-            } else {
-                $plan.Add([pscustomobject]@{ Kind = 'Type'; Action = 'Update'; Name = $d.name; Desired = $d; Reason = ('Drift in: {0}' -f ($diffs -join ', ')) }) | Out-Null
-            }
+            # ADR 0053: classify authorship first (pure), then let
+            # Resolve-ConflictPlanAction decide whether the override authorises
+            # the write. The Conflict row is emitted either way.
+            $isConflict = Test-ConflictRow -TenantRaw $tenantTypeRawByName[$key] -DeployIdentity $deployIdentity
+            $who = if ($isConflict) { [string](Get-LastModifiedByIdentity -Raw $tenantTypeRawByName[$key]) } else { '' }
+            $decision = Resolve-ConflictPlanAction `
+                -IsConflict $isConflict `
+                -OverwriteForeignAuthor $OverwriteForeignAuthor.IsPresent `
+                -DriftText ($diffs -join ', ') `
+                -Who $who
+            $plan.Add([pscustomobject]@{ Kind = 'Type'; Action = $decision.Action; Name = $d.name; Desired = $d; Reason = $decision.Reason; Conflict = $decision.Conflict }) | Out-Null
         }
     } else {
         $plan.Add([pscustomobject]@{ Kind = 'Type'; Action = 'Create'; Name = $d.name; Desired = $d; Reason = 'Declared in YAML; absent from tenant.' }) | Out-Null
@@ -896,13 +983,17 @@ foreach ($d in ($desiredRules | Sort-Object -Property { $_.name.ToLowerInvariant
         if ($diffs.Count -eq 0) {
             $plan.Add([pscustomobject]@{ Kind = 'Rule'; Action = 'NoChange'; Name = $d.name; Desired = $d; Reason = 'In sync with tenant.' }) | Out-Null
         } else {
-            $isConflict = Test-ConflictRow -TenantRaw $tenantRuleRawByName[$key] -DeployIdentity $deployIdentity -ForceEnabled $Force.IsPresent
-            if ($isConflict) {
-                $who = Get-LastModifiedByIdentity -Raw $tenantRuleRawByName[$key]
-                $plan.Add([pscustomobject]@{ Kind = 'Rule'; Action = 'Conflict'; Name = $d.name; Desired = $d; Reason = ("Drift in: {0}; updatedBy '{1}' differs from deploy principal." -f ($diffs -join ', '), $who) }) | Out-Null
-            } else {
-                $plan.Add([pscustomobject]@{ Kind = 'Rule'; Action = 'Update'; Name = $d.name; Desired = $d; Reason = ('Drift in: {0}' -f ($diffs -join ', ')) }) | Out-Null
-            }
+            # ADR 0053: classify authorship first (pure), then let
+            # Resolve-ConflictPlanAction decide whether the override authorises
+            # the write. The Conflict row is emitted either way.
+            $isConflict = Test-ConflictRow -TenantRaw $tenantRuleRawByName[$key] -DeployIdentity $deployIdentity
+            $who = if ($isConflict) { [string](Get-LastModifiedByIdentity -Raw $tenantRuleRawByName[$key]) } else { '' }
+            $decision = Resolve-ConflictPlanAction `
+                -IsConflict $isConflict `
+                -OverwriteForeignAuthor $OverwriteForeignAuthor.IsPresent `
+                -DriftText ($diffs -join ', ') `
+                -Who $who
+            $plan.Add([pscustomobject]@{ Kind = 'Rule'; Action = $decision.Action; Name = $d.name; Desired = $d; Reason = $decision.Reason; Conflict = $decision.Conflict }) | Out-Null
         }
     } else {
         $plan.Add([pscustomobject]@{ Kind = 'Rule'; Action = 'Create'; Name = $d.name; Desired = $d; Reason = 'Declared in YAML; absent from tenant.' }) | Out-Null
@@ -1017,15 +1108,19 @@ foreach ($row in ($plan | Where-Object { $_.Kind -eq 'Type' -and $_.Action -ne '
             continue
         }
         'Update' {
+            # ADR 0053: an Update that overwrites a foreign-authored type is
+            # reported as a Conflict row, never laundered into a plain Update.
+            # The switch grants permission, not silence.
+            $updateCategory = if ($row.PSObject.Properties['Conflict'] -and $row.Conflict) { 'Conflict' } else { 'Update' }
             if ($PSCmdlet.ShouldProcess($target, 'PUT classification typedef (Update)')) {
                 try {
                     Invoke-TypeUpsert -Desired $row.Desired -Method 'PUT'
-                    Add-Report -Category 'Update' -Kind 'Type' -Name $row.Name -Reason $row.Reason
+                    Add-Report -Category $updateCategory -Kind 'Type' -Name $row.Name -Reason $row.Reason
                 } catch {
                     Add-Report -Category 'Failed' -Kind 'Type' -Name $row.Name -Reason ("Update failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_))
                 }
             } else {
-                Add-Report -Category 'Update' -Kind 'Type' -Name $row.Name -Reason $row.Reason
+                Add-Report -Category $updateCategory -Kind 'Type' -Name $row.Name -Reason $row.Reason
             }
             continue
         }
@@ -1052,15 +1147,19 @@ foreach ($row in ($plan | Where-Object { $_.Kind -eq 'Rule' -and $_.Action -ne '
             continue
         }
         'Update' {
+            # ADR 0053: an Update that overwrites a foreign-authored rule is
+            # reported as a Conflict row, never laundered into a plain Update.
+            # The switch grants permission, not silence.
+            $updateCategory = if ($row.PSObject.Properties['Conflict'] -and $row.Conflict) { 'Conflict' } else { 'Update' }
             if ($PSCmdlet.ShouldProcess($target, 'PUT classification rule (Update)')) {
                 try {
                     Invoke-RuleUpsert -Desired $row.Desired
-                    Add-Report -Category 'Update' -Kind 'Rule' -Name $row.Name -Reason $row.Reason
+                    Add-Report -Category $updateCategory -Kind 'Rule' -Name $row.Name -Reason $row.Reason
                 } catch {
                     Add-Report -Category 'Failed' -Kind 'Rule' -Name $row.Name -Reason ("Update failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_))
                 }
             } else {
-                Add-Report -Category 'Update' -Kind 'Rule' -Name $row.Name -Reason $row.Reason
+                Add-Report -Category $updateCategory -Kind 'Rule' -Name $row.Name -Reason $row.Reason
             }
             continue
         }

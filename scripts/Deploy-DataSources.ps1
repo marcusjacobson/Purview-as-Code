@@ -77,8 +77,31 @@
     `-DirectionPolicy audit` mode. Default `@()`.
 
 .PARAMETER Force
-    Allow overwriting conflict rows (`lastModifiedBy` differs from deploy
-    principal) and allow overwriting a non-empty YAML on export.
+    Suppress the safety guard on the operation you asked for. In the
+    Export parameter set that guard is `-ExportCurrentState`'s refusal
+    to clobber a non-empty managed block in the target YAML. In the
+    Apply parameter set it is the ADR 0052 destructive-operation
+    confirmation prompt.
+    `-Force` does NOT authorize overwriting a foreign-authored tenant
+    object, and it does NOT suppress `Conflict` rows -- that meaning was
+    split out to `-OverwriteForeignAuthor` by ADR 0053.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
+
+.PARAMETER OverwriteForeignAuthor
+    Apply parameter set only. Permit `Update` writes against tenant data
+    sources whose authorship (`lastModifiedBy` / `updatedBy` /
+    `properties.lastModifiedBy` / `systemData.lastModifiedBy`) differs from
+    the current deploy principal. Without it, such a data source is reported
+    as a `Conflict` row and left untouched.
+    The `Conflict` row is emitted either way -- this switch authorizes the
+    overwrite, it does not hide the finding. A write over a foreign-authored
+    object is ALWAYS reported as a `Conflict` row, never laundered into a
+    plain `Update`.
+    Requires `-DirectionPolicy repo-wins` to have any effect: the direction
+    policy and the authorship override are independent axes and both must
+    permit the write. Under the default `portal-wins` a drifted object is
+    skipped whatever its authorship. Default `$false`.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
 
 .PARAMETER ExportCurrentState
     Export live tenant data sources to YAML and exit. Makes no writes
@@ -118,6 +141,12 @@ param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
     [switch]$Force,
+
+    # ADR 0053: the foreign-author overwrite override is its own switch and
+    # lives in the Apply parameter set only. The Export path has no tenant
+    # object to be authored by anyone, so there is nothing for it to mean there.
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$OverwriteForeignAuthor,
 
     [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
     [switch]$ExportCurrentState,
@@ -353,19 +382,73 @@ function Get-LastModifiedByIdentity {
 }
 
 function Test-ConflictRow {
+    # ADR 0053: a PURE authorship predicate. It knows nothing about any override
+    # switch, by design.
+    #
+    # Before ADR 0053 this function opened with `if ($ForceEnabled) { return
+    # $false }`, bound to $Force.IsPresent -- so -Force suppressed the Conflict
+    # classification AT SOURCE: the row was never emitted, the data source fell
+    # through to a plain Update, and the portal-authored object was silently
+    # overwritten with no record anywhere in the drift report.
+    #
+    # Merely renaming that parameter to -OverwriteForeignAuthor would have kept
+    # the defect and relabelled it -- the alternative ADR 0053 section Alternatives-5
+    # rejects by name ("the switch grants permission, not silence"). The override
+    # decision therefore lives in Resolve-ConflictPlanAction, NOT here.
     param(
         [Parameter(Mandatory = $true)]$TenantRaw,
-        [Parameter(Mandatory = $true)][string]$DeployIdentity,
-        [Parameter(Mandatory = $true)][bool]$ForceEnabled
+        [Parameter(Mandatory = $true)][string]$DeployIdentity
     )
 
-    if ($ForceEnabled) { return $false }
     if ([string]::IsNullOrWhiteSpace($DeployIdentity)) { return $false }
 
     $last = Get-LastModifiedByIdentity -Source $TenantRaw
     if ([string]::IsNullOrWhiteSpace($last)) { return $false }
 
     return ($last -notlike "*$DeployIdentity*")
+}
+
+function Resolve-ConflictPlanAction {
+    # ADR 0053: the authorship-override decision, isolated and pure.
+    #
+    # The Conflict row is emitted whenever authorship differs -- with OR without
+    # -OverwriteForeignAuthor. The switch decides only whether the WRITE
+    # proceeds; it never buys silence. A write over a foreign-authored object is
+    # therefore never laundered into a plain `Update` row.
+    #
+    # Mirrors Deploy-UnifiedCatalog.ps1's Get-ReconciliationPlan (Mechanism B),
+    # which had this shape right from the start.
+    param(
+        [Parameter(Mandatory = $true)][bool]$IsConflict,
+        [Parameter(Mandatory = $true)][bool]$OverwriteForeignAuthor,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$DriftText,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Who
+    )
+
+    if (-not $IsConflict) {
+        return [pscustomobject]@{
+            Action   = 'Update'
+            Category = 'Update'
+            Conflict = $false
+            Reason   = ('Drift in: {0}' -f $DriftText)
+        }
+    }
+
+    if ($OverwriteForeignAuthor) {
+        return [pscustomobject]@{
+            Action   = 'Update'
+            Category = 'Conflict'
+            Conflict = $true
+            Reason   = ("Drift in: {0}; lastModifiedBy '{1}' differs from deploy principal. Conflict will be overwritten because -OverwriteForeignAuthor was supplied." -f $DriftText, $Who)
+        }
+    }
+
+    return [pscustomobject]@{
+        Action   = 'Conflict'
+        Category = 'Conflict'
+        Conflict = $true
+        Reason   = ("Drift in: {0}; lastModifiedBy '{1}' differs from deploy principal. Re-run with -OverwriteForeignAuthor to overwrite." -f $DriftText, $Who)
+    }
 }
 
 function Get-KeyVaultRef {
@@ -641,13 +724,17 @@ foreach ($d in ($desiredEntries | Sort-Object -Property { $_.name.ToLowerInvaria
         if ($diffs.Count -eq 0) {
             $plan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $d.name; Desired = $d; Reason = 'In sync with tenant.' }) | Out-Null
         } else {
-            $isConflict = Test-ConflictRow -TenantRaw $tenantRawByName[$key] -DeployIdentity $deployIdentity -ForceEnabled $Force.IsPresent
-            if ($isConflict) {
-                $who = Get-LastModifiedByIdentity -Source $tenantRawByName[$key]
-                $plan.Add([pscustomobject]@{ Action = 'Conflict'; Name = $d.name; Desired = $d; Reason = ("Drift in: {0}; lastModifiedBy '{1}' differs from deploy principal." -f ($diffs -join ', '), $who) }) | Out-Null
-            } else {
-                $plan.Add([pscustomobject]@{ Action = 'Update'; Name = $d.name; Desired = $d; Reason = ('Drift in: {0}' -f ($diffs -join ', ')) }) | Out-Null
-            }
+            # ADR 0053: classify authorship first (pure), then let
+            # Resolve-ConflictPlanAction decide whether the override authorises
+            # the write. The Conflict row is emitted either way.
+            $isConflict = Test-ConflictRow -TenantRaw $tenantRawByName[$key] -DeployIdentity $deployIdentity
+            $who = if ($isConflict) { [string](Get-LastModifiedByIdentity -Source $tenantRawByName[$key]) } else { '' }
+            $decision = Resolve-ConflictPlanAction `
+                -IsConflict $isConflict `
+                -OverwriteForeignAuthor $OverwriteForeignAuthor.IsPresent `
+                -DriftText ($diffs -join ', ') `
+                -Who $who
+            $plan.Add([pscustomobject]@{ Action = $decision.Action; Name = $d.name; Desired = $d; Reason = $decision.Reason; Conflict = $decision.Conflict }) | Out-Null
         }
     } else {
         $plan.Add([pscustomobject]@{ Action = 'Create'; Name = $d.name; Desired = $d; Reason = 'Declared in YAML; absent from tenant.' }) | Out-Null
@@ -752,6 +839,10 @@ foreach ($row in $plan) {
         }
         'Update' {
             $opDesc = 'PUT data source (Update)'
+            # ADR 0053: an Update that overwrites a foreign-authored data source
+            # is reported as a Conflict row, never laundered into a plain Update.
+            # The switch grants permission, not silence.
+            $updateCategory = if ($row.PSObject.Properties['Conflict'] -and $row.Conflict) { 'Conflict' } else { 'Update' }
             if ($PSCmdlet.ShouldProcess($target, $opDesc)) {
                 try {
                     $kvRefs = @(Get-KeyVaultRef -Desired $row.Desired)
@@ -764,12 +855,12 @@ foreach ($row in $plan) {
                     $payload = @{ kind = $row.Desired.kind; properties = $row.Desired.properties } | ConvertTo-Json -Depth 25 -Compress
                     $uri = "$baseUri/datasources/$([uri]::EscapeDataString($row.Desired.name))?api-version=$script:DataSourcesApiVersion"
                     $null = Invoke-RestMethod -Method PUT -Uri $uri -Headers $ctx.DataHeaders -Body $payload -ErrorAction Stop
-                    $report.Add([pscustomobject]@{ Category = 'Update'; Kind = 'DataSource'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+                    $report.Add([pscustomobject]@{ Category = $updateCategory; Kind = 'DataSource'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
                 } catch {
                     $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'DataSource'; Name = $row.Name; Reason = ("Update failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_)) }) | Out-Null
                 }
             } else {
-                $report.Add([pscustomobject]@{ Category = 'Update'; Kind = 'DataSource'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
+                $report.Add([pscustomobject]@{ Category = $updateCategory; Kind = 'DataSource'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
             }
             continue
         }

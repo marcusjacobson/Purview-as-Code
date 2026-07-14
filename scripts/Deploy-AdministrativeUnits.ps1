@@ -33,8 +33,20 @@
     Default: $false. Must be explicit per the drift-report contract.
 
 .PARAMETER Force
-    Overwrite AUs whose `lastModifiedBy` is not the current principal.
+    Suppress the safety guard on the operation you asked for (ADR 0052 section 6).
     Default: $false. Must be explicit per the drift-report contract.
+
+    `-Force` does NOT mean "overwrite AUs whose `lastModifiedBy` is not the
+    current principal." That is what this help block used to promise, and it
+    was never true: Microsoft Graph exposes no per-administrative-unit
+    authorship field, nothing in this script ever emits a `Conflict` row, and
+    the `'Conflict'` apply case below is therefore unreachable. ADR 0053 gives
+    the authorship override its own switch (`-OverwriteForeignAuthor`) and
+    scopes it to the six Atlas / Data Map REST reconcilers that can actually
+    diff an authorship field. This script is not one of them and does not get
+    that switch. The dead `'Conflict'` handler is retained, unarmed, and is
+    tracked as a follow-up.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
 
 .EXAMPLE
     ./scripts/Deploy-AdministrativeUnits.ps1 -WhatIf

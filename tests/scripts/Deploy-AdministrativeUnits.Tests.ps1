@@ -181,3 +181,44 @@ Describe 'Deploy-AdministrativeUnits.ps1 — Microsoft Learn citations' {
         $script:ScriptText | Should -Match 'docs/adr/0002-administrative-units\.md'
     }
 }
+
+
+# ---------------------------------------------------------------------------
+# ADR 0053 -- Deploy-AdministrativeUnits.ps1 is the counter-example that makes
+# the rule legible.
+#
+# Its .PARAMETER Force block used to promise "Overwrite AUs whose
+# `lastModifiedBy` is not the current principal" -- a capability it does not and
+# cannot implement: Microsoft Graph exposes no per-administrative-unit
+# authorship field, nothing in the script ever emits a Conflict row, and the
+# 'Conflict' apply case is therefore unreachable.
+#
+# ADR 0053 does NOT give this script -OverwriteForeignAuthor. It only makes the
+# help honest. These tests pin both halves.
+#
+# Reference: docs/adr/0053-overwrite-foreign-author-switch.md
+# ---------------------------------------------------------------------------
+Describe 'ADR 0053 -- Deploy-AdministrativeUnits.ps1 documents no capability it lacks' {
+
+    BeforeAll {
+        $script:Adr0053AuPath = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-AdministrativeUnits.ps1'
+        $script:Adr0053AuSource = Get-Content -Path $script:Adr0053AuPath -Raw
+    }
+
+    It 'no longer promises the foreign-author overwrite in its .PARAMETER Force help' {
+        $script:Adr0053AuSource |
+            Should -Not -Match 'Overwrite AUs whose .lastModifiedBy. is not the current principal'
+    }
+
+    It 'states explicitly that -Force does NOT carry the authorship meaning' {
+        $script:Adr0053AuSource | Should -Match 'does NOT mean'
+        $script:Adr0053AuSource | Should -Match 'docs/adr/0053-overwrite-foreign-author-switch\.md'
+    }
+
+    It 'does NOT acquire -OverwriteForeignAuthor (Graph exposes no per-AU authorship to diff)' {
+        # Guards the other direction: the switch must land on exactly the six
+        # Atlas/REST reconcilers, not be sprayed across every Deploy-*.ps1.
+        $cmd = Get-Command -Name $script:Adr0053AuPath -CommandType ExternalScript
+        $cmd.Parameters.Keys | Should -Not -Contain 'OverwriteForeignAuthor'
+    }
+}

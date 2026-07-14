@@ -172,6 +172,9 @@ Describe 'Get-ReconciliationPlan' {
 
         $plan.Report[0].Category | Should -Be 'Conflict'
         $plan.Plan.Count | Should -Be 0
+        # ADR 0053: the Reason must name -OverwriteForeignAuthor, not -Force.
+        $plan.Report[0].Reason | Should -Match '-OverwriteForeignAuthor'
+        $plan.Report[0].Reason | Should -Not -Match '-Force'
     }
 
     It 'returns Remove plan entries for live-only assignments when -PruneMissing is used' {
@@ -379,5 +382,174 @@ Describe 'Source surface contract' {
         $raw | Should -Match 'Connect-Purview\.ps1'
         $raw | Should -Match 'Get-EntraPrincipalIdByDisplayName\.ps1'
         $raw | Should -Match 'Microsoft Learn does not currently document this behavior as of 2026-07-08'
+    }
+}
+
+
+# ---------------------------------------------------------------------------
+# ADR 0053 -- the foreign-author override is split out of -Force into its own
+# switch, -OverwriteForeignAuthor.
+#
+# This is a Mechanism B script. It is ALSO the one reconciler already at
+# ConfirmImpact = 'High', so its `if ($Force.IsPresent) { $ConfirmPreference =
+# 'None' }` self-disarm was precisely what had been neutering the only script
+# that looked correct. Deleting it makes its per-write ShouldProcess calls live
+# under -Force -- a real behaviour change, not a tidy-up.
+#
+# Reference: docs/adr/0053-overwrite-foreign-author-switch.md
+# ---------------------------------------------------------------------------
+Describe 'ADR 0053 -- -OverwriteForeignAuthor (Deploy-UnifiedCatalogPolicies.ps1)' {
+
+    BeforeAll {
+        $script:Adr0053Path = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-UnifiedCatalogPolicies.ps1'
+        $script:Adr0053Source = Get-Content -Path $script:Adr0053Path -Raw
+
+        $adr0053Tokens = $null
+        $adr0053Errors = $null
+        $script:Adr0053Ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:Adr0053Path, [ref]$adr0053Tokens, [ref]$adr0053Errors)
+        if ($adr0053Errors.Count -gt 0) {
+            throw ($adr0053Errors | ForEach-Object Message | Out-String)
+        }
+
+        $script:CurrentPrincipalIds = @('00000000-0000-0000-0000-000000000001')
+    }
+
+    Context 'Parameter surface -- Apply set only' {
+
+        It 'declares -OverwriteForeignAuthor in the Apply parameter set' {
+            $cmd = Get-Command -Name $script:Adr0053Path -CommandType ExternalScript
+            $apply = @($cmd.ParameterSets | Where-Object { $_.Name -eq 'Apply' })
+            $apply.Count | Should -Be 1
+            $apply[0].Parameters.Name | Should -Contain 'OverwriteForeignAuthor'
+        }
+
+        It 'does NOT declare -OverwriteForeignAuthor in the Export parameter set' {
+            $cmd = Get-Command -Name $script:Adr0053Path -CommandType ExternalScript
+            $export = @($cmd.ParameterSets | Where-Object { $_.Name -eq 'Export' })
+            $export.Count | Should -Be 1
+            $export[0].Parameters.Name | Should -Not -Contain 'OverwriteForeignAuthor'
+        }
+
+        It 'keeps -Force bindable in BOTH parameter sets (the Export-path callers do not break)' {
+            $cmd = Get-Command -Name $script:Adr0053Path -CommandType ExternalScript
+            foreach ($setName in @('Apply', 'Export')) {
+                $set = @($cmd.ParameterSets | Where-Object { $_.Name -eq $setName })
+                $set[0].Parameters.Name | Should -Contain 'Force'
+            }
+        }
+    }
+
+    Context 'Call-site binding' {
+
+        It 'binds the Get-ReconciliationPlan call from $OverwriteForeignAuthor and never from $Force' {
+            $calls = @($script:Adr0053Ast.FindAll({
+                        param($node)
+                        $node -is [System.Management.Automation.Language.CommandAst] -and
+                        $node.GetCommandName() -eq 'Get-ReconciliationPlan'
+                    }, $true))
+
+            $calls.Count | Should -Be 1
+            $calls[0].Extent.Text | Should -Match '-AllowConflictOverwrite:\$OverwriteForeignAuthor\.IsPresent'
+            $calls[0].Extent.Text | Should -Not -Match '-AllowConflictOverwrite:\$Force'
+        }
+
+        It 'has zero -AllowConflictOverwrite bindings sourced from $Force anywhere in the file' {
+            $script:Adr0053Source | Should -Not -Match '-AllowConflictOverwrite:\$Force'
+        }
+    }
+
+    Context 'Ambient self-disarm deleted (ADR 0053 section 4)' {
+
+        It 'no longer assigns $ConfirmPreference = None under -Force' {
+            # Asserted over the AST, NOT the raw source text. A raw-text regex
+            # here would match the explanatory COMMENT in the script that quotes
+            # the forbidden assignment -- which is precisely the read-a-comment-
+            # as-code error ADR 0053 records ADR 0052 making. Guard on the
+            # AssignmentStatementAst nodes, which prose cannot forge.
+            $assignments = @($script:Adr0053Ast.FindAll({
+                        param($node)
+                        $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $node.Left.VariablePath.UserPath -eq 'ConfirmPreference'
+                    }, $true))
+            $assignments.Count | Should -Be 0
+        }
+
+        It 'is still declared at ConfirmImpact = High (ADR 0053 does not lower it)' {
+            # AST, not a raw-source regex. This was the one assertion in the suite
+            # that reverted to the technique the rest of it condemns -- a comment
+            # mentioning ConfirmImpact = 'High' would have satisfied it.
+            $attr = $script:Adr0053Ast.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.AttributeAst] -and
+                    $node.TypeName.Name -eq 'CmdletBinding'
+                }, $true)
+            $attr | Should -Not -BeNullOrEmpty
+
+            $impact = @($attr.NamedArguments | Where-Object { $_.ArgumentName -eq 'ConfirmImpact' })
+            $impact.Count | Should -Be 1
+            $impact[0].Argument.Value | Should -Be 'High'
+        }
+    }
+
+    Context 'Under -Force alone, a foreign-authored drifted policy is reported and NOT overwritten' {
+
+        It 'emits a Conflict row and produces no plan entry when -AllowConflictOverwrite is absent' {
+            $desired = @(
+                [pscustomobject]@{
+                    Key                   = 'BusinessDomain|Finance|Governance Domain Owner'
+                    Kind                  = 'UnifiedCatalogPolicy'
+                    Name                  = 'Finance / Governance Domain Owner'
+                    PrincipalIds          = @('00000000-0000-0000-0000-000000000010')
+                    PrincipalDisplayNames = @('sg-governance-finance-owners')
+                }
+            )
+            $tenant = @(
+                [pscustomobject]@{
+                    Key                   = 'BusinessDomain|Finance|Governance Domain Owner'
+                    Kind                  = 'UnifiedCatalogPolicy'
+                    Name                  = 'Finance / Governance Domain Owner'
+                    PrincipalIds          = @('00000000-0000-0000-0000-000000000011')
+                    PrincipalDisplayNames = @('sg-legacy-finance-owners')
+                    LastModifiedBy        = '00000000-0000-0000-0000-000000000099'
+                }
+            )
+
+            $plan = Get-ReconciliationPlan -DesiredAssignments $desired -TenantAssignments $tenant -AllowConflictOverwrite:$false
+
+            $plan.Report[0].Category | Should -Be 'Conflict'
+            $plan.Plan.Count | Should -Be 0
+            $plan.Report[0].Reason | Should -Match '-OverwriteForeignAuthor'
+            $plan.Report[0].Reason | Should -Not -Match '-Force'
+        }
+
+        It 'still emits the Conflict row when the overwrite IS authorised -- the switch grants permission, not silence' {
+            $desired = @(
+                [pscustomobject]@{
+                    Key                   = 'BusinessDomain|Finance|Governance Domain Owner'
+                    Kind                  = 'UnifiedCatalogPolicy'
+                    Name                  = 'Finance / Governance Domain Owner'
+                    PrincipalIds          = @('00000000-0000-0000-0000-000000000010')
+                    PrincipalDisplayNames = @('sg-governance-finance-owners')
+                }
+            )
+            $tenant = @(
+                [pscustomobject]@{
+                    Key                   = 'BusinessDomain|Finance|Governance Domain Owner'
+                    Kind                  = 'UnifiedCatalogPolicy'
+                    Name                  = 'Finance / Governance Domain Owner'
+                    PrincipalIds          = @('00000000-0000-0000-0000-000000000011')
+                    PrincipalDisplayNames = @('sg-legacy-finance-owners')
+                    LastModifiedBy        = '00000000-0000-0000-0000-000000000099'
+                }
+            )
+
+            $plan = Get-ReconciliationPlan -DesiredAssignments $desired -TenantAssignments $tenant -AllowConflictOverwrite:$true
+
+            $plan.Report[0].Category | Should -Be 'Conflict'
+            $plan.Report[0].Reason | Should -Match 'overwritten because -OverwriteForeignAuthor was supplied'
+            $plan.Plan[0].Action | Should -Be 'Update'
+        }
     }
 }

@@ -17,6 +17,8 @@
       * Every grant/revoke change is treated as destructive-equivalent.
       * The per-row diff is always printed before any write.
       * -Force suppresses interactive confirmation, never diff visibility.
+      * -Force does NOT authorize overwriting a foreign-authored policy
+        assignment. That is -OverwriteForeignAuthor (ADR 0053).
       * -PruneMissing is off by default and only enables explicit revokes.
 
     References:
@@ -38,6 +40,27 @@
         docs/adr/0023-identifier-resolution.md
       ADR 0047:
         docs/adr/0047-unified-catalog-preview-api-coexistence.md
+      ADR 0053:
+        docs/adr/0053-overwrite-foreign-author-switch.md
+
+.PARAMETER Force
+    Suppress the safety guard on the operation you asked for. In the
+    Export parameter set that guard is `-ExportCurrentState`'s refusal to
+    clobber a non-empty managed block in the target YAML. In the Apply
+    parameter set it is the ADR 0052 destructive-operation confirmation
+    prompt.
+    `-Force` does NOT authorize overwriting a foreign-authored tenant
+    object -- that meaning was split out to `-OverwriteForeignAuthor` by
+    ADR 0053. Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
+
+.PARAMETER OverwriteForeignAuthor
+    Apply parameter set only. Permit `Update` writes against tenant policy
+    assignments whose `LastModifiedBy` differs from the current deploy
+    principal. Without it, such an assignment is reported as a `Conflict`
+    row and left untouched.
+    The `Conflict` row is emitted either way -- this switch authorizes the
+    overwrite, it does not hide the finding. Default `$false`.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param(
@@ -52,6 +75,12 @@ param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
     [switch]$Force,
+
+    # ADR 0053: the foreign-author overwrite override is its own switch and
+    # lives in the Apply parameter set only. The Export path has no tenant
+    # object to be authored by anyone, so there is nothing for it to mean there.
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$OverwriteForeignAuthor,
 
     [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
     [switch]$ExportCurrentState,
@@ -80,9 +109,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:SkipNameList = @($SkipNames)
-if ($Force.IsPresent) {
-    $ConfirmPreference = 'None'
-}
+
+# ADR 0053: the `if ($Force.IsPresent) { $ConfirmPreference = 'None' }` ambient
+# self-disarm that used to sit here is DELETED. ADR 0052 line 89 requires that
+# the destructive-operation gate "cannot be defeated by a caller who sets
+# $ConfirmPreference = 'None'" -- a script that does it to itself is the same
+# defeat, self-inflicted. This script is the ONE reconciler already at
+# ConfirmImpact = 'High', so this line was precisely what had been neutering
+# the only script that looked correct: its per-write ShouldProcess calls are
+# now live under -Force. CI callers bind -Confirm:$false, which is the
+# explicit, greppable consent signal ADR 0052 section 7 mandates.
 
 #region Module dependencies
 if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
@@ -805,13 +841,16 @@ function Get-ReconciliationPlan {
         }
 
         $reason = Get-PrincipalDiffText -DesiredDisplayNames @($desired.PrincipalDisplayNames) -TenantDisplayNames @($tenant.PrincipalDisplayNames)
+        # ADR 0053: -AllowConflictOverwrite is bound from -OverwriteForeignAuthor
+        # at the call site, NOT from -Force. -Force no longer authorizes an
+        # authorship overwrite.
         $isConflict = Test-IsConflict -TenantAssignment $tenant
         if ($isConflict -and -not $AllowConflictOverwrite.IsPresent) {
-            $report.Add((ConvertTo-ReportRow -Category 'Conflict' -Kind $desired.Kind -Name $desired.Name -Reason 'Tenant policy was last modified by a different principal. Re-run with -Force to overwrite.' -Fields @('principals'))) | Out-Null
+            $report.Add((ConvertTo-ReportRow -Category 'Conflict' -Kind $desired.Kind -Name $desired.Name -Reason 'Tenant policy was last modified by a different principal. Re-run with -OverwriteForeignAuthor to overwrite.' -Fields @('principals'))) | Out-Null
             continue
         }
         if ($isConflict) {
-            $report.Add((ConvertTo-ReportRow -Category 'Conflict' -Kind $desired.Kind -Name $desired.Name -Reason 'Conflict will be overwritten because -Force was supplied.' -Fields @('principals'))) | Out-Null
+            $report.Add((ConvertTo-ReportRow -Category 'Conflict' -Kind $desired.Kind -Name $desired.Name -Reason 'Conflict will be overwritten because -OverwriteForeignAuthor was supplied.' -Fields @('principals'))) | Out-Null
         }
         else {
             $report.Add((ConvertTo-ReportRow -Category 'Update' -Kind $desired.Kind -Name $desired.Name -Reason $reason -Fields @('principals'))) | Out-Null
@@ -1087,6 +1126,9 @@ Write-Information ("Mode            : {0}" -f $mode) -InformationAction Continue
 Write-Information ("DirectionPolicy : {0}" -f $DirectionPolicy) -InformationAction Continue
 Write-Information ("PruneMissing    : {0}" -f $PruneMissing.IsPresent) -InformationAction Continue
 Write-Information ("Force           : {0}" -f $Force.IsPresent) -InformationAction Continue
+# ADR 0053: -Force and -OverwriteForeignAuthor are independent. Print both so
+# the run log shows exactly which guard the operator suppressed.
+Write-Information ("OverwriteForeignAuthor : {0}" -f $OverwriteForeignAuthor.IsPresent) -InformationAction Continue
 
 if ($WhatIfPreference -and $mode -eq 'Export') {
     Write-Information '-WhatIf specified with -ExportCurrentState. Planned behaviour (no remote calls made):' -InformationAction Continue
@@ -1154,7 +1196,7 @@ catch {
     $desiredAssignments = @()
 }
 
-$planResult = Get-ReconciliationPlan -DesiredAssignments $desiredAssignments -TenantAssignments $tenantAssignments -AllowConflictOverwrite:$Force.IsPresent -PruneMissing:$PruneMissing.IsPresent
+$planResult = Get-ReconciliationPlan -DesiredAssignments $desiredAssignments -TenantAssignments $tenantAssignments -AllowConflictOverwrite:$OverwriteForeignAuthor.IsPresent -PruneMissing:$PruneMissing.IsPresent
 $report = New-Object 'System.Collections.Generic.List[object]'
 $plan = New-Object 'System.Collections.Generic.List[object]'
 foreach ($row in $planResult.Report) { $report.Add($row) | Out-Null }

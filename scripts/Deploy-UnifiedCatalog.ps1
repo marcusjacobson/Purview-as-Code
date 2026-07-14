@@ -50,6 +50,27 @@
         docs/adr/0047-unified-catalog-preview-api-coexistence.md
       ADR 0048:
         docs/adr/0048-purview-account-discovery-gate.md
+      ADR 0053:
+        docs/adr/0053-overwrite-foreign-author-switch.md
+
+.PARAMETER Force
+    Suppress the safety guard on the operation you asked for. In the
+    Export parameter set that guard is `-ExportCurrentState`'s refusal to
+    clobber a non-empty managed block in the target YAML. In the Apply
+    parameter set it is the ADR 0052 destructive-operation confirmation
+    prompt.
+    `-Force` does NOT authorize overwriting a foreign-authored tenant
+    object -- that meaning was split out to `-OverwriteForeignAuthor` by
+    ADR 0053. Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
+
+.PARAMETER OverwriteForeignAuthor
+    Apply parameter set only. Permit `Update` writes against tenant objects
+    whose `systemData.lastModifiedBy` differs from the current deploy
+    principal. Without it, such an object is reported as a `Conflict` row
+    and left untouched.
+    The `Conflict` row is emitted either way -- this switch authorizes the
+    overwrite, it does not hide the finding. Default `$false`.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Apply')]
 param(
@@ -64,6 +85,12 @@ param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
     [switch]$Force,
+
+    # ADR 0053: the foreign-author overwrite override is its own switch and
+    # lives in the Apply parameter set only. The Export path has no tenant
+    # object to be authored by anyone, so there is nothing for it to mean there.
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$OverwriteForeignAuthor,
 
     [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
     [switch]$ExportCurrentState,
@@ -92,9 +119,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:SkipNameList = @($SkipNames)
-if ($Force.IsPresent) {
-    $ConfirmPreference = 'None'
-}
+
+# ADR 0053: the `if ($Force.IsPresent) { $ConfirmPreference = 'None' }` ambient
+# self-disarm that used to sit here is DELETED. ADR 0052 line 89 requires that
+# the destructive-operation gate "cannot be defeated by a caller who sets
+# $ConfirmPreference = 'None'" -- a script that does it to itself is the same
+# defeat, self-inflicted. Confirmation suppression is now an explicit,
+# greppable act at the call site (`-Confirm:$false`) or the ADR 0052
+# ConfirmGate's own `-Force` handling -- never an ambient preference assignment.
 
 #region Module dependencies
 if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
@@ -607,13 +639,16 @@ function Get-ReconciliationPlan {
             continue
         }
 
+        # ADR 0053: -AllowConflictOverwrite is bound from -OverwriteForeignAuthor
+        # at the call site, NOT from -Force. -Force no longer authorizes an
+        # authorship overwrite.
         if ((Test-IsConflict -Tenant $tenant) -and -not $AllowConflictOverwrite.IsPresent) {
-            $report += (ConvertTo-ReportRow -Category 'Conflict' -Kind $Kind -Name $name -Reason 'Tenant object was last modified by a different principal. Re-run with -Force to overwrite.' -Fields $fields)
+            $report += (ConvertTo-ReportRow -Category 'Conflict' -Kind $Kind -Name $name -Reason 'Tenant object was last modified by a different principal. Re-run with -OverwriteForeignAuthor to overwrite.' -Fields $fields)
             continue
         }
 
         if (Test-IsConflict -Tenant $tenant) {
-            $report += (ConvertTo-ReportRow -Category 'Conflict' -Kind $Kind -Name $name -Reason 'Conflict will be overwritten because -Force was supplied.' -Fields $fields)
+            $report += (ConvertTo-ReportRow -Category 'Conflict' -Kind $Kind -Name $name -Reason 'Conflict will be overwritten because -OverwriteForeignAuthor was supplied.' -Fields $fields)
         }
         else {
             $report += (ConvertTo-ReportRow -Category 'Update' -Kind $Kind -Name $name -Fields $fields)
@@ -1476,6 +1511,9 @@ Write-Information ("Mode            : {0}" -f $mode) -InformationAction Continue
 Write-Information ("DirectionPolicy : {0}" -f $DirectionPolicy) -InformationAction Continue
 Write-Information ("PruneMissing    : {0}" -f $PruneMissing.IsPresent) -InformationAction Continue
 Write-Information ("Force           : {0}" -f $Force.IsPresent) -InformationAction Continue
+# ADR 0053: -Force and -OverwriteForeignAuthor are independent. Print both so
+# the run log shows exactly which guard the operator suppressed.
+Write-Information ("OverwriteForeignAuthor : {0}" -f $OverwriteForeignAuthor.IsPresent) -InformationAction Continue
 
 $desiredDocs = @{}
 foreach ($concept in $script:UnifiedCatalogConcepts) {
@@ -1554,7 +1592,7 @@ $plan = New-Object 'System.Collections.Generic.List[object]'
 $orphans = New-Object 'System.Collections.Generic.List[object]'
 $blockedRows = New-Object 'System.Collections.Generic.List[object]'
 
-$domainPlan = Get-ReconciliationPlan -Kind 'BusinessDomain' -DesiredItems @($desiredDocs.BusinessDomain) -TenantItems @($tenantState.Domains) -DesiredComparable { param($item) ConvertTo-BusinessDomainComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-BusinessDomainComparableTenant -Item $item } -DesiredKeySelector { param($item) [string]$item.name } -TenantKeySelector { param($item) [string]$item.name } -AllowConflictOverwrite:$Force.IsPresent
+$domainPlan = Get-ReconciliationPlan -Kind 'BusinessDomain' -DesiredItems @($desiredDocs.BusinessDomain) -TenantItems @($tenantState.Domains) -DesiredComparable { param($item) ConvertTo-BusinessDomainComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-BusinessDomainComparableTenant -Item $item } -DesiredKeySelector { param($item) [string]$item.name } -TenantKeySelector { param($item) [string]$item.name } -AllowConflictOverwrite:$OverwriteForeignAuthor.IsPresent
 foreach ($row in $domainPlan.Report) { $report.Add($row) | Out-Null }
 foreach ($entry in $domainPlan.Plan) { $plan.Add($entry) | Out-Null }
 foreach ($orphan in $domainPlan.Orphans) { $orphans.Add([pscustomobject]@{ Kind = 'BusinessDomain'; Item = $orphan }) | Out-Null }
@@ -1584,12 +1622,12 @@ foreach ($desired in @($desiredDocs.Term)) {
     }
 }
 
-$dataProductPlan = Get-ReconciliationPlan -Kind 'DataProduct' -DesiredItems @($desiredDocs.DataProduct) -TenantItems @($tenantState.DataProducts) -DesiredComparable { param($item) ConvertTo-DataProductComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-DataProductComparableTenant -Item $item -DomainById $tenantState.DomainById } -DesiredKeySelector { param($item) [string]$item.name } -TenantKeySelector { param($item) [string]$item.name } -AllowConflictOverwrite:$Force.IsPresent
+$dataProductPlan = Get-ReconciliationPlan -Kind 'DataProduct' -DesiredItems @($desiredDocs.DataProduct) -TenantItems @($tenantState.DataProducts) -DesiredComparable { param($item) ConvertTo-DataProductComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-DataProductComparableTenant -Item $item -DomainById $tenantState.DomainById } -DesiredKeySelector { param($item) [string]$item.name } -TenantKeySelector { param($item) [string]$item.name } -AllowConflictOverwrite:$OverwriteForeignAuthor.IsPresent
 foreach ($row in $dataProductPlan.Report) { $report.Add($row) | Out-Null }
 foreach ($entry in $dataProductPlan.Plan) { $plan.Add($entry) | Out-Null }
 foreach ($orphan in $dataProductPlan.Orphans) { $orphans.Add([pscustomobject]@{ Kind = 'DataProduct'; Item = $orphan }) | Out-Null }
 
-$okrPlan = Get-ReconciliationPlan -Kind 'Okr' -DesiredItems @($desiredDocs.Okr) -TenantItems @($tenantState.Objectives) -DesiredComparable { param($item) ConvertTo-OkrComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-OkrComparableTenant -Item $item -DomainById $tenantState.DomainById } -DesiredKeySelector { param($item) [string]$item.name } -TenantKeySelector { param($item) [string]$item.definition } -AllowConflictOverwrite:$Force.IsPresent
+$okrPlan = Get-ReconciliationPlan -Kind 'Okr' -DesiredItems @($desiredDocs.Okr) -TenantItems @($tenantState.Objectives) -DesiredComparable { param($item) ConvertTo-OkrComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-OkrComparableTenant -Item $item -DomainById $tenantState.DomainById } -DesiredKeySelector { param($item) [string]$item.name } -TenantKeySelector { param($item) [string]$item.definition } -AllowConflictOverwrite:$OverwriteForeignAuthor.IsPresent
 foreach ($row in $okrPlan.Report) { $report.Add($row) | Out-Null }
 foreach ($entry in $okrPlan.Plan) { $plan.Add($entry) | Out-Null }
 foreach ($orphan in $okrPlan.Orphans) { $orphans.Add([pscustomobject]@{ Kind = 'Okr'; Item = $orphan }) | Out-Null }
@@ -1617,12 +1655,12 @@ $keyResultTenant = @()
 foreach ($objective in @($tenantState.Objectives)) {
     foreach ($keyResult in @($objective.keyResults)) { $keyResultTenant += $keyResult }
 }
-$keyResultPlan = Get-ReconciliationPlan -Kind 'OkrKeyResult' -DesiredItems $keyResultDesired -TenantItems $keyResultTenant -DesiredComparable { param($item) ConvertTo-KeyResultComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-KeyResultComparableTenant -Item $item } -DesiredKeySelector { param($item) "{0}|{1}" -f $item.__objectiveName, $item.name } -TenantKeySelector { param($item) "{0}|{1}" -f $item.__objectiveName, $item.definition } -AllowConflictOverwrite:$Force.IsPresent
+$keyResultPlan = Get-ReconciliationPlan -Kind 'OkrKeyResult' -DesiredItems $keyResultDesired -TenantItems $keyResultTenant -DesiredComparable { param($item) ConvertTo-KeyResultComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-KeyResultComparableTenant -Item $item } -DesiredKeySelector { param($item) "{0}|{1}" -f $item.__objectiveName, $item.name } -TenantKeySelector { param($item) "{0}|{1}" -f $item.__objectiveName, $item.definition } -AllowConflictOverwrite:$OverwriteForeignAuthor.IsPresent
 foreach ($row in $keyResultPlan.Report) { $report.Add($row) | Out-Null }
 foreach ($entry in $keyResultPlan.Plan) { $plan.Add($entry) | Out-Null }
 foreach ($orphan in $keyResultPlan.Orphans) { $orphans.Add([pscustomobject]@{ Kind = 'OkrKeyResult'; Item = $orphan }) | Out-Null }
 
-$cdePlan = Get-ReconciliationPlan -Kind 'CriticalDataElement' -DesiredItems @($desiredDocs.CriticalDataElement) -TenantItems @($tenantState.CriticalDataElements) -DesiredComparable { param($item) ConvertTo-CriticalDataElementComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-CriticalDataElementComparableTenant -Item $item -DomainById $tenantState.DomainById } -DesiredKeySelector { param($item) [string]$item.name } -TenantKeySelector { param($item) [string]$item.name } -AllowConflictOverwrite:$Force.IsPresent
+$cdePlan = Get-ReconciliationPlan -Kind 'CriticalDataElement' -DesiredItems @($desiredDocs.CriticalDataElement) -TenantItems @($tenantState.CriticalDataElements) -DesiredComparable { param($item) ConvertTo-CriticalDataElementComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-CriticalDataElementComparableTenant -Item $item -DomainById $tenantState.DomainById } -DesiredKeySelector { param($item) [string]$item.name } -TenantKeySelector { param($item) [string]$item.name } -AllowConflictOverwrite:$OverwriteForeignAuthor.IsPresent
 foreach ($row in $cdePlan.Report) { $report.Add($row) | Out-Null }
 foreach ($entry in $cdePlan.Plan) { $plan.Add($entry) | Out-Null }
 foreach ($orphan in $cdePlan.Orphans) { $orphans.Add([pscustomobject]@{ Kind = 'CriticalDataElement'; Item = $orphan }) | Out-Null }
@@ -1637,7 +1675,7 @@ foreach ($term in @($desiredDocs.Term)) {
         }
     }
 }
-$termPlan = Get-ReconciliationPlan -Kind 'Term' -DesiredItems @($desiredDocs.Term) -TenantItems @($tenantState.Terms) -DesiredComparable { param($item) ConvertTo-TermComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-TermComparableTenant -Item $item -DomainById $tenantState.DomainById -TermById $tenantState.TermById } -DesiredKeySelector { param($item) "{0}|{1}" -f $item.domain, $item.name } -TenantKeySelector { param($item) if ($tenantState.DomainById.ContainsKey([string]$item.domain)) { "{0}|{1}" -f $tenantState.DomainById[[string]$item.domain].name, $item.name } else { $item.name } } -AllowConflictOverwrite:$Force.IsPresent
+$termPlan = Get-ReconciliationPlan -Kind 'Term' -DesiredItems @($desiredDocs.Term) -TenantItems @($tenantState.Terms) -DesiredComparable { param($item) ConvertTo-TermComparableDesired -Item $item } -TenantComparable { param($item) ConvertTo-TermComparableTenant -Item $item -DomainById $tenantState.DomainById -TermById $tenantState.TermById } -DesiredKeySelector { param($item) "{0}|{1}" -f $item.domain, $item.name } -TenantKeySelector { param($item) if ($tenantState.DomainById.ContainsKey([string]$item.domain)) { "{0}|{1}" -f $tenantState.DomainById[[string]$item.domain].name, $item.name } else { $item.name } } -AllowConflictOverwrite:$OverwriteForeignAuthor.IsPresent
 foreach ($row in $termPlan.Report) { $report.Add($row) | Out-Null }
 foreach ($entry in $termPlan.Plan) { $plan.Add($entry) | Out-Null }
 foreach ($orphan in $termPlan.Orphans) { $orphans.Add([pscustomobject]@{ Kind = 'Term'; Item = $orphan }) | Out-Null }
