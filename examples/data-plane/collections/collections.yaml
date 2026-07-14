@@ -1,0 +1,80 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked collection hierarchy for data-plane/collections/collections.yaml, which ships
+# `collections: []` in the template. Copy from here deliberately; prefer running
+# `./scripts/Deploy-Collections.ps1 -ExportCurrentState` against your own tenant first.
+#
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/accountdataplane/collections
+#
+# SCRUBBED. The lab export this is derived from used Purview's AUTO-GENERATED 6-character
+# collection IDs as the `name` (URL segment) — `c8iacz`, `chfb1r`, `cqyzoe`, … Those are
+# what the service mints when a collection is created in the portal. They are unreadable,
+# they are specific to one account, and nobody hand-authors them. As-code, author the
+# `name` yourself: a stable kebab-case slug you control, with `friendlyName` carrying the
+# display text. That is the actual lesson of this example.
+
+rootCollection: purview-contoso-lab
+
+# Collections that -PruneMissing must NEVER delete (system-managed / service-created).
+protected: []
+
+collections:
+  - name: non-prod
+    friendlyName: Non-Prod
+    description: Sample and testing data.
+    parent: purview-contoso-lab
+    children:
+      - name: platform-data
+        friendlyName: Platform Data
+        children:
+          - name: dataverse
+            friendlyName: Dataverse
+      - name: relational
+        friendlyName: Relational
+        description: Relational databases.
+        children:
+          - name: mysql
+            friendlyName: MySQL
+          - name: postgresql
+            friendlyName: PostgreSQL
+          - name: azure-sql
+            friendlyName: Azure SQL
+      - name: storage
+        friendlyName: Storage
+        children:
+          - name: blob-storage
+            friendlyName: Blob Storage
+          - name: adls-gen2
+            friendlyName: ADLS Gen2
+      - name: analytics-platform
+        friendlyName: Analytics Platform
+        children:
+          - name: synapse
+            friendlyName: Synapse
+          - name: fabric
+            friendlyName: Fabric
+      - name: integration
+        friendlyName: Integration
+        children:
+          - name: databricks
+            friendlyName: Databricks
+
+  - name: enterprise
+    friendlyName: Enterprise Catalog
+    description: Top-level collection for enterprise data assets.
+    parent: purview-contoso-lab
+    children:
+      - name: finance
+        friendlyName: Finance
+        description: Finance domain data sources and assets.
+      - name: human-resources
+        friendlyName: Human Resources
+        description: HR domain data sources and assets.
+      - name: sales
+        friendlyName: Sales
+        description: Sales and CRM domain assets.
+
+  - name: sandbox
+    friendlyName: Sandbox
+    description: Experimental / non-production assets.
+    parent: purview-contoso-lab

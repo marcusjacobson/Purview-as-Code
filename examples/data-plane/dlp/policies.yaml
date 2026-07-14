@@ -1,0 +1,258 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked DLP policy set for data-plane/dlp/policies.yaml, which ships `policies: []` in
+# the template. Copy from here deliberately; prefer running
+# `./scripts/Deploy-DLPPolicies.ps1 -ExportCurrentState` against your own tenant first —
+# a DLP policy at `mode: Enable` acts on real user content in real time.
+#
+# Schema: data-plane/dlp/policies.schema.json (Draft-07).
+#
+# SCRUBBED and TRIMMED. The lab export carried five policies and ~680 lines, most of it
+# the same HIPAA / source-code / IP `advancedRule` block repeated verbatim across three
+# workloads. One policy was named after a real demo workspace
+# (`Fabric PII Detection - CoA Demo Workspace`) and ran at `mode: Enable`. What remains
+# here is one policy per DISTINCT SHAPE, which is what an example is for:
+#
+#   1. A Microsoft-provisioned default (what `-ExportCurrentState` actually returns) —
+#      `sensitiveInfoTypes` + `notifyUser` + policy-tip text.
+#   2. A custom policy over Fabric — the `advancedRule` shape with grouped SITs.
+#   3. A Copilot policy — the `genericLocations` / `enforcementPlanes` shape.
+#
+# SIT and trainable-classifier `guid` values are Microsoft BUILT-IN catalog identifiers —
+# identical in every tenant, published by Microsoft. They are not tenant identifiers,
+# which is why the ADR 0055 identifier scan acquits them under `catalogKeys` (this file,
+# key `guid`).
+#
+# `mode` is the blast radius. Simulation first (project-plan guiding principle 3):
+#   TestWithoutNotifications -> TestWithNotifications -> Enable, one PR per step.
+#
+# Learn references (Microsoft, authoritative):
+#   https://learn.microsoft.com/en-us/purview/dlp-learn-about-dlp
+#   https://learn.microsoft.com/en-us/purview/dlp-test-dlp-policies
+#   https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancepolicy
+#   https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule
+
+policies:
+  # ---------------------------------------------------------------------------------
+  # 1. A Microsoft-provisioned default policy. Every tenant has these already; this is
+  #    what a first `-ExportCurrentState` pulls back, and reproducing it faithfully is
+  #    how you get an all-NoChange first apply. `mode: Enable` here is Microsoft's, not
+  #    a choice this example is recommending you make for a NEW policy.
+  # ---------------------------------------------------------------------------------
+  - name: Default Office 365 DLP policy
+    description: Detects credit card numbers in externally shared documents and emails. Users are notified and prompted to remove the data or restrict sharing.
+    mode: Enable
+    priority: 0
+    locations:
+      exchange: All
+      sharePoint: All
+      oneDrive: All
+    rules:
+      - name: Items containing 1-9 credit card numbers shared externally
+        priority: 0
+        sensitiveInfoTypes:
+          - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+            minCount: 1
+            maxCount: 9
+            confidenceLevel: High
+        blockAccess: false
+        notifyUser:
+          - LastModifier
+          - Owner
+          - SiteAdmin
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: Detects credit card numbers in documents and emails shared externally. Notifies; does not block.
+        accessScope: NotInOrganization
+        notifyPolicyTipCustomText: This item contains 1 or more credit card numbers and is being shared with people outside your organization.
+        notifyPolicyTipDisplayOption: Tip
+        notifyUserType: NotSet
+        notifyOverrideRequirements: None
+        notifyEmailOnedriveRemediationActions: NotSet
+
+      # The `advancedRule` shape: named groups of SITs and trainable classifiers,
+      # combined by `outerOperator`. This is how a HIPAA-style composite condition is
+      # expressed — PII identifiers AND diagnosis codes AND names.
+      - name: Content matches U.S. HIPAA Enhanced Default Rule
+        priority: 1
+        blockAccess: false
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: Detects combinations of PII identifiers, ICD-9/10 code descriptions, and full person names, plus the Business-Healthcare trainable classifier.
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: PII Identifiers
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+                  name: U.S. Social Security Number (SSN)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+                - guid: 9a5445ad-406e-43eb-8bd7-cac17ab6d0e4
+                  name: Drug Enforcement Agency (DEA) Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: 44aa44f2-63d1-41df-af0d-970283ac41e2
+                  name: U.S. Physical Addresses
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+            - name: ICD-9/10 code descriptions
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: 3356946c-6bb7-449b-b253-6ffa419c0ce7
+                  name: International Classification of Diseases (ICD-10-CM)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: fa3f9c74-ee07-4c52-b5f2-085d6b2c0ec4
+                  name: International Classification of Diseases (ICD-9-CM)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+            - name: Names
+              operator: And
+              sensitiveInfoTypes:
+                - guid: 50b8b56b-4ef8-44c2-a924-03374f5831ce
+                  name: All Full Names
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+            - name: Trainable Classifiers
+              operator: Or
+              trainableClassifiers:
+                - guid: dcbada08-65bf-4561-b140-25d8fee4d143
+
+  # ---------------------------------------------------------------------------------
+  # 2. A CUSTOM policy over Microsoft Fabric.
+  #
+  #    SCRUBBED: this was `Fabric PII Detection - CoA Demo Workspace` at `mode: Enable`.
+  #    The workspace name is gone, and the mode is demoted to simulation — because a
+  #    NEW custom policy should never be authored straight to Enable. That is the whole
+  #    of guiding principle 3, and the SSN auto-label policy is what happens when it is
+  #    skipped.
+  # ---------------------------------------------------------------------------------
+  - name: Fabric PII Detection
+    description: Detects SSN, credit card, and bank account data in Fabric Lakehouse, Warehouse, and other items.
+    mode: TestWithoutNotifications
+    priority: 1
+    locations:
+      powerBI: All
+    rules:
+      - name: Detect PII and Financial Data
+        priority: 0
+        blockAccess: false
+        notifyUser:
+          - LastModifier
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        comment: Detects SSN, credit card, and bank account patterns in Fabric data.
+        notifyPolicyTipCustomText: This data contains PII and must not be exported.
+        notifyPolicyTipDisplayOption: Tip
+        notifyUserType: NotSet
+        notifyOverrideRequirements: None
+        notifyEmailOnedriveRemediationActions: NotSet
+        notifyAllowOverride: WithJustification
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: PII Detection
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+                  name: Credit Card Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: High
+                  minConfidence: 85
+                  maxConfidence: 100
+                - guid: a2ce32a8-f935-4bb6-8e96-2a5157672e2c
+                  name: U.S. Bank Account Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+                - guid: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+                  name: U.S. Social Security Number (SSN)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+
+  # ---------------------------------------------------------------------------------
+  # 3. A Microsoft 365 Copilot policy. Different shape entirely: `genericLocations` +
+  #    `enforcementPlanes` + `restrictAccess`, not the `locations` bucket map.
+  # ---------------------------------------------------------------------------------
+  - name: Protect sensitive M365 Copilot interactions
+    description: Prevent data leakage by restricting Microsoft 365 Copilot and Copilot Chat from using sensitive info in prompts.
+    mode: TestWithoutNotifications
+    priority: 2
+    genericLocations:
+      - workload: Applications
+        location: Copilot.M365
+        locationDisplayName:
+        locationSource: Unknown
+        locationType: Unknown
+        inclusions:
+          - type: Tenant
+            identity: All
+            displayName: All
+            name: All
+    enforcementPlanes: CopilotExperiences
+    policyTemplateInfo:
+      CategoryId: DlpPolicyCategoryCustom
+      Id: DlpPolicyTemplatesCustom
+    rules:
+      - name: Block sensitive info in Copilot prompts
+        priority: 0
+        blockAccess: false
+        generateAlert:
+          - "true"
+        enforcePortalAccess: true
+        notifyEmailExchangeIncludeAttachment: true
+        reportSeverityLevel: Low
+        alertProperties:
+          AggregationType: None
+        restrictAccess:
+          - setting: UploadText
+            value: Block
+        advancedRule:
+          outerOperator: And
+          groups:
+            - name: Default
+              operator: Or
+              sensitiveInfoTypes:
+                - guid: a44669fe-0d48-453d-a9b1-2cc83f2cba77
+                  name: U.S. Social Security Number (SSN)
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100
+                - guid: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
+                  name: Credit Card Number
+                  minCount: 1
+                  maxCount: -1
+                  confidenceLevel: Medium
+                  minConfidence: 75
+                  maxConfidence: 100

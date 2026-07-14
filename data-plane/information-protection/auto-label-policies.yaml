@@ -145,34 +145,33 @@
 #     PAN values only (e.g. Visa 4111 1111 1111 1111) per the sample-
 #     data rule -- never a real PAN.
 
-policies:
-  - name: Lab-AutoLabel-CreditCards
-    mode: TestWithoutNotifications
-    applyLabel: Confidential/Partner
-    exchangeLocation:
-      - All
-    advancedSettings: {}
-  - name: Lab-AutoLabel-SSN
-    mode: Enable
-    applyLabel: Confidential/Partner
-    exchangeLocation:
-      - All
-    advancedSettings: {}
+# TEMPLATE DEFAULT -- BOTH ROOT LISTS EMPTY (ADR 0056: the template ships empty
+# desired state). THIS FILE IS THE REASON ADR 0056 EXISTS.
+#
+# It previously shipped `Lab-AutoLabel-SSN` at `mode: Enable` with
+# `exchangeLocation: [All]` -- a LIVE, ENFORCING, TENANT-WIDE policy that stamps an
+# encrypted label on any mail containing a U.S. Social Security Number, across every
+# mailbox. A consumer who clicked "Use this template", ran kickoff exactly as designed,
+# and dispatched the deploy workflow got it created and enforcing in THEIR tenant. The
+# policy immediately above it was `mode: TestWithoutNotifications` -- simulation mode was
+# known and was not used here. That policy is DELETED, not preserved as an example.
+#
+# An empty ROOT list is the ONLY shape that is a true no-op.
+# `Deploy-AutoLabelPolicies.ps1` short-circuits on it (line ~1361) BEFORE the first
+# tenant read, and returns without planning a single Create, Update, or Delete.
+#
+# Do NOT restore a "harmless sample" entry here. This is a DEPLOY PATH: a reconciler
+# opens this exact file. A commented-out enforcing policy would sit one deleted `#` away
+# from live, which is why the worked example lives behind a DIRECTORY boundary instead:
+#   examples/data-plane/information-protection/auto-label-policies.yaml
+# -- a tree that NO workflow, script, or schema reads.
+#
+# Simulation first (ADR 0016 + project-plan guiding principle 3): a new policy lands at
+# `mode: TestWithoutNotifications`. Promotion to `Enable` requires the `destructive` PR
+# label.
+#
+# To adopt this solution: run `./scripts/Deploy-AutoLabelPolicies.ps1 -ExportCurrentState`
+# first (mandatory first-run bootstrap), review the drift report in a PR, then merge.
+policies: []
 
-rules:
-  - name: Lab-AutoLabel-CreditCards-Rule
-    policy: Lab-AutoLabel-CreditCards
-    workload: Exchange
-    contentContainsSensitiveInformation:
-      - sitId: 50842eb7-edc8-4019-85dd-5a5c1f2bb085
-        minCount: 1
-        minConfidence: 75
-  - name: Lab-AutoLabel-SSN-Rule
-    policy: Lab-AutoLabel-SSN
-    workload: Exchange
-    contentContainsSensitiveInformation:
-      # U.S. Social Security Number (SSN); Microsoft built-in SIT.
-      # Reference: https://learn.microsoft.com/en-us/purview/sit-defn-us-social-security-number
-      - sitId: a44669fe-0d48-453d-a9b1-2cc83f2cba77
-        minCount: 1
-        minConfidence: 75
+rules: []

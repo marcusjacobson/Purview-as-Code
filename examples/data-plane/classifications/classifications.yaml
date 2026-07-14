@@ -1,0 +1,44 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked custom-classification + classification-rule pair for
+# data-plane/classifications/classifications.yaml, which ships `classifications: []` and
+# `rules: []` in the template.
+#
+# Reference:
+#   https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/type
+#   https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/classification-rules
+#   https://learn.microsoft.com/en-us/purview/create-a-custom-classification-and-classification-rule
+#
+# This was ALREADY GENERIC in the shipped file — it disclosed nothing. It was emptied out
+# of `data-plane/**` anyway (ADR 0056 Decision 1: the rule is uniform, so nobody makes a
+# per-file "safe enough?" call). It is still DEPLOYABLE desired state: a populated list
+# creates a real custom classification in the consumer's tenant.
+#
+# NOT the same thing as `data-plane/classifications/sit-catalog.yaml`, which STAYS
+# POPULATED in the template. That file is a Microsoft built-in REFERENCE catalog (327
+# entries, every one `publisher: Microsoft Corporation`), read-only, with no reconciler —
+# and `Deploy-Labels.ps1` ERRORS if a label's `autoApplicationOf` sitId is missing from
+# it. Emptying it would break label deploys. ADR 0056 Decision 3 carves it out by name.
+#
+# Regex-safety rules enforced by `scripts/Deploy-Classifications.ps1`
+# (`.github/instructions/sample-data.instructions.md`, "Regex rules for classification
+# patterns"): anchor with `\b` word boundaries, use bounded repetition (`{N}`, `{0,N}`),
+# and never write a nested unbounded quantifier such as `(x+)+` — that is a ReDoS.
+
+classifications:
+  - name: CUSTOM.EmployeeId
+    description: Internal employee identifier (EMP-####).
+
+rules:
+  - name: CUSTOM.EmployeeIdRule
+    classificationName: CUSTOM.EmployeeId
+    ruleStatus: Enabled
+    kind: Regex
+    minimumPercentageMatch: 60
+    regex:
+      pattern: '\bEMP-\d{4}\b'
+      regexFlags:
+        ignoreCase: true
+    columnPatterns:
+      - kind: Regex
+        pattern: '(?i)\bemployee[_\s-]{0,3}id\b'

@@ -1,0 +1,37 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked business-glossary term set for data-plane/glossary/glossary.yaml, which ships
+# `terms: []` in the template.
+#
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/datamapdataplane/glossary
+#
+# These terms were ALREADY GENERIC in the shipped file — they disclosed nothing. They were
+# emptied out of `data-plane/**` anyway, and that is the point of ADR 0056 Decision 1: the
+# rule is UNIFORM, so nobody ever has to make a per-file "is this one safe enough to
+# ship?" call again. A per-file judgment call is exactly how an enforcing tenant-wide SSN
+# auto-labeling policy shipped from this same directory.
+#
+# Each term is namespaced by glossary. The default glossary is auto-created by Purview.
+
+glossary: Glossary
+
+terms:
+  - name: Customer
+    shortDescription: A person or organization that purchases goods or services.
+    longDescription: |
+      Any external party with an active or prior commercial relationship with the
+      organization. Customers are uniquely identified by CustomerId.
+    status: Approved
+    expert: []
+    steward: []
+
+  - name: PII
+    shortDescription: Personally Identifiable Information.
+    longDescription: |
+      Any data that can be used to identify a specific individual, including but not
+      limited to names, email addresses, phone numbers, and government identifiers.
+    status: Approved
+
+  - name: RevenueRecognition
+    shortDescription: Policy governing when revenue is recorded.
+    status: Draft

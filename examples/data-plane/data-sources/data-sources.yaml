@@ -1,0 +1,128 @@
+# EXAMPLE — NOT DEPLOYED. Nothing reads this file (ADR 0056).
+#
+# A worked data-source registration set for data-plane/data-sources/data-sources.yaml,
+# which ships `dataSources: []` in the template. Copy from here deliberately; prefer
+# running `./scripts/Deploy-DataSources.ps1 -ExportCurrentState` against your own tenant.
+#
+# Reference: https://learn.microsoft.com/en-us/rest/api/purview/scanningdataplane/data-sources
+# Reference: https://learn.microsoft.com/en-us/purview/data-map-data-scan-credentials
+#
+# Notes:
+# - `properties.collection.referenceName` targets a collection `name` from
+#   examples/data-plane/collections/collections.yaml.
+# - `properties.credential` holds only Key Vault references — never secret values.
+# - Prefer `ManagedIdentity` auth wherever the source supports it.
+# - Real Azure topology IDs (subscription, tenant) are committed as
+#   `${env:AZURE_SUBSCRIPTION_ID}` / `${env:AZURE_TENANT_ID}` per ADR 0023 and resolved by
+#   scripts/Resolve-EnvTokens.ps1 at apply time — they are NEVER literals in YAML.
+#
+# SCRUBBED. The Dataverse organization endpoint in the lab export was a real one
+# (`org<8 hex>.crm.dynamics.com`). It is `org00000000.crm.dynamics.com` here.
+
+dataSources:
+  - name: AzureBlob-SampleData
+    kind: AzureStorage
+    properties:
+      endpoint: "https://stcontosolabblob.blob.core.windows.net/"
+      location: westus2
+      resourceName: stcontosolabblob
+      resourceGroup: rg-storage
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-storage/providers/Microsoft.Storage/storageAccounts/stcontosolabblob"
+      collection:
+        referenceName: blob-storage
+      dataUseGovernance: Disabled
+
+  - name: AzureDataLakeStorage-SampleData
+    kind: AdlsGen2
+    properties:
+      endpoint: "https://stcontosolabadls.dfs.core.windows.net/"
+      location: westus2
+      resourceName: stcontosolabadls
+      resourceGroup: rg-storage
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-storage/providers/Microsoft.Storage/storageAccounts/stcontosolabadls"
+      collection:
+        referenceName: adls-gen2
+      dataUseGovernance: Disabled
+
+  - name: AzureSqlDatabase-SampleData
+    kind: AzureSqlDatabase
+    properties:
+      serverEndpoint: sql-contosolab-demo.database.windows.net
+      location: westus2
+      resourceName: sql-contosolab-demo
+      resourceGroup: rg-azuresql
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-azuresql/providers/Microsoft.Sql/servers/sql-contosolab-demo"
+      collection:
+        referenceName: azure-sql
+      dataUseGovernance: Disabled
+
+  - name: AzureSynapseAnalytics-SampleData
+    kind: AzureSynapseWorkspace
+    properties:
+      dedicatedSqlEndpoint: synw-contosolab.sql.azuresynapse.net
+      serverlessSqlEndpoint: synw-contosolab-ondemand.sql.azuresynapse.net
+      location: westus2
+      resourceName: synw-contosolab
+      resourceGroup: rg-synapse
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-synapse/providers/Microsoft.Synapse/workspaces/synw-contosolab"
+      collection:
+        referenceName: synapse
+      dataUseGovernance: Disabled
+
+  - name: AzureDataExplorer-SampleData
+    kind: AzureDataExplorer
+    properties:
+      endpoint: "https://adxcontosolab.westus2.kusto.windows.net"
+      location: westus2
+      resourceName: adxcontosolab
+      resourceGroup: rg-dataexplorer
+      subscriptionId: "${env:AZURE_SUBSCRIPTION_ID}"
+      resourceId: "/subscriptions/${env:AZURE_SUBSCRIPTION_ID}/resourceGroups/rg-dataexplorer/providers/Microsoft.Kusto/Clusters/adxcontosolab"
+      collection:
+        referenceName: azure-sql
+      dataUseGovernance: Disabled
+      enableAzureDataExplorerFunctionsScan: false
+
+  - name: DatabricksUnityCatalog-SampleData
+    kind: DatabricksUnityCatalog
+    properties:
+      collection:
+        referenceName: databricks
+      metastoreId: "${env:DATABRICKS_METASTORE_ID}"
+      policyConnectionName: ""
+
+  - name: Dataverse-SampleData
+    kind: Dataverse
+    properties:
+      # SCRUBBED: a real Dataverse org endpoint was here. `org00000000` is synthetic.
+      webApiEndpoint: "https://org00000000.crm.dynamics.com/api/data/v9.2"
+      collection:
+        referenceName: dataverse
+
+  - name: Fabric-SampleData
+    kind: Fabric
+    properties:
+      host: api.powerbi.com
+      tenant: "${env:AZURE_TENANT_ID}"
+      collection:
+        referenceName: fabric
+
+  - name: MySql-SampleData
+    kind: MySql
+    properties:
+      host: mysql-contosolab-flex.mysql.database.azure.com
+      port: 3306
+      collection:
+        referenceName: mysql
+
+  - name: PostgreSQL-SampleData
+    kind: PostgreSql
+    properties:
+      host: psql-contosolab-flex.postgres.database.azure.com
+      port: 5432
+      collection:
+        referenceName: postgresql
