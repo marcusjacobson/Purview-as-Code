@@ -331,9 +331,9 @@ residualScan:
 #   2. `residualScan.pattern` is token-shaped. Even with the exclusion removed,
 #      `contoso|onmicrosoft\.com|OWNER-PLACEHOLDER` matches no GUID.
 #
-# DESIGN — the allow-list, not the regex, is the hard part. There are ~385
+# DESIGN — the allow-list, not the regex, is the hard part. There are 384
 # distinct non-zero GUIDs in this repo and almost all are legitimate,
-# tenant-INDEPENDENT Microsoft constants. A scan that cries wolf 385 times gets
+# tenant-INDEPENDENT Microsoft constants. A scan that cries wolf 384 times gets
 # disabled, which is worse than no scan. So a non-zero GUID is allowed ONLY if
 # one of the four rules below claims it. EVERYTHING ELSE FAILS — including a
 # GUID in a file nobody has looked at, under a key nobody has enumerated. That
@@ -379,12 +379,12 @@ identifierScan:
   # a Microsoft-published catalog constant it is public, and re-listing it in
   # five places would be noise.
   #
-  # WHY KEYS, NOT VALUES: sit-catalog.yaml alone holds ~330 built-in SIT and
+  # WHY KEYS, NOT VALUES: sit-catalog.yaml alone holds 333 built-in SIT and
   # rule-pack IDs. Enumerating them by value would make every SIT-catalog
   # refresh an allow-list PR, which trains reviewers to rubber-stamp allow-list
   # additions — and a reviewer in the habit of rubber-stamping allow-list
   # additions is exactly how a real OID gets waved through. Four reviewable
-  # (file, key) pairs are safer than a 330-line value list nobody reads.
+  # (file, key) pairs are safer than a 333-line value list nobody reads.
   #
   # WHY THIS IS STILL FAIL-CLOSED: the match is anchored to `<key>: <guid>` as
   # the WHOLE value. The disclosure was a bare YAML sequence item under
@@ -417,7 +417,7 @@ identifierScan:
   # comment. These are Microsoft-published and tenant-independent: the same GUID
   # in every tenant on Earth. The list is short, every entry is named, and every
   # entry is citable — which is precisely why enumerating THESE by value is
-  # sound while enumerating 330 SIT IDs by value is not.
+  # sound while enumerating 333 SIT IDs by value is not.
   microsoftConstants:
     # Entra built-in directory-role template IDs.
     # https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/permissions-reference

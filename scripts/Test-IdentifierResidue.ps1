@@ -80,7 +80,7 @@
     Repository root. Defaults to the parent of this script's directory.
 
 .PARAMETER IncludeAllowed
-    Also emit `Allow` rows. Off by default -- the ~385 acquitted GUIDs are noise
+    Also emit `Allow` rows. Off by default -- the 384 acquitted GUIDs are noise
     in CI. Useful locally to audit which rule acquitted what.
 
 .PARAMETER FailOnReview
@@ -267,9 +267,36 @@ function Get-ScannedFileLine {
         }
     }
 
-    if ([string]::IsNullOrEmpty($raw)) { return @() }
-    if ($raw.Contains([char]0)) { return $null }   # binary
-    return ($raw -split "`r?`n")
+    if ($raw.Contains([char]0)) { return $null }        # binary -- caller skips
+    if ([string]::IsNullOrEmpty($raw)) { return , @() } # empty  -- caller scans nothing
+
+    # THE UNARY COMMA IS LOAD-BEARING. Read this before "simplifying" it.
+    #
+    # A SINGLE-LINE file with NO trailing newline splits to a ONE-element array.
+    # PowerShell UNROLLS a one-element array as it crosses a function boundary,
+    # so the caller receives a bare [string], not a [string[]] -- and `@()` INSIDE
+    # the function does not prevent that. The unary comma wraps the array in an
+    # outer array, which is then unrolled back to the array the caller wanted.
+    #
+    # Get it wrong and `$lines.Count` at the call site throws under
+    # Set-StrictMode -Version Latest, the scan loop never runs, and THE FILE IS
+    # NEVER READ.
+    #
+    # The blast radius is why this comment is this long. Under CI (`shell: pwsh`,
+    # $ErrorActionPreference = 'Stop') the process exits 1: fail-closed, safe.
+    # Run BARE LOCALLY it prints a red error and leaves $LASTEXITCODE = 0 -- a
+    # planted object ID goes UNREPORTED and the operator is told nothing is
+    # wrong. That is a local run that LIES, and it is precisely what ADR 0055
+    # Decision 7 exists to condemn: "a local PASS that a later commit turns into
+    # a FAIL is worse than no local run, because it is trusted." This scanner
+    # shipped that bug inside the fix for its own twin, and the first attempted
+    # repair (`return @(...)`) did not work either -- it fixed the array inside
+    # the function and lost it again on the way out.
+    #
+    # Pinned by 'FAILS on a single-line file with no trailing newline', which
+    # asserts the EXIT CODE, not merely that an error was raised: the defect was
+    # that the error was loud and the exit code was clean.
+    return , @($raw -split "`r?`n")
 }
 
 #-------------------------------------------------------------------------------

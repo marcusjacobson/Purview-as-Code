@@ -1,6 +1,7 @@
 # 0055 — The residual scan must be identifier-shaped and fail closed; a token-shaped scan cannot verify the absence of a GUID
 
 - **Status:** Accepted
+- **Date:** 2026-07-13
 - **Gates:** Cross-cutting security control. **Amends [ADR 0046](0046-tenant-placeholder-manifest.md) by supersession** — its §Decision-3 claim that "scanning everything *except* these paths means any remaining match is a genuine missed tenant surface" is **unsound and is withdrawn**, and its `intentionalSamples` blanket `:!data-plane` exclusion is narrowed to the sample-content paths it was actually written for. ADR 0046 remains `Accepted`; only that claim and that exclusion are amended. Ships the [`scripts/Test-IdentifierResidue.ps1`](../../scripts/Test-IdentifierResidue.ps1) scanner, the `identifierScan` manifest block (`schemaVersion` 2 → 3), the `identifier-residue` job in [`validate.yml`](../../.github/workflows/validate.yml), and the first Pester tests in this repository that read a **shipped** `data-plane/**` YAML ([`tests/data-plane/ShippedDesiredState.Tests.ps1`](../../tests/data-plane/ShippedDesiredState.Tests.ps1)). Enforces the [ADR 0023](0023-identifier-resolution.md) Category-3 principal shape mechanically for the first time. Complementary to, and independent of, the `HEAD` scrub (merged), the history purge ([#93](https://github.com/marcusjacobson/Purview-as-Code/issues/93)), and the `displayName` migration ([#95](https://github.com/marcusjacobson/Purview-as-Code/issues/95)) — this is the **control**; those are the **cleanup**. No [`docs/project-plan.md`](../project-plan.md) §5 / §8 row: this is repo-safety infrastructure, following the ADR 0046 and ADR 0050 precedent.
 - **Deciders:** @marcusjacobson
 
@@ -103,18 +104,31 @@ The scanner walks **every tracked file** and treats every GUID-shaped token as a
 
 ### 5. The allow-list is the hard part, and it is shape-aware, not path-aware
 
-There are **~385 distinct non-zero GUIDs** in this repo and almost all of them are legitimate, tenant-**independent** Microsoft constants. **A scan that cries wolf 385 times gets disabled, which is worse than no scan.** Getting the allow-list right *is* the work. Four rules, in precedence order:
+A naive GUID scan flags **384 distinct non-zero GUIDs** in this repo (measured, not estimated: 345 real-world Microsoft-published or quarantined values, plus 39 synthetic test fixtures). Almost all are legitimate and tenant-**independent**. **A scan that cries wolf 384 times gets disabled, which is worse than no scan.** Getting the allow-list right *is* the work. Four rules, in precedence order:
 
 | # | Rule | Acquits by | Covers |
 |---|---|---|---|
 | 1 | `syntheticShapes` | **shape** | The zero GUID; the reserved fixture namespace `00000000-0000-0000-0000-<counter>`; repeated-nibble fixtures (`aaaaaaaa-…`); two named synthetic literals. |
-| 2 | `catalogKeys` | **(file, key)** | Microsoft catalog identifiers: ~330 built-in SIT + rule-pack IDs under `sit-catalog.yaml` `id:`/`rulePackId:`, trainable-classifier + SIT IDs under `dlp/policies.yaml` `guid:`, `sitId:` in the two auto-label YAMLs. |
+| 2 | `catalogKeys` | **(file, key)** | Microsoft catalog identifiers: **333** built-in SIT + rule-pack IDs under `sit-catalog.yaml` `id:`/`rulePackId:`, trainable-classifier + SIT IDs under `dlp/policies.yaml` `guid:`, `sitId:` in the two auto-label YAMLs. |
 | 3 | `microsoftConstants` | **exact value** | The 10 constants with no enclosing key to hang a rule on: Entra role `templateId`s, Azure RBAC role-definition IDs, Microsoft first-party app / app-role IDs. |
 | 4 | `reviewRequired` | **SHA-256 of the value** | Quarantine. Identifiers of *unresolved provenance*. Reported as `Review`, not `Finding`. |
 
+**The measured carry, so the "384" above is a defined number and not a vibe** (`Test-IdentifierResidue.ps1 -IncludeAllowed | Group-Object Rule`):
+
+| Rule | Distinct values | Occurrences |
+|---|---|---|
+| `catalogKeys` | 333 | 537 |
+| `microsoftConstants` | 10 | 31 |
+| `reviewRequired` | 2 | 8 |
+| **Real-world subtotal** | **345** | **576** |
+| `syntheticShapes` (33 zero-prefixed + 4 repeated-nibble + 2 named literals) | 39 | 390 |
+| **Total non-zero** | **384** | **966** |
+
+Findings: **0**. Every one of the 384 is claimed by a rule, and the rule that claims it is named in the output — so "why is this GUID allowed?" is answerable in one command rather than by reading this ADR.
+
 **Rule 1 replaces a `tests/**` path exclusion, and that substitution is the design in miniature.** Fixtures are acquitted for **looking synthetic**, never for **living in `tests/`**. A real object ID pasted into `tests/` still fails — as it must, because `tests/` is exactly where a "harmless" copy-paste of live tenant output goes. (This is not hypothetical: the scan's first run against the post-scrub tree found a live-looking sensitivity-label GUID in a `Deploy-LabelPolicies` fixture, sitting next to a synthetic sibling. It is replaced with a synthetic in this PR.)
 
-**Rule 2 is keys, not values, and the reasoning is about human behaviour, not machines.** Enumerating ~330 SIT IDs by value would work, and it would fail closed. It is still the wrong choice: it makes **every SIT-catalog refresh an allow-list PR**, which trains reviewers to rubber-stamp allow-list additions — and *a reviewer in the habit of rubber-stamping allow-list additions is precisely how a real object ID gets waved through*. The allow-list's job is to be **read**. Four reviewable `(file, key)` pairs are safer than a 330-line value list nobody reads. Rule 3 enumerates by value only where structure gives us nothing to hold: a Bicep `var`, a PowerShell literal, a GUID in prose.
+**Rule 2 is keys, not values, and the reasoning is about human behaviour, not machines.** Enumerating the 333 SIT / rule-pack IDs by value would work, and it would fail closed. It is still the wrong choice: it makes **every SIT-catalog refresh an allow-list PR**, which trains reviewers to rubber-stamp allow-list additions — and *a reviewer in the habit of rubber-stamping allow-list additions is precisely how a real object ID gets waved through*. The allow-list's job is to be **read**. Four reviewable `(file, key)` pairs are safer than a 333-line value list nobody reads. Rule 3 enumerates by value only where structure gives us nothing to hold: a Bicep `var`, a PowerShell literal, a GUID in prose.
 
 **Rule 2 is still fail-closed, and the disclosure is the proof.** The match is anchored to `<key>: <guid>` as the **whole value**. The leak was a **bare YAML sequence item**:
 
@@ -147,6 +161,15 @@ The first cut enumerated `git ls-files` only. That is defensible on the threat m
 
 This is not a hypothetical, and it is too instructive to leave out: **this scanner's own test file slipped past this scanner's own local run** for exactly this reason. It was untracked, so `git ls-files` did not list it, so the scan did not read it, so it reported clean — and CI failed on the first push. The scan was, for one commit, blind in precisely the way this ADR was written to condemn: *it could not see the thing it was checking.* The fix is `git ls-files` **+** `git ls-files --others --exclude-standard`, and a Pester test now pins it.
 
+**And it happened a second time, in the fix for the first.** `Get-ScannedFileLine` returned `$raw -split "\r?\n"`. On a **single-line file with no trailing newline** that is a one-element array, which PowerShell **unrolls to a bare string as it crosses the function boundary**. `$lines.Count` at the call site then throws under `Set-StrictMode`, the scan loop never runs, and **the file is never read**. Under CI (`$ErrorActionPreference = 'Stop'`) the process exits 1 — fail-closed, safe. But a **bare local run printed a red error and left `$LASTEXITCODE = 0`**: a planted object ID went unreported and the operator was told nothing was wrong. There is no `insert_final_newline` rule in this repo, so it was reachable.
+
+Two things are worth recording, because both are cheap to repeat:
+
+1. **The obvious repair does not work.** `return @($raw -split ...)` fixes the array *inside* the function and loses it again on the way out — PowerShell unrolls the one-element array regardless. Only the unary comma (`return ,@(...)`) survives the boundary. A fix that looks right and is verified only by "the tests still pass" would have shipped, because the tests that existed did not exercise a one-line file.
+2. **The test must assert the EXIT CODE, not merely that an error was raised.** The defect was that the error was *loud* and the exit code was *clean*. A test asserting "it throws" would have passed vacuously against the broken scanner.
+
+The generalisable form, which is the same rule as the ADR's thesis one layer down: **a check whose failure mode is "silently reads nothing" is indistinguishable from a check that passes.** Verify the check against a *planted positive*, or you have verified nothing.
+
 Gitignored files stay out, deliberately: they never reach the remote, and they are where local tenant exports legitimately land ([ADR 0021](0021-dspm-content-explorer-cadence.md)'s exporter artifact directory).
 
 ### 8. It runs on every PR, because an onboarding-only scan cannot catch a regression
@@ -174,7 +197,7 @@ The ADR 0046 scan ran only in the `@operator-tenant` Step 6 onboarding flow. The
 
 **Harder.**
 
-- **The allow-list is a maintained artefact.** A new Microsoft constant, or a new catalog file, needs a manifest entry with a name and a citation, or CI goes red. This is the cost, it is deliberate, and it is bounded: 10 value entries and 4 `(file, key)` pairs cover ~385 GUIDs.
+- **The allow-list is a maintained artefact.** A new Microsoft constant, or a new catalog file, needs a manifest entry with a name and a citation, or CI goes red. This is the cost, it is deliberate, and it is bounded: 10 value entries and 4 `(file, key)` pairs cover all 384 GUIDs.
 - **A new SIT-bearing data-plane file needs a `catalogKeys` entry.** The failure is loud, the message names the fix, and adding a `(file, key)` pair is a reviewable one-line diff.
 - **Test fixtures must use the reserved synthetic namespace.** Pasting a GUID from a real tenant into a fixture now fails the build. That is the feature.
 - **A tailored spin-off that adopts role groups must edit `ShippedDesiredState.Tests.ps1`.** Stated in Decision 9; intended, not incidental.
@@ -190,11 +213,11 @@ The ADR 0046 scan ran only in the `@operator-tenant` Step 6 onboarding flow. The
 
 3. **Path-based allow-list: skip `tests/`, `docs/`, `data-plane/classifications/`.** **Rejected, emphatically — this is the thing that caused the incident.** It is also the easiest design to reach for, because it makes the false-positive count go to zero in about ten minutes. Every path exclusion is a standing promise that nothing dangerous will ever be written under that path, and the disclosure is the proof that such promises are not kept: `:!data-plane` was written in good faith, for a real reason, by someone who was right about the files they were looking at. Shape-aware and value-aware rules cannot decay this way, because they do not encode a promise about a *place*.
 
-4. **Enumerate all ~385 GUIDs by value.** Rejected. It fails closed and it would work — the objection is human, not technical. It makes every SIT-catalog refresh an allow-list PR, and a reviewer who approves allow-list additions weekly is a reviewer who will approve the one that matters. See Decision 5.
+4. **Enumerate all 384 GUIDs by value.** Rejected. It fails closed and it would work — the objection is human, not technical. It makes every SIT-catalog refresh an allow-list PR, and a reviewer who approves allow-list additions weekly is a reviewer who will approve the one that matters. See Decision 5.
 
 5. **Entropy / heuristic detection ("does this GUID look tenant-real?").** Rejected. GUIDs are opaque by construction; a v4 SIT ID and a v4 group object ID are statistically indistinguishable. Any such heuristic is a coin flip dressed as a control, and it would fail *open* on exactly the values that matter.
 
-6. **Secret-scanning tooling (GitHub secret scanning, `gitleaks`, `trufflehog`).** Rejected as the primary control, though complementary. Those tools hunt **credentials** — high-entropy strings with issuer-specific formats and a revocation story. An Entra group object ID is a bare v4 GUID with no distinguishing format and nothing to revoke; it is indistinguishable from the ~385 legitimate GUIDs this repo ships on purpose. The discrimination this problem needs is **repo-specific semantic knowledge** (which keys, in which files, mean what) and that knowledge lives in the manifest, not in a generic scanner. A tool that cannot tell a Credit Card SIT ID from a break-glass group OID would either flag all 385 or none.
+6. **Secret-scanning tooling (GitHub secret scanning, `gitleaks`, `trufflehog`).** Rejected as the primary control, though complementary. Those tools hunt **credentials** — high-entropy strings with issuer-specific formats and a revocation story. An Entra group object ID is a bare v4 GUID with no distinguishing format and nothing to revoke; it is indistinguishable from the 384 legitimate GUIDs this repo ships on purpose. The discrimination this problem needs is **repo-specific semantic knowledge** (which keys, in which files, mean what) and that knowledge lives in the manifest, not in a generic scanner. A tool that cannot tell a Credit Card SIT ID from a break-glass group OID would either flag all 384 or none.
 
 7. **Block only on `data-plane/**` and warn elsewhere.** Rejected. It is a path exclusion wearing a severity label, and it re-imports Alternative 3's failure mode through the back door. The label-GUID that this scan found in a `tests/` fixture is the direct counter-example: a warn-only `tests/` would have printed it and moved on.
 
