@@ -99,6 +99,21 @@
     Allow removal of tenant policies that are not declared in the YAML.
     Default $false.
 
+.PARAMETER Force
+    Suppress the safety guard on the operation you asked for (ADR 0052 section 6).
+    Default: $false. Must be explicit per the drift-report contract.
+
+    Here that guard is the ADR 0052 destructive-confirmation prompt in front
+    of the `-PruneMissing` delete branch. `-Force` does NOT mean "overwrite
+    policies whose author is not the current principal": the IPPS /
+    Security & Compliance cmdlet surface returns no authorship field, so
+    there is genuinely nothing to diff and this script emits no `Conflict`
+    row. ADR 0053 gives the authorship override its own switch
+    (`-OverwriteForeignAuthor`) and scopes it to the six Atlas / Data Map
+    REST reconcilers that can actually diff an authorship field. This script
+    is not one of them and does not get that switch.
+    Reference: docs/adr/0053-overwrite-foreign-author-switch.md.
+
 .PARAMETER ParametersFile
     Path to the environment parameters YAML (ADR 0012). Defaults to
     `infra/parameters/lab.yaml` resolved relative to the repo root.
@@ -161,12 +176,23 @@
         Reference:
         https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+# ConfirmImpact = 'High' is load-bearing, not decorative. PowerShell only
+# raises a ShouldProcess confirmation when ConfirmImpact >= $ConfirmPreference,
+# and $ConfirmPreference defaults to 'High'. This script shipped 'Medium'
+# until ADR 0052, so every $PSCmdlet.ShouldProcess(...) call below returned
+# $true without ever prompting. Do not lower it back to 'Medium'.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     [ValidateNotNullOrEmpty()]
     [string]$Path = (Join-Path $PSScriptRoot '..\data-plane\communication-compliance\policies.yaml'),
 
     [switch]$PruneMissing,
+
+    # ADR 0052: -Force suppresses the destructive-confirmation prompt. This
+    # script shipped without the switch, so the gate below had no operator
+    # override at all until it was added here.
+    [switch]$Force,
 
     [ValidateNotNullOrEmpty()]
     [string]$ParametersFile,
@@ -543,6 +569,14 @@ if (-not (Get-Module -ListAvailable -Name $module)) {
 }
 Import-Module $module -ErrorAction Stop
 
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so the -PruneMissing delete branch cannot be
+# entered unattended from a local terminal.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -748,6 +782,60 @@ try {
         if ($desiredNames -notcontains $tn) {
             $reason = if ($PruneMissing.IsPresent) { 'Tenant-only; will be removed (-PruneMissing).' } else { 'Tenant-only; skipped (no -PruneMissing).' }
             $plan.Add([pscustomobject]@{ Action = 'Orphan'; Name = $tn; Desired = $null; Reason = $reason })
+        }
+    }
+
+    # ---- ADR 0052: destructive-operation confirmation gate ----
+    # The last point before the write loop at which nothing has been
+    # written. This script is Class B: it declares no -DirectionPolicy, so
+    # it has no repo-wins overwrite branch and exactly ONE destructive
+    # branch -- the -PruneMissing delete. That branch is gated here, once
+    # per run, via $PSCmdlet.ShouldContinue() -- NOT ShouldProcess().
+    # ShouldContinue prompts unconditionally; ShouldProcess only prompts
+    # when ConfirmImpact >= $ConfirmPreference, which is precisely the
+    # comparison that silently defeated this gate before issue #85.
+    #
+    # The gate is keyed on the PLAN -- the Orphan rows the delete branch of
+    # the write loop below actually iterates -- and never on a policy.
+    # $orphans is derived from $plan here and read a few lines later, so it
+    # cannot diverge from the deletes it speaks for.
+    #
+    # This `throw` sits inside the enclosing try/finally. There is no
+    # `catch`, so a decline propagates out of the script (after the
+    # `finally` disconnects the S&C session) rather than being swallowed
+    # and falling through into the write loop.
+    #
+    # Deleting a Communication Compliance policy CASCADES to its rules:
+    # there is no Remove-SupervisoryReviewRule cmdlet on the V2 surface, so
+    # removing the parent policy is the only way a rule is ever destroyed.
+    # The operator is told so.
+    #
+    # Suppressed by -Force, by an explicit -Confirm:$false (the CI path),
+    # and skipped under -WhatIf so a dry run still previews the deletes
+    # without blocking on input.
+    # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+    $yesToAll = $false
+    $noToAll = $false
+    $confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+    $confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+    $gateArgs = @{
+        Cmdlet       = $PSCmdlet
+        Caption      = 'Destructive operation (ADR 0052)'
+        YesToAll     = ([ref]$yesToAll)
+        NoToAll      = ([ref]$noToAll)
+        Force        = $Force.IsPresent
+        IsWhatIf     = [bool]$WhatIfPreference
+        ConfirmBound = $confirmBound
+        ConfirmValue = $confirmValue
+    }
+
+    $orphans = @($plan | Where-Object { $_.Action -eq 'Orphan' })
+    if ($PruneMissing.IsPresent -and $orphans.Count -gt 0) {
+        $orphanNames = @($orphans | ForEach-Object { [string]$_.Name })
+        $pruneQuery = "-PruneMissing will DELETE {0} orphan Communication Compliance policy/policies from the tenant: {1}. Their rules are deleted with them (the V2 surface has no Remove-SupervisoryReviewRule cmdlet). This cannot be undone. Continue?" -f `
+            $orphanNames.Count, (($orphanNames | Sort-Object) -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+            throw 'Aborted by operator at the -PruneMissing delete confirmation gate (ADR 0052). No tenant writes were made.'
         }
     }
 

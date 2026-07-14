@@ -209,7 +209,13 @@
     No credential material is printed; tenant-real identifiers (appId,
     tenantId, member OIDs) are not echoed at INFO level.
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Apply')]
+# ConfirmImpact = 'High' is load-bearing, not decorative. PowerShell only
+# raises a ShouldProcess confirmation when ConfirmImpact >= $ConfirmPreference,
+# and $ConfirmPreference defaults to 'High'. This script shipped 'Medium'
+# until ADR 0052, so every $PSCmdlet.ShouldProcess(...) call below returned
+# $true without ever prompting. Do not lower it back to 'Medium'.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -292,6 +298,14 @@ if (-not (Get-Module -ListAvailable -Name $module)) {
     Install-Module -Name $module -Scope CurrentUser -Force -AllowClobber -AllowPrerelease
 }
 Import-Module $module -ErrorAction Stop
+
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so the -PruneMissing revoke branch cannot be
+# entered unattended from a local terminal.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
 
 #endregion
 
@@ -729,6 +743,70 @@ try {
                 ToCreate  = @($toCreate)
                 ToRevoke  = @($toRevoke)
             })
+        }
+    }
+
+    # ---- ADR 0052: destructive-operation confirmation gate ----
+    # The last point before Phase 2/3 at which nothing has been written.
+    # This script is Class B: it declares no -DirectionPolicy, so it has no
+    # repo-wins overwrite branch and exactly ONE destructive branch -- the
+    # -PruneMissing revoke. That branch is gated here, once per run, via
+    # $PSCmdlet.ShouldContinue() -- NOT ShouldProcess(). ShouldContinue
+    # prompts unconditionally; ShouldProcess only prompts when
+    # ConfirmImpact >= $ConfirmPreference, which is precisely the
+    # comparison that silently defeated this gate before issue #85.
+    #
+    # The gate is keyed on the PLAN -- $revokes is the flattened union of
+    # the very ToRevoke collections the Phase 3 revoke loop iterates -- and
+    # never on a policy. Phase 3 guards that loop with
+    # `if (-not $PruneMissing.IsPresent) { continue }`, so the gate's
+    # `$PruneMissing.IsPresent -and $revokes.Count -gt 0` condition is
+    # exactly the reachability condition of the writes it speaks for.
+    # (A $plan entry can carry a non-empty ToRevoke without -PruneMissing,
+    # because Phase 1 admits an entry on ToCreate alone -- hence the
+    # -PruneMissing conjunct here is a PLAN predicate, not a policy one.)
+    #
+    # REVOKE, not DELETE: Remove-RoleGroupMember drops a member's
+    # permission; it does not destroy the Entra group or the role group.
+    #
+    # This `throw` sits inside the enclosing try/finally. There is no
+    # `catch`, so a decline propagates out of the script (after the
+    # `finally` disconnects the S&C session) rather than being swallowed
+    # and falling through into the write phase.
+    #
+    # Suppressed by -Force, by an explicit -Confirm:$false (the CI path),
+    # and skipped under -WhatIf so a dry run still previews the revokes
+    # without blocking on input.
+    # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+    $yesToAll = $false
+    $noToAll = $false
+    $confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+    $confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+    $gateArgs = @{
+        Cmdlet       = $PSCmdlet
+        Caption      = 'Destructive operation (ADR 0052)'
+        YesToAll     = ([ref]$yesToAll)
+        NoToAll      = ([ref]$noToAll)
+        Force        = $Force.IsPresent
+        IsWhatIf     = [bool]$WhatIfPreference
+        ConfirmBound = $confirmBound
+        ConfirmValue = $confirmValue
+    }
+
+    # One entry per membership the Phase 3 revoke loop would drop. The
+    # member's Entra object ID is deliberately NOT interpolated into the
+    # prompt -- the operator is shown the role group and the member count,
+    # matching the '<oid>' redaction the drift report already uses.
+    $revokes = @(foreach ($p in $plan) {
+            foreach ($oid in $p.ToRevoke) { [string]$p.RoleGroup }
+        })
+    if ($PruneMissing.IsPresent -and $revokes.Count -gt 0) {
+        $revokeSummary = @($revokes | Group-Object | Sort-Object Name |
+                ForEach-Object { '{0} ({1} member(s))' -f $_.Name, $_.Count })
+        $pruneQuery = "-PruneMissing will REVOKE {0} Purview role-group membership(s) from the tenant: {1}. Each revoked member loses the permissions that role group confers. This cannot be undone. Continue?" -f `
+            $revokes.Count, ($revokeSummary -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+            throw 'Aborted by operator at the -PruneMissing revoke confirmation gate (ADR 0052). No tenant writes were made.'
         }
     }
 

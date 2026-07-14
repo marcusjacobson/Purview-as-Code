@@ -96,7 +96,13 @@
       Group.ReadWrite.All
     Reference: https://learn.microsoft.com/en-us/graph/permissions-reference#group-permissions
 #>
-[CmdletBinding(DefaultParameterSetName = 'Apply', SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+# ConfirmImpact = 'High' is load-bearing, not decorative. PowerShell only
+# raises a ShouldProcess confirmation when ConfirmImpact >= $ConfirmPreference,
+# and $ConfirmPreference defaults to 'High'. This script shipped 'Medium'
+# until ADR 0052, so every $PSCmdlet.ShouldProcess(...) call below returned
+# $true without ever prompting. Do not lower it back to 'Medium'.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+[CmdletBinding(DefaultParameterSetName = 'Apply', SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -134,6 +140,14 @@ if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
     Install-Module -Name 'powershell-yaml' -Scope CurrentUser -Force -AllowClobber
 }
 Import-Module 'powershell-yaml' -ErrorAction Stop
+
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so the -PruneMissing delete branch cannot be
+# entered unattended from a local terminal.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
 
 # ---------------------------------------------------------------------------
 # Acquire a Microsoft Graph access token via Azure CLI.
@@ -324,6 +338,57 @@ foreach ($c in $current) {
 
 # Emit the drift report.
 $report | Sort-Object Category, Name | Format-Table -AutoSize | Out-String | Write-Information -InformationAction Continue
+
+# ---- ADR 0052: destructive-operation confirmation gate ----
+# The last point before the write loop at which nothing has been written.
+# This script is Class B: it declares no -DirectionPolicy, so it has no
+# repo-wins overwrite branch and exactly ONE destructive branch -- the
+# -PruneMissing delete. That branch is gated here, once per run, via
+# $PSCmdlet.ShouldContinue() -- NOT ShouldProcess(). ShouldContinue prompts
+# unconditionally; ShouldProcess only prompts when ConfirmImpact >=
+# $ConfirmPreference, which is precisely the comparison that silently
+# defeated this gate before issue #85.
+#
+# The gate is keyed on the PLAN -- the orphan rows the delete loop below
+# actually iterates -- and never on a policy. $orphans is derived from
+# $report here and read one line later, so it cannot diverge from the
+# writes it speaks for.
+#
+# The query says DELETE, not REVOKE, deliberately: the Orphan branch below
+# issues DELETE /groups/{id}, destroying the Entra security-group OBJECT.
+# That is strictly worse than revoking a permission -- the group's Purview
+# role-group membership, and every other grant it carried anywhere in the
+# tenant, goes with it, and the object cannot be restored with the same
+# object ID. The operator is told so.
+#
+# Suppressed by -Force, by an explicit -Confirm:$false (the CI path), and
+# skipped under -WhatIf so a dry run still previews the deletes without
+# blocking on input.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+$yesToAll = $false
+$noToAll = $false
+$confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+$confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+$gateArgs = @{
+    Cmdlet       = $PSCmdlet
+    Caption      = 'Destructive operation (ADR 0052)'
+    YesToAll     = ([ref]$yesToAll)
+    NoToAll      = ([ref]$noToAll)
+    Force        = $Force.IsPresent
+    IsWhatIf     = [bool]$WhatIfPreference
+    ConfirmBound = $confirmBound
+    ConfirmValue = $confirmValue
+}
+
+$orphans = @($report | Where-Object { $_.Category -eq 'Orphan' })
+if ($PruneMissing.IsPresent -and $orphans.Count -gt 0) {
+    $orphanNames = @($orphans | ForEach-Object { [string]$_.Name })
+    $pruneQuery = "-PruneMissing will DELETE {0} orphan Entra security group(s) that back Purview role groups: {1}. Deleting the group revokes every permission it conferred, and this cannot be undone. Continue?" -f `
+        $orphanNames.Count, (($orphanNames | Sort-Object) -join ', ')
+    if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+        throw 'Aborted by operator at the -PruneMissing delete confirmation gate (ADR 0052). No tenant writes were made.'
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Act on the report.

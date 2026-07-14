@@ -10,7 +10,8 @@
     v2 §5.1 work in issue #383:
 
       1. CmdletBinding declares SupportsShouldProcess with
-         ConfirmImpact = 'Medium' so -WhatIf is honored end-to-end.
+         ConfirmImpact = 'High' so -WhatIf is honored end-to-end AND the
+         ADR 0052 destructive-confirmation gate can actually prompt.
       2. Parameter surface exposes -Path, -OwnerObjectId, -PruneMissing,
          -Force with the documented defaults and validation.
       3. The drift-report contract from
@@ -60,7 +61,7 @@ BeforeAll {
 
 Describe 'Deploy-RoleGroupBackingEntraGroups.ps1 — CmdletBinding contract' {
 
-    It 'declares [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = ''Medium'')]' {
+    It 'declares [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = ''High'')]' {
         $paramBlock = $script:Ast.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.ParamBlockAst]
@@ -79,7 +80,16 @@ Describe 'Deploy-RoleGroupBackingEntraGroups.ps1 — CmdletBinding contract' {
         $cbArgs.Keys | Should -Contain 'SupportsShouldProcess' -Because '-WhatIf must be honored end-to-end'
         $cbArgs['SupportsShouldProcess'] | Should -Match '\$true'
         $cbArgs.Keys | Should -Contain 'ConfirmImpact'
-        $cbArgs['ConfirmImpact'] | Should -Match "'Medium'"
+        # 'High', NOT 'Medium'. This assertion previously pinned 'Medium' --
+        # it was pinning the issue #85 DEFECT. PowerShell raises a
+        # ShouldProcess confirmation only when ConfirmImpact >=
+        # $ConfirmPreference, and $ConfirmPreference defaults to 'High', so at
+        # 'Medium' every ShouldProcess call returned $true WITHOUT PROMPTING
+        # and the mandated confirmation was dead code. Raised by issue #83
+        # (ADR 0052 rollout). Case-sensitive so a lowercase 'high' cannot pass.
+        # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+        $cbArgs['ConfirmImpact'] | Should -CMatch "'High'" `
+            -Because 'ConfirmImpact = Medium is the issue #85 defect: it silently disables every confirmation prompt in the script'
     }
 }
 
