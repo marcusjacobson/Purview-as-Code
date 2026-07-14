@@ -228,6 +228,138 @@ BeforeAll {
         @($offenders | Select-Object -Unique)
     }
 
+    # How many destructive branches each reconciler has -- therefore how many
+    # gate calls it MUST wire. This is the class map from #83, made executable.
+    #
+    #   Class A (2) -- prune-delete AND repo-wins overwrite.
+    #   Class B (1) -- prune-delete only; declares no -DirectionPolicy at all.
+    #   Class C (0) -- does not exist. Every one of the 21 reconcilers can
+    #                  delete or revoke tenant state.
+    #
+    # WHY A TABLE AND NOT `Should -BeGreaterThan 0`. All four scripts gated in
+    # PR-A are Class A, so a flat `Should -Be 2` is correct today -- and it is a
+    # LANDMINE for PR-B. The moment PR-B adds a Class B script to the -ForEach
+    # list, `Should -Be 2` false-fails, and the obvious "fix" is to relax it to
+    # `-BeGreaterThan 0`. That relaxation re-opens the exact hole this assertion
+    # closes: a Class A script silently shipping only ONE of its two gates would
+    # sail through. Defusing it now, before PR-B has a reason to reach for the
+    # relaxation.
+    #
+    # PR-B: add the script to $script:GatedScripts below; its expected count is
+    # already declared here. A script gated without an entry here FAILS -- you
+    # must state its class, not infer it.
+    $script:DestructiveBranchCount = @{
+        # ---- Class A (12) : overwrite + prune ----
+        'Deploy-AdaptiveScopes.ps1'               = 2
+        'Deploy-AutoLabelPolicies.ps1'            = 2
+        'Deploy-Collections.ps1'                  = 2
+        'Deploy-DataSources.ps1'                  = 2
+        'Deploy-DLPPolicies.ps1'                  = 2
+        'Deploy-FilePlan.ps1'                     = 2
+        'Deploy-Glossary.ps1'                     = 2
+        'Deploy-IRMEntityLists.ps1'               = 2
+        'Deploy-IRMPolicies.ps1'                  = 2
+        'Deploy-LabelPolicies.ps1'                = 2
+        'Deploy-Labels.ps1'                       = 2
+        'Deploy-RetentionPolicies.ps1'            = 2
+        'Deploy-Scans.ps1'                        = 2
+        'Deploy-UnifiedCatalog.ps1'               = 2
+        'Deploy-UnifiedCatalogPolicies.ps1'       = 2
+        # ---- Class B (6) : prune only, no -DirectionPolicy ----
+        'Deploy-AdministrativeUnits.ps1'          = 1
+        'Deploy-Classifications.ps1'              = 1
+        'Deploy-CommunicationCompliance.ps1'      = 1
+        'Deploy-EntraDirectoryRoles.ps1'          = 1
+        'Deploy-PurviewRoleGroups.ps1'            = 1
+        'Deploy-RoleGroupBackingEntraGroups.ps1'  = 1
+    }
+
+    # The gate's two SUPPRESSORS, as bound at the call site.
+    #
+    # A gate can be perfectly wired -- 2 calls, -Query bound, decline throws,
+    # ConfirmImpact High -- and still be INCAPABLE OF EVER PROMPTING, if -Force
+    # is hard-bound to a constant:
+    #
+    #     $gateArgs = @{ ... ; Force = $true ; ... }     # the gate can never fire
+    #
+    # That is not hypothetical: it is the SHAPE of the ambient self-disarm
+    # (`if ($Force) { $ConfirmPreference = 'None' }`) that ADR 0053 section 4 had
+    # to strip out of Deploy-UnifiedCatalog and Deploy-UnifiedCatalogPolicies.
+    # This repo has already shipped a gate that looked correct and could not fire.
+    #
+    # So: each suppressor must trace back to the OPERATOR'S OWN switch --
+    # -Force must carry a $Force VariableExpressionAst, -IsWhatIf must carry a
+    # $WhatIfPreference one. A constant, or any expression that never names the
+    # operator's variable, is the finding.
+    #
+    # Returns @{ Force = <bool>; IsWhatIf = <bool> } -- $true when correctly bound.
+    function Test-GateSuppressorBinding {
+        param(
+            [Parameter(Mandatory)]$Ast,
+            [Parameter(Mandatory)]$GateCall
+        )
+
+        # Collect the value expressions bound to -Force / -IsWhatIf, whether the
+        # caller splats a hashtable or binds the parameters directly.
+        $valueFor = @{ Force = $null; IsWhatIf = $null }
+
+        # (a) direct binding at the call site: `-Force:$Force`
+        $elements = @($GateCall.CommandElements)
+        for ($i = 0; $i -lt $elements.Count; $i++) {
+            $el = $elements[$i]
+            if ($el -isnot [System.Management.Automation.Language.CommandParameterAst]) { continue }
+            if ($el.ParameterName -notin @('Force', 'IsWhatIf')) { continue }
+            $arg = if ($null -ne $el.Argument) { $el.Argument } elseif ($i + 1 -lt $elements.Count) { $elements[$i + 1] } else { $null }
+            if ($null -ne $arg) { $valueFor[$el.ParameterName] = $arg }
+        }
+
+        # (b) splatted binding: `@gateArgs`, whose hashtable is assigned upstream.
+        $splat = @($elements | Where-Object {
+                $_ -is [System.Management.Automation.Language.VariableExpressionAst] -and $_.Splatted
+            }) | Select-Object -First 1
+        if ($splat) {
+            $splatName = [string]$splat.VariablePath.UserPath
+            $assign = @($Ast.FindAll({
+                        param($n)
+                        $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                        $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $n.Left.VariablePath.UserPath -eq $splatName
+                    }, $true)) | Select-Object -Last 1
+            if ($assign) {
+                $hash = @($assign.Right.FindAll({
+                            param($n) $n -is [System.Management.Automation.Language.HashtableAst]
+                        }, $true)) | Select-Object -First 1
+                if ($hash) {
+                    foreach ($pair in $hash.KeyValuePairs) {
+                        $keyName = if ($pair.Item1 -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+                            [string]$pair.Item1.Value
+                        }
+                        else { ($pair.Item1.Extent.Text -replace "['`"]", '') }
+                        if ($keyName -in @('Force', 'IsWhatIf') -and $null -eq $valueFor[$keyName]) {
+                            $valueFor[$keyName] = $pair.Item2
+                        }
+                    }
+                }
+            }
+        }
+
+        # The value must NAME the operator's own variable. `$true` parses as a
+        # VariableExpressionAst too -- but one whose name is 'true', not 'Force',
+        # so a name check (not a mere "is it a variable" check) is what closes it.
+        $expected = @{ Force = 'Force'; IsWhatIf = 'WhatIfPreference' }
+        $result = @{}
+        foreach ($param in 'Force', 'IsWhatIf') {
+            $value = $valueFor[$param]
+            if ($null -eq $value) { $result[$param] = $false; continue }
+            $result[$param] = @($value.FindAll({
+                        param($n)
+                        $n -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                        $n.VariablePath.UserPath -eq $expected[$param]
+                    }, $true)).Count -gt 0
+        }
+        return $result
+    }
+
     # Default gate arguments: no suppressor set, so the gate prompts.
     function Get-GateArgTable {
         param(
@@ -421,6 +553,65 @@ Describe 'ConfirmGate: contract check on -Cmdlet' {
     }
 }
 
+Describe 'The destructive-branch class map is DERIVED FROM THE SOURCE, not asserted' {
+
+    # $script:DestructiveBranchCount drives how many gates each reconciler must
+    # wire. A hand-maintained table is only as good as the hand -- and a table
+    # that silently misclassifies a Class A script as Class B would EXPECT one
+    # gate, get one gate, and pass green while the overwrite branch shipped
+    # unguarded. The table would then be laundering the very defect it exists to
+    # prevent.
+    #
+    # So the table is checked against the scripts themselves. The class is a
+    # FACT ABOUT THE SOURCE, derivable with no judgment:
+    #
+    #   Class A (2 gates) -- declares -DirectionPolicy  => has an overwrite branch
+    #                        AND -PruneMissing          => has a prune branch
+    #   Class B (1 gate)  -- no -DirectionPolicy        => prune branch only
+    #
+    # This runs against all 21 reconcilers, including the 17 PR-B has not gated
+    # yet, so PR-B inherits a class map that is already proven correct.
+
+    BeforeDiscovery {
+        $script:AllReconcilers = @(
+            Get-ChildItem -Path (Join-Path $PSScriptRoot '..' '..' 'scripts') -Filter 'Deploy-*.ps1' |
+                ForEach-Object { $_.Name }
+        )
+    }
+
+    It 'covers every Deploy-*.ps1 reconciler (no script may be silently absent)' {
+        $onDisk = @(Get-ChildItem -Path (Join-Path $script:RepoRoot 'scripts') -Filter 'Deploy-*.ps1' | ForEach-Object { $_.Name })
+        $declared = @($script:DestructiveBranchCount.Keys)
+        ($onDisk | Sort-Object) | Should -Be ($declared | Sort-Object) `
+            -Because 'a reconciler missing from the class map is a reconciler whose gate count nobody has decided'
+    }
+
+    Context '<_>' -ForEach $script:AllReconcilers {
+
+        BeforeAll {
+            $script:RecAst = Get-ScriptAstOrThrow -Path (Join-Path $script:RepoRoot 'scripts' $_)
+            $params = @($script:RecAst.ParamBlock.Parameters | ForEach-Object { [string]$_.Name.VariablePath.UserPath })
+            $script:HasDirectionPolicy = $params -contains 'DirectionPolicy'
+            $script:HasPruneMissing = $params -contains 'PruneMissing'
+            $script:DeclaredCount = $script:DestructiveBranchCount[$_]
+        }
+
+        It 'has a -PruneMissing branch (Class C -- no destructive branch -- is empty)' {
+            $script:HasPruneMissing | Should -BeTrue `
+                -Because 'every one of the 21 reconcilers can delete or revoke tenant state; if this ever fails, the class map needs a Class C'
+        }
+
+        It 'its declared gate count matches the class derivable from its parameters' {
+            $derived = if ($script:HasDirectionPolicy) { 2 } else { 1 }
+            $script:DeclaredCount | Should -Be $derived -Because (
+                "$_ declares -DirectionPolicy = $($script:HasDirectionPolicy), so it has $derived destructive branch(es) " +
+                "(overwrite + prune, or prune alone). The class map says $($script:DeclaredCount). " +
+                'A Class A script misclassified as Class B would expect one gate, get one gate, and ship its overwrite branch UNGUARDED.'
+            )
+        }
+    }
+}
+
 Describe 'ADR 0052 reference implementations: AST contract (not source text)' {
 
     # WHY THIS DESCRIBE IS AST-BASED, AND WHY THAT IS NOT PEDANTRY.
@@ -445,7 +636,26 @@ Describe 'ADR 0052 reference implementations: AST contract (not source text)' {
     # string literal never becomes an IfStatementAst condition. So every claim
     # below is made against parsed nodes, and each is proven to distinguish the
     # real script from a mutant (see the mutation matrix in PR #102).
+    #
+    # WHAT THIS DESCRIBE DOES NOT PROVE -- read before relying on it.
+    #
+    # These assertions prove the gate is WIRED (it exists, it is reached, it is
+    # keyed on a plan predicate, it aborts on decline, its suppressors trace to
+    # the operator's own switches). They are SYNTACTIC. They do NOT prove the
+    # gate is REACHED WITH A CORRECT PLAN: policy can still be laundered through
+    # a local variable, or through upstream mutation of the plan list itself,
+    # and this suite will stay green. Both shapes are named, with code, in the
+    # boundary note above the plan-keying assertion below -- B1 and B2. B2 is
+    # the NATURAL mistake, not an adversarial one, and it is what a PR-B reviewer
+    # should be looking for by eye.
+    #
+    # A guard is only as trustworthy as its stated boundary. This one's boundary
+    # is stated.
 
+    # The scripts gated SO FAR. PR-A gates four; PR-B appends the remaining 17.
+    # Each one's expected gate count is declared in $script:DestructiveBranchCount
+    # (see the file-level BeforeAll) -- adding a script here without declaring its
+    # class there is a hard failure, by design.
     Context 'on <_>' -ForEach @(
         'Deploy-Labels.ps1',
         'Deploy-FilePlan.ps1',
@@ -454,10 +664,20 @@ Describe 'ADR 0052 reference implementations: AST contract (not source text)' {
     ) {
 
         BeforeAll {
+            $script:ScriptName = $_
             $script:ScriptFile = Join-Path $script:RepoRoot 'scripts' $_
             $script:Text = Get-Content -LiteralPath $script:ScriptFile -Raw
             $script:Ast = Get-ScriptAstOrThrow -Path $script:ScriptFile
             $script:GateCalls = @(Get-GateCallAst -Ast $script:Ast)
+            $script:ExpectedGates = $script:DestructiveBranchCount[$_]
+        }
+
+        It 'has a declared destructive-branch class (Class A = 2 gates, Class B = 1)' {
+            # Fails loudly if PR-B gates a script without declaring how many
+            # destructive branches it has. The count assertions below are only
+            # meaningful because this one refuses to let the expectation default.
+            $script:ExpectedGates | Should -BeIn @(1, 2) `
+                -Because "'$($script:ScriptName)' must have an entry in `$script:DestructiveBranchCount -- state the class, do not infer it"
         }
 
         It 'declares ConfirmImpact = ''High'' in the real CmdletBinding attribute' {
@@ -475,19 +695,47 @@ Describe 'ADR 0052 reference implementations: AST contract (not source text)' {
                 -Because 'the gate must be the shared module, not re-inlined -- and a comment naming the module is not an import'
         }
 
-        It 'wires exactly 2 destructive gates as real command calls' {
-            # Every one of these four scripts has exactly two destructive
-            # branches: the overwrite and the prune. Not 1 (a branch is
-            # unguarded), not 0 (the gate was deleted -- which the old
-            # query-string regexes did not notice).
-            $script:GateCalls.Count | Should -Be 2 `
-                -Because 'both the overwrite branch and the -PruneMissing branch must call Assert-DestructiveOperationConfirmed'
+        It 'wires exactly one gate per destructive branch, as real command calls' {
+            # Class-aware: 2 for Class A (overwrite + prune), 1 for Class B
+            # (prune only). NOT `-BeGreaterThan 0` -- that would let a Class A
+            # script ship with only ONE of its two branches gated.
+            $script:GateCalls.Count | Should -Be $script:ExpectedGates `
+                -Because "$($script:ScriptName) has $($script:ExpectedGates) destructive branch(es); every one must call Assert-DestructiveOperationConfirmed"
         }
 
-        It 'binds -Query on both gates, one per destructive branch' {
+        It 'binds -Query on every gate, one per destructive branch' {
+            $expected = if ($script:ExpectedGates -eq 2) { @('overwriteQuery', 'pruneQuery') } else { @('pruneQuery') }
             $queries = @($script:GateCalls | ForEach-Object { Get-BoundQueryVariableName -GateCall $_ }) | Sort-Object
-            $queries | Should -Be @('overwriteQuery', 'pruneQuery') `
+            $queries | Should -Be $expected `
                 -Because 'each gate must name the objects it is about to destroy; an operator who cannot see what they are destroying is not really being asked'
+        }
+
+        # ---- B3: a wired gate that can never fire is not a gate ----
+        #
+        # Everything else in this Describe proves the gate is WIRED. None of it
+        # proves the gate CAN FIRE. A gate with `Force = $true` hard-bound in its
+        # argument table passes every other assertion here and prompts exactly
+        # never.
+        #
+        # That is not a contrived mutant. It is the shape of the ambient
+        # self-disarm ADR 0053 section 4 had to delete from Deploy-UnifiedCatalog
+        # and Deploy-UnifiedCatalogPolicies -- the one reconciler already at
+        # ConfirmImpact = 'High' was neutering itself. This repo has shipped a
+        # gate that looked correct and could not fire; it is not a hypothetical.
+        It 'binds each gate''s suppressors to the OPERATOR''s switches, not to constants' {
+            $script:GateCalls.Count | Should -Be $script:ExpectedGates `
+                -Because 'an assertion about "each gate" is vacuous if there are no gates'
+
+            foreach ($gate in $script:GateCalls) {
+                $bound = Test-GateSuppressorBinding -Ast $script:Ast -GateCall $gate
+                $line = $gate.Extent.StartLineNumber
+
+                $bound['Force'] | Should -BeTrue `
+                    -Because "the gate at line $line must bind -Force to the operator's `$Force switch. Bound to a constant (`Force = `$true`) the gate is wired, passes every other assertion in this file, and CAN NEVER PROMPT -- the ADR 0053 section 4 self-disarm shape."
+
+                $bound['IsWhatIf'] | Should -BeTrue `
+                    -Because "the gate at line $line must bind -IsWhatIf to `$WhatIfPreference. Hard-bound to `$true it never prompts; hard-bound to `$false a dry run blocks on input."
+            }
         }
 
         It 'aborts with ZERO tenant writes when the operator declines (each gate''s decline branch throws)' {
@@ -501,7 +749,7 @@ Describe 'ADR 0052 reference implementations: AST contract (not source text)' {
             # asserting nothing at all -- the same "green by absence" defect this
             # Describe exists to kill. Every gate-iterating It states its
             # population first.
-            $script:GateCalls.Count | Should -Be 2 -Because 'an assertion about "each gate" is vacuous if there are no gates'
+            $script:GateCalls.Count | Should -Be $script:ExpectedGates -Because 'an assertion about "each gate" is vacuous if there are no gates'
 
             foreach ($gate in $script:GateCalls) {
                 $throws = @(Get-GateDeclineThrow -GateCall $gate)
@@ -512,40 +760,75 @@ Describe 'ADR 0052 reference implementations: AST contract (not source text)' {
             }
         }
 
-        # ================== THE PLAN-KEYING INVARIANT (V4) ==================
+        # ============ THE PLAN-KEYING GUARD (V4) -- AND ITS BOUNDARY ============
         #
-        # THE permanent guard. PR-B replicates this gate into 17 more scripts,
-        # so this is the assertion standing between the repo and a reintroduced
-        # policy-keyed gate. It has to catch the CLASS, not one SPELLING.
+        # READ THIS BEFORE TRUSTING THIS ASSERTION. It is a PARTIAL guard, and
+        # knowing exactly where it stops is the difference between a safety net
+        # and a false sense of one.
         #
-        # The regex version pinned the literal
-        #     if ($DirectionPolicy -eq 'repo-wins' -and
-        # and was GREEN against all of these, every one of which reintroduces
-        # policy-keying:
-        #     if ($overwrites.Count -gt 0 -and $DirectionPolicy -eq 'repo-wins')  # reordered
-        #     if ($DirectionPolicy -eq "repo-wins" -and $overwrites.Count -gt 0)  # double-quoted
-        #     if ($DirectionPolicy -ne 'portal-wins' -and $overwrites.Count -gt 0) # negated
+        # WHAT IT CATCHES -- policy-keying expressed IN A GATE-GUARDING CONDITION.
+        # Structural, so it admits no spelling. Walk from each real gate call up
+        # through every `if` that guards it (any depth, entered via the BODY) and
+        # assert no such condition so much as MENTIONS the $DirectionPolicy
+        # variable. All of these die:
         #
-        # A guard that pins a spelling is a guard the next author routes around
-        # without ever knowing it was there.
+        #     if ($DirectionPolicy -eq 'repo-wins' -and $ow.Count -gt 0)   # the original
+        #     if ($ow.Count -gt 0 -and $DirectionPolicy -eq 'repo-wins')   # reordered
+        #     if ($DirectionPolicy -eq "repo-wins" -and $ow.Count -gt 0)   # double-quoted
+        #     if ($DirectionPolicy -ne 'portal-wins' -and $ow.Count -gt 0) # negated
+        #     if ($DirectionPolicy -eq 'repo-wins') { if ($ow.Count -gt 0) # outer nesting
         #
-        # The AST rule is about STRUCTURE and admits no spelling: walk from each
-        # real gate call up through every `if` that guards it (any depth, via the
-        # BODY), and assert none of those conditions so much as MENTIONS the
-        # $DirectionPolicy variable. Operator, quoting, operand order, negation
-        # and nesting are all irrelevant -- a VariableExpressionAst is a
-        # VariableExpressionAst.
+        # Operand order, quoting, negation, nesting depth: all irrelevant. A
+        # VariableExpressionAst is a VariableExpressionAst.
         #
-        # Measured on all four scripts: every gate-guarding condition is a pure
-        # plan predicate ($repoWinsOverwrites.Count -gt 0, $prunePlan.Count -gt 0,
-        # $PruneMissing.IsPresent), so the strict "no mention at any depth" form
-        # is achievable and is what ships.
+        # WHAT IT DOES **NOT** CATCH. Two shapes reintroduce policy-keying and
+        # pass this assertion -- and every other assertion in this file -- GREEN.
+        # Catching them statically needs data-flow analysis, which is out of
+        # scope for a Pester guard. So they are named here instead, because AN
+        # HONESTLY-LABELLED LIMITED GUARD IS FINE; A LIMITED GUARD SOLD AS
+        # COMPLETE IS NOT. PR-B's reviewers must look for these BY EYE.
+        #
+        #   B1 -- policy laundered through a LOCAL VARIABLE:
+        #
+        #       $isRepoWins = ($DirectionPolicy -eq 'repo-wins')
+        #       if ($isRepoWins -and $overwrites.Count -gt 0) { ...gate... }
+        #
+        #     The condition never names $DirectionPolicy, so this walk sees a
+        #     clean plan predicate.
+        #
+        #   B2 -- policy laundered through the PLAN LIST ITSELF, by emptying it
+        #     upstream. **THIS IS THE ONE THAT MATTERS, AND IT IS THE NATURAL
+        #     MISTAKE -- NOT AN ADVERSARIAL ONE.**
+        #
+        #       if ($DirectionPolicy -ne 'repo-wins') { $repoWinsOverwrites.Clear() }
+        #       ...
+        #       if ($repoWinsOverwrites.Count -gt 0) { ...gate... }   # pure plan predicate!
+        #
+        #     The gate condition IS plan-keyed -- genuinely, not cosmetically.
+        #     But the LIST is emptied under portal-wins, so the gate stays silent
+        #     while the writes proceed. Behaviourally identical to the original
+        #     bug, and invisible to every assertion here.
+        #
+        #     Why it is the NATURAL mistake: the old mental model was "the
+        #     overwrite list should only ever populate under repo-wins" -- which
+        #     is exactly what `if ($DirectionPolicy -eq 'repo-wins') {
+        #     $repoWinsOverwrites.Add(...) }` said in the pre-#83 scripts. An
+        #     author who reads "key the gate on the plan" and dutifully fixes the
+        #     list's POPULATION instead of the gate's KEYING writes B2 without
+        #     ever intending an evasion, and the whole hardened suite stays green.
+        #
+        # THE RULE THE PROSE CANNOT ENFORCE, stated for the human reader:
+        # the overwrite list must be populated from the PLAN and from nothing
+        # else -- every object the run will actually overwrite goes in it,
+        # whatever policy let it through -- and nothing may remove entries from
+        # it between population and the gate. If you find yourself reaching for
+        # $DirectionPolicy anywhere near that list, you are writing B2.
         It 'keys every gate on the PLAN -- no gate-guarding condition mentions $DirectionPolicy' {
             # NON-VACUITY GUARD (see the note on the decline-throw assertion).
             # Get-PolicyKeyedGuard walks outward FROM each gate call, so with
             # zero gates it returns zero offenders and this would pass green on a
             # script that has no gate at all. State the population first.
-            $script:GateCalls.Count | Should -Be 2 -Because 'a "no gate is policy-keyed" claim is vacuous if there are no gates'
+            $script:GateCalls.Count | Should -Be $script:ExpectedGates -Because 'a "no gate is policy-keyed" claim is vacuous if there are no gates'
 
             $offenders = @(Get-PolicyKeyedGuard -Ast $script:Ast)
 
