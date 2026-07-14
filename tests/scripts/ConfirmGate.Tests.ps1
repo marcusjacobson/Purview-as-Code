@@ -80,6 +80,154 @@ BeforeAll {
         return $stub
     }
 
+    # ---------------------------------------------------------------------
+    # AST helpers for the reference-implementation contract.
+    #
+    # These exist because SOURCE-TEXT ASSERTIONS ON THESE SCRIPTS ARE VACUOUS.
+    # The scripts' comments deliberately quote the anti-patterns they forbid
+    # ("KEY THE GATE ON THE PLAN, NOT ON THE POLICY", "ConfirmGate.psm1",
+    # "if ($DirectionPolicy -eq 'repo-wins' -and ...)"), so a regex over the
+    # file cannot distinguish the rule from a violation of it, nor an import
+    # from a mention of one. Prose cannot forge an AST node; that is the point.
+    # ---------------------------------------------------------------------
+
+    function Get-ScriptAstOrThrow {
+        param([Parameter(Mandatory)][string]$Path)
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+        if ($errors.Count -gt 0) {
+            throw ("Parse errors in {0}:`n{1}" -f $Path, (($errors | ForEach-Object { $_.Message }) -join "`n"))
+        }
+        return $ast
+    }
+
+    # The ConfirmImpact the RUNTIME sees: the named argument on the real
+    # [CmdletBinding()] attribute, not a mention of it in a comment.
+    function Get-ConfirmImpact {
+        param([Parameter(Mandatory)]$Ast)
+        $binding = $Ast.ParamBlock.Attributes |
+            Where-Object { $_ -is [System.Management.Automation.Language.AttributeAst] -and $_.TypeName.Name -eq 'CmdletBinding' } |
+            Select-Object -First 1
+        if (-not $binding) { return $null }
+        $named = $binding.NamedArguments | Where-Object { $_.ArgumentName -eq 'ConfirmImpact' } | Select-Object -First 1
+        if (-not $named) { return $null }
+        return [string]$named.Argument.Value
+    }
+
+    # Real invocations of the gate, as commands. A comment naming the function
+    # is not a CommandAst; neither is a string literal containing its name.
+    function Get-GateCallAst {
+        param([Parameter(Mandatory)]$Ast)
+        @($Ast.FindAll({
+                    param($n)
+                    $n -is [System.Management.Automation.Language.CommandAst] -and
+                    $n.GetCommandName() -eq 'Assert-DestructiveOperationConfirmed'
+                }, $true))
+    }
+
+    # A real `Import-Module ... ConfirmGate.psm1`. The path is matched against
+    # the extents of the command's own ELEMENTS, which are expression nodes --
+    # a comment can never be inside one.
+    function Get-ConfirmGateImportAst {
+        param([Parameter(Mandatory)]$Ast)
+        @($Ast.FindAll({
+                    param($n)
+                    $n -is [System.Management.Automation.Language.CommandAst] -and
+                    $n.GetCommandName() -eq 'Import-Module'
+                }, $true) | Where-Object {
+                @($_.CommandElements | Where-Object { $_.Extent.Text -match 'ConfirmGate\.psm1' }).Count -gt 0
+            })
+    }
+
+    # The variable name bound to the gate's -Query parameter, e.g. 'overwriteQuery'.
+    function Get-BoundQueryVariableName {
+        param([Parameter(Mandatory)]$GateCall)
+        $elements = @($GateCall.CommandElements)
+        for ($i = 0; $i -lt $elements.Count; $i++) {
+            $el = $elements[$i]
+            if ($el -is [System.Management.Automation.Language.CommandParameterAst] -and $el.ParameterName -eq 'Query') {
+                # `-Query $overwriteQuery` -- the argument is either attached to
+                # the parameter node or is the next element.
+                $arg = if ($null -ne $el.Argument) { $el.Argument } elseif ($i + 1 -lt $elements.Count) { $elements[$i + 1] } else { $null }
+                if ($arg -is [System.Management.Automation.Language.VariableExpressionAst]) {
+                    return [string]$arg.VariablePath.UserPath
+                }
+                return $null
+            }
+        }
+        return $null
+    }
+
+    # Walk from a gate call up to the `if` whose CONDITION it sits in -- that is
+    # the `if (-not (Assert-DestructiveOperationConfirmed ...))` decline branch --
+    # and return the throw statements in that if's BODY. Proves the decline
+    # ABORTS rather than falling through into a half-applied state, and proves it
+    # against the WIRING, not against a `throw '...'` literal sitting anywhere in
+    # the file.
+    function Get-GateDeclineThrow {
+        param([Parameter(Mandatory)]$GateCall)
+        $node = $GateCall
+        while ($null -ne $node.Parent) {
+            $parent = $node.Parent
+            if ($parent -is [System.Management.Automation.Language.IfStatementAst]) {
+                foreach ($clause in $parent.Clauses) {
+                    $inCondition = @($clause.Item1.FindAll({
+                                param($n) [object]::ReferenceEquals($n, $GateCall)
+                            }, $true)).Count -gt 0
+                    if ($inCondition) {
+                        return @($clause.Item2.FindAll({
+                                    param($n) $n -is [System.Management.Automation.Language.ThrowStatementAst]
+                                }, $true))
+                    }
+                }
+            }
+            $node = $parent
+        }
+        return @()
+    }
+
+    # THE V4 GUARD, and the one PR-B leans on.
+    #
+    # For every real gate call, walk up through EVERY `if` that guards it -- at
+    # any nesting depth, entered via the BODY -- and flag any whose condition
+    # mentions the $DirectionPolicy variable at all.
+    #
+    # Structural, so it admits no spelling. Reordered operands, double quotes,
+    # `-ne 'portal-wins'` instead of `-eq 'repo-wins'`, or hiding the policy test
+    # in an outer `if` are all caught identically: a VariableExpressionAst named
+    # DirectionPolicy anywhere in a gate-guarding condition is the finding.
+    #
+    # Returns the offending condition texts (empty array = compliant).
+    function Get-PolicyKeyedGuard {
+        param([Parameter(Mandatory)]$Ast)
+        $offenders = [System.Collections.Generic.List[string]]::new()
+        foreach ($gate in (Get-GateCallAst -Ast $Ast)) {
+            $node = $gate
+            while ($null -ne $node.Parent) {
+                $parent = $node.Parent
+                if ($parent -is [System.Management.Automation.Language.IfStatementAst]) {
+                    foreach ($clause in $parent.Clauses) {
+                        # Only conditions guarding the BODY the gate lives in.
+                        # The `if (-not (gate))` decline branch holds the gate in
+                        # its CONDITION, not its body, and is correctly ignored.
+                        if (-not [object]::ReferenceEquals($clause.Item2, $node)) { continue }
+                        $policyRefs = @($clause.Item1.FindAll({
+                                    param($n)
+                                    $n -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                                    $n.VariablePath.UserPath -eq 'DirectionPolicy'
+                                }, $true))
+                        if ($policyRefs.Count -gt 0) {
+                            $offenders.Add(($clause.Item1.Extent.Text -replace '\s+', ' '))
+                        }
+                    }
+                }
+                $node = $parent
+            }
+        }
+        @($offenders | Select-Object -Unique)
+    }
+
     # Default gate arguments: no suppressor set, so the gate prompts.
     function Get-GateArgTable {
         param(
@@ -273,12 +421,31 @@ Describe 'ConfirmGate: contract check on -Cmdlet' {
     }
 }
 
-Describe 'ADR 0052 reference implementations: source-text contract' {
+Describe 'ADR 0052 reference implementations: AST contract (not source text)' {
 
-    # Deploy-UnifiedCatalogPolicies.ps1 joins the reference set in PR-A of #83:
-    # it is the ONE script where a policy-keyed gate was reachably vacuous (its
-    # hardcoded -HasDrift $false meant portal-wins never skipped), so it is the
-    # script that motivates the plan-keying rule and the one that must prove it.
+    # WHY THIS DESCRIBE IS AST-BASED, AND WHY THAT IS NOT PEDANTRY.
+    #
+    # Every assertion here was originally a source-text regex, and the regexes
+    # were VACUOUS. Two independent instances, both caught, both worth recording
+    # because the failure mode is the exact one this whole PR exists to remove:
+    #
+    #   1. `Should -Match 'This run will OVERWRITE'` is case-INSENSITIVE, and it
+    #      passed against pre-fix Deploy-Labels.ps1 -- a script with NO plan-keyed
+    #      gate at all -- by matching the lowercase COMMENT on line 1804.
+    #
+    #   2. `Should -Match 'ConfirmGate\.psm1'` (the "imports the module" check)
+    #      passed with the real `Import-Module` line DELETED, because THIS PR
+    #      added explanatory comments that mention `ConfirmGate.psm1` by name.
+    #      The PR's own prose made its own guard vacuous.
+    #
+    # A file is not its text. `Should -Match` cannot tell code from a comment,
+    # and this repo's comments deliberately quote the anti-pattern they forbid.
+    #
+    # PROSE CANNOT FORGE AN AST NODE. A comment never becomes a CommandAst; a
+    # string literal never becomes an IfStatementAst condition. So every claim
+    # below is made against parsed nodes, and each is proven to distinguish the
+    # real script from a mutant (see the mutation matrix in PR #102).
+
     Context 'on <_>' -ForEach @(
         'Deploy-Labels.ps1',
         'Deploy-FilePlan.ps1',
@@ -287,72 +454,120 @@ Describe 'ADR 0052 reference implementations: source-text contract' {
     ) {
 
         BeforeAll {
-            $script:Text = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'scripts' $_) -Raw
+            $script:ScriptFile = Join-Path $script:RepoRoot 'scripts' $_
+            $script:Text = Get-Content -LiteralPath $script:ScriptFile -Raw
+            $script:Ast = Get-ScriptAstOrThrow -Path $script:ScriptFile
+            $script:GateCalls = @(Get-GateCallAst -Ast $script:Ast)
         }
 
-        # Whitespace-tolerant: the on-disk spelling has spaces around the '='.
-        # A pattern without \s* returns zero matches and a false sense of safety.
-        It 'declares ConfirmImpact = ''High''' {
-            $script:Text | Should -Match "ConfirmImpact\s*=\s*'High'"
+        It 'declares ConfirmImpact = ''High'' in the real CmdletBinding attribute' {
+            # AST, not regex: these scripts carry comments that discuss
+            # ConfirmImpact = 'High' / 'Medium' in prose, so a text match proves
+            # nothing about the attribute the runtime actually sees.
+            Get-ConfirmImpact -Ast $script:Ast | Should -BeExactly 'High' `
+                -Because 'ShouldProcess prompts only when ConfirmImpact >= $ConfirmPreference (default High); Medium is the issue #85 defect'
         }
 
-        It 'does NOT declare ConfirmImpact = ''Medium'' (the issue #85 defect)' {
-            $script:Text | Should -Not -Match "ConfirmImpact\s*=\s*'Medium'"
+        It 'imports ConfirmGate.psm1 via a real Import-Module command (not a mention in a comment)' {
+            # V1: the regex version of this assertion passed with the real
+            # Import-Module line deleted, satisfied by this PR's own comments.
+            @(Get-ConfirmGateImportAst -Ast $script:Ast).Count | Should -BeGreaterThan 0 `
+                -Because 'the gate must be the shared module, not re-inlined -- and a comment naming the module is not an import'
         }
 
-        It 'imports the shared ConfirmGate.psm1 module (does not re-inline the gate)' {
-            $script:Text | Should -Match 'ConfirmGate\.psm1'
+        It 'wires exactly 2 destructive gates as real command calls' {
+            # Every one of these four scripts has exactly two destructive
+            # branches: the overwrite and the prune. Not 1 (a branch is
+            # unguarded), not 0 (the gate was deleted -- which the old
+            # query-string regexes did not notice).
+            $script:GateCalls.Count | Should -Be 2 `
+                -Because 'both the overwrite branch and the -PruneMissing branch must call Assert-DestructiveOperationConfirmed'
         }
 
-        # -CMatch, not -Match, and anchored to the QUERY ASSIGNMENT -- both
-        # deliberately.
+        It 'binds -Query on both gates, one per destructive branch' {
+            $queries = @($script:GateCalls | ForEach-Object { Get-BoundQueryVariableName -GateCall $_ }) | Sort-Object
+            $queries | Should -Be @('overwriteQuery', 'pruneQuery') `
+                -Because 'each gate must name the objects it is about to destroy; an operator who cannot see what they are destroying is not really being asked'
+        }
+
+        It 'aborts with ZERO tenant writes when the operator declines (each gate''s decline branch throws)' {
+            # V3: the regex version asserted only that a `throw '...'` LITERAL
+            # existed somewhere in the file. It stayed green with both gate calls
+            # deleted. This walks from each real gate CommandAst to the `if`
+            # whose CONDITION it sits in, and asserts that if's BODY throws.
+            #
+            # NON-VACUITY GUARD. Without this line the foreach below iterates an
+            # empty set when a script has NO gates, and the It passes green while
+            # asserting nothing at all -- the same "green by absence" defect this
+            # Describe exists to kill. Every gate-iterating It states its
+            # population first.
+            $script:GateCalls.Count | Should -Be 2 -Because 'an assertion about "each gate" is vacuous if there are no gates'
+
+            foreach ($gate in $script:GateCalls) {
+                $throws = @(Get-GateDeclineThrow -GateCall $gate)
+                $throws.Count | Should -BeGreaterThan 0 `
+                    -Because "the gate at line $($gate.Extent.StartLineNumber) must abort the run on decline, not fall through into a half-applied state"
+                ($throws | ForEach-Object { $_.Extent.Text }) -join ' ' |
+                    Should -Match 'No tenant writes were made'
+            }
+        }
+
+        # ================== THE PLAN-KEYING INVARIANT (V4) ==================
         #
-        # `Should -Match` is case-INSENSITIVE. The first cut of this assertion
-        # was `Should -Match 'This run will OVERWRITE'`, and it passed against
-        # pre-fix Deploy-Labels.ps1 -- which has NO plan-keyed gate at all --
-        # because line 1804 of that file is the lowercase COMMENT
-        # "# this run will overwrite, with the drifted field set, per".
-        # The assertion was green by matching prose, while the gate it claimed
-        # to check did not exist.
+        # THE permanent guard. PR-B replicates this gate into 17 more scripts,
+        # so this is the assertion standing between the repo and a reintroduced
+        # policy-keyed gate. It has to catch the CLASS, not one SPELLING.
         #
-        # That is precisely the vacuous-guard failure mode this whole change
-        # exists to remove, reproduced inside its own test suite. Recorded here
-        # rather than quietly fixed, because the lesson generalises: AN
-        # ASSERTION THAT CAN BE SATISFIED BY A COMMENT IS NOT AN ASSERTION ABOUT
-        # THE CODE. Anchoring on `$overwriteQuery = "` and matching case-
-        # sensitively makes prose structurally incapable of satisfying it.
-        It 'gates the -PruneMissing destructive branch via Assert-DestructiveOperationConfirmed' {
-            $script:Text | Should -CMatch '\$pruneQuery\s*=\s*"-PruneMissing will (DELETE|REVOKE)'
+        # The regex version pinned the literal
+        #     if ($DirectionPolicy -eq 'repo-wins' -and
+        # and was GREEN against all of these, every one of which reintroduces
+        # policy-keying:
+        #     if ($overwrites.Count -gt 0 -and $DirectionPolicy -eq 'repo-wins')  # reordered
+        #     if ($DirectionPolicy -eq "repo-wins" -and $overwrites.Count -gt 0)  # double-quoted
+        #     if ($DirectionPolicy -ne 'portal-wins' -and $overwrites.Count -gt 0) # negated
+        #
+        # A guard that pins a spelling is a guard the next author routes around
+        # without ever knowing it was there.
+        #
+        # The AST rule is about STRUCTURE and admits no spelling: walk from each
+        # real gate call up through every `if` that guards it (any depth, via the
+        # BODY), and assert none of those conditions so much as MENTIONS the
+        # $DirectionPolicy variable. Operator, quoting, operand order, negation
+        # and nesting are all irrelevant -- a VariableExpressionAst is a
+        # VariableExpressionAst.
+        #
+        # Measured on all four scripts: every gate-guarding condition is a pure
+        # plan predicate ($repoWinsOverwrites.Count -gt 0, $prunePlan.Count -gt 0,
+        # $PruneMissing.IsPresent), so the strict "no mention at any depth" form
+        # is achievable and is what ships.
+        It 'keys every gate on the PLAN -- no gate-guarding condition mentions $DirectionPolicy' {
+            # NON-VACUITY GUARD (see the note on the decline-throw assertion).
+            # Get-PolicyKeyedGuard walks outward FROM each gate call, so with
+            # zero gates it returns zero offenders and this would pass green on a
+            # script that has no gate at all. State the population first.
+            $script:GateCalls.Count | Should -Be 2 -Because 'a "no gate is policy-keyed" claim is vacuous if there are no gates'
+
+            $offenders = @(Get-PolicyKeyedGuard -Ast $script:Ast)
+
+            $offenders.Count | Should -Be 0 -Because (
+                'the gate must be keyed on the plan (the set of objects that will actually be destroyed), never on $DirectionPolicy. ' +
+                'The policy is a PROXY for "will this overwrite?" and a fallible one: Deploy-UnifiedCatalogPolicies passed -HasDrift $false, ' +
+                'so portal-wins never skipped, the policy conjunct was false, THE GATE NEVER FIRED, and a permissions surface was overwritten ' +
+                'with no confirmation. Offending condition(s): ' + (($offenders | ForEach-Object { "`"$_`"" }) -join '; ')
+            )
         }
 
-        It 'gates the overwrite branch via Assert-DestructiveOperationConfirmed' {
+        # Content checks on the prompt text. These are deliberately anchored to
+        # the QUERY ASSIGNMENT and matched CASE-SENSITIVELY (-CMatch), so a
+        # lowercase comment cannot satisfy them -- see the header note. They
+        # assert what the operator READS; the AST assertions above assert that
+        # the gate is WIRED. Both are needed and neither substitutes.
+        It 'the overwrite query names the count and the irreversible effect' {
             $script:Text | Should -CMatch '\$overwriteQuery\s*=\s*"This run will OVERWRITE'
         }
 
-        It 'aborts the run when the operator declines (does not partially apply)' {
-            $script:Text | Should -CMatch "throw 'Aborted by operator at the .* confirmation gate \(ADR 0052\)"
-        }
-
-        It 'uses ShouldContinue for the destructive gate, not ShouldProcess' {
-            $script:Text | Should -Match 'Assert-DestructiveOperationConfirmed'
-        }
-
-        # ---- The plan-keying invariant, asserted on source text ----
-        # RED against the pre-#83 reference keying, which every one of these
-        # four scripts carried:
-        #     if ($DirectionPolicy -eq 'repo-wins' -and $overwrites.Count -gt 0)
-        # The policy conjunct makes the gate's firing depend on $DirectionPolicy
-        # -- a PROXY for "will this overwrite?" -- rather than on the plan, which
-        # is ground truth. Where the proxy is wrong (Deploy-UnifiedCatalogPolicies
-        # pre-F4) the gate sits silent while the overwrite proceeds.
-        It 'does NOT key any gate on $DirectionPolicy (plan-keying, not policy-keying)' {
-            # Strip comments first: ConfirmGate.psm1's rule and these scripts'
-            # explanatory comments legitimately quote the anti-pattern.
-            $code = ($script:Text -split "\r?\n" |
-                Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
-
-            $code | Should -Not -Match "if\s*\(\s*\`$DirectionPolicy\s*-eq\s*'repo-wins'\s*-and" `
-                -Because 'the gate must be keyed on the plan ($overwrites.Count -gt 0), never on $DirectionPolicy -- a policy-keyed gate passes vacuously wherever portal-wins fails to skip'
+        It 'the prune query names the count and the irreversible effect' {
+            $script:Text | Should -CMatch '\$pruneQuery\s*=\s*"-PruneMissing will (DELETE|REVOKE)'
         }
     }
 }
