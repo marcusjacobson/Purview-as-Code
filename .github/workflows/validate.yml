@@ -46,6 +46,50 @@ jobs:
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
           Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning -EnableExit
 
+  identifier-residue:
+    name: Identifier residual scan (no real tenant identifiers)
+    runs-on: ubuntu-latest
+    # The IDENTIFIER-shaped residual scan (ADR 0055, which amends ADR 0046).
+    #
+    # ADR 0046 shipped a TOKEN-shaped scan (contoso|onmicrosoft.com|OWNER-PLACEHOLDER)
+    # and claimed "any remaining match is a genuine missed tenant surface". That claim
+    # was unsound: a token-shaped scan cannot verify the ABSENCE of identifier-shaped
+    # data, because a raw GUID contains no token. Real Entra group object IDs sat in
+    # ACTIVE desired-state lists in this PUBLIC template repo and the ADR 0046 scan
+    # could not see them -- both because data-plane/ was blanket-excluded and because
+    # the pattern could never have matched a GUID anyway.
+    #
+    # This runs on EVERY PR, not only during operator onboarding. A scan that only
+    # runs at onboarding cannot catch a regression -- and the disclosure proves the
+    # point: the object IDs entered via a scaffold commit and nothing looked at them
+    # again for weeks.
+    #
+    # FAIL CLOSED: every non-zero GUID is a Finding unless an identifierScan rule in
+    # .github/agents/tenant-placeholders.yaml explicitly acquits it. There are no path
+    # exclusions. A path exclusion is what caused the disclosure.
+    #
+    # Reference: docs/adr/0055-identifier-shaped-residual-scan.md
+    # Reference: docs/adr/0023-identifier-resolution.md
+    # Reference: https://learn.microsoft.com/en-us/style-guide/a-z-word-list-term-collections/term-collections/placeholder-examples
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The scan enumerates tracked files with `git ls-files`; a shallow
+          # checkout is sufficient. Full history is NOT needed (and history is
+          # the separate purge item).
+          fetch-depth: 1
+      - name: Install powershell-yaml
+        shell: pwsh
+        run: Install-Module powershell-yaml -Force -Scope CurrentUser
+      - name: Test-IdentifierResidue
+        shell: pwsh
+        run: |
+          $rows = ./scripts/Test-IdentifierResidue.ps1
+          if ($rows) { $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host }
+          # The script exits 1 on any Finding and emits ::error:: annotations
+          # naming the file, the line, and the remediation. Surface its exit code.
+          exit $LASTEXITCODE
+
   pester:
     name: Pester unit tests
     runs-on: windows-latest
