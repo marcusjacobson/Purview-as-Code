@@ -183,7 +183,12 @@ Describe 'Test-IdentifierResidue — acquittal rules' {
     It 'acquits a catalog GUID under an allow-listed key, and then anywhere else in the repo' {
         $repo = New-FixtureRepo
         try {
-            $sit = '11111111-2222-3333-4444-555555555555'
+            # Minted at run time, exactly like the fail-closed plants: a value the
+            # allow-list has never seen, so the ONLY thing that can acquit it is the
+            # catalogKeys derivation under test. A literal here would (a) be a GUID
+            # in a tracked source file that the repo scan must then itself acquit,
+            # and (b) weaken the test if it happened to match a synthetic shape.
+            $sit = [guid]::NewGuid().ToString()
             # Declared under sit-catalog.yaml `id:` — the derived value set.
             Set-FixtureFile -Root $repo -RelativePath 'data-plane/classifications/sit-catalog.yaml' `
                 -Content "sits:`n  - name: Example SIT`n    id: $sit`n"
@@ -273,6 +278,42 @@ Describe 'Test-IdentifierResidue — FAIL CLOSED (the contract that decides whet
             Set-FixtureFile -Root $repo -RelativePath 'docs/runbooks/thing.md' -Content "Run against group ``$oid``.`n"
             $r = Invoke-Scan -Root $repo
             $r.ExitCode | Should -Be 1
+        }
+        finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'FAILS on an object ID in an UNTRACKED (not yet staged) file' {
+        # Regression guard. The first cut of this scanner enumerated `git ls-files`
+        # only, so a brand-new file was invisible until it was staged. A contributor
+        # could write a file holding a real object ID, run the scan, be told PASS,
+        # commit, and discover the leak only in CI. A local PASS that a later commit
+        # turns into a FAIL is worse than no local run, because it is trusted.
+        # (This is not hypothetical: it is exactly how this scanner's own test file
+        # slipped past its own local run and was caught by CI.)
+        $repo = New-FixtureRepo
+        try {
+            $oid = [guid]::NewGuid().ToString()
+            New-Item -ItemType Directory -Path (Join-Path $repo 'data-plane') -Force | Out-Null
+            $full = Join-Path $repo 'data-plane/never-staged.yaml'
+            Set-Content -LiteralPath $full -Value "members:`n  - $oid`n" -NoNewline   # NOT git add-ed
+            $r = Invoke-Scan -Root $repo
+            $r.ExitCode | Should -Be 1
+            $r.Findings.Count | Should -Be 1
+            $r.Findings[0].File | Should -Be 'data-plane/never-staged.yaml'
+        }
+        finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'does NOT scan gitignored files (they never reach the remote; tenant exports land there)' {
+        $repo = New-FixtureRepo
+        try {
+            $oid = [guid]::NewGuid().ToString()
+            Set-FixtureFile -Root $repo -RelativePath '.gitignore' -Content "exports/`n"
+            New-Item -ItemType Directory -Path (Join-Path $repo 'exports') -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $repo 'exports/tenant-dump.yaml') -Value "members:`n  - $oid`n" -NoNewline
+            $r = Invoke-Scan -Root $repo
+            $r.ExitCode | Should -Be 0
+            $r.Findings.Count | Should -Be 0
         }
         finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
     }

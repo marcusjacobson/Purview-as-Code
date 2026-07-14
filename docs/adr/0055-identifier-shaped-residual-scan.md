@@ -139,11 +139,21 @@ The tempting move is to file them under `microsoftConstants` and go green. **Tha
 
 A quarantine that can be extended silently is an escape hatch. This one cannot be.
 
-### 7. It runs on every PR, because an onboarding-only scan cannot catch a regression
+### 7. The scan reads tracked **and untracked-not-ignored** files — and the reason is the same mistake, one level down
+
+The first cut enumerated `git ls-files` only. That is defensible on the threat model ("what is committed is what leaks") and it is **wrong in practice**, because it makes a brand-new file invisible until it is staged. A contributor writes a file holding a real object ID, runs the scan, is told **PASS**, commits — and finds out in CI.
+
+**A local PASS that a later commit turns into a FAIL is worse than no local run at all, because it is trusted.**
+
+This is not a hypothetical, and it is too instructive to leave out: **this scanner's own test file slipped past this scanner's own local run** for exactly this reason. It was untracked, so `git ls-files` did not list it, so the scan did not read it, so it reported clean — and CI failed on the first push. The scan was, for one commit, blind in precisely the way this ADR was written to condemn: *it could not see the thing it was checking.* The fix is `git ls-files` **+** `git ls-files --others --exclude-standard`, and a Pester test now pins it.
+
+Gitignored files stay out, deliberately: they never reach the remote, and they are where local tenant exports legitimately land ([ADR 0021](0021-dspm-content-explorer-cadence.md)'s exporter artifact directory).
+
+### 8. It runs on every PR, because an onboarding-only scan cannot catch a regression
 
 The ADR 0046 scan ran only in the `@operator-tenant` Step 6 onboarding flow. The object IDs entered via a scaffold commit and **nothing looked at them again**. The `identifier-residue` job in [`validate.yml`](../../.github/workflows/validate.yml) runs on every pull request and every push to `main`. The manifest gains the identifier pass too, so the kickoff wizard's Step 6 inherits it — but CI, not onboarding, is where the control actually lives.
 
-### 8. The shipped data is tested, not just the code that reads it
+### 9. The shipped data is tested, not just the code that reads it
 
 [`tests/data-plane/ShippedDesiredState.Tests.ps1`](../../tests/data-plane/ShippedDesiredState.Tests.ps1) is the first test in this repo to load a **shipped** `data-plane/**` YAML. It asserts:
 
@@ -167,7 +177,7 @@ The ADR 0046 scan ran only in the `@operator-tenant` Step 6 onboarding flow. The
 - **The allow-list is a maintained artefact.** A new Microsoft constant, or a new catalog file, needs a manifest entry with a name and a citation, or CI goes red. This is the cost, it is deliberate, and it is bounded: 10 value entries and 4 `(file, key)` pairs cover ~385 GUIDs.
 - **A new SIT-bearing data-plane file needs a `catalogKeys` entry.** The failure is loud, the message names the fix, and adding a `(file, key)` pair is a reviewable one-line diff.
 - **Test fixtures must use the reserved synthetic namespace.** Pasting a GUID from a real tenant into a fixture now fails the build. That is the feature.
-- **A tailored spin-off that adopts role groups must edit `ShippedDesiredState.Tests.ps1`.** Stated in Decision 8; intended, not incidental.
+- **A tailored spin-off that adopts role groups must edit `ShippedDesiredState.Tests.ps1`.** Stated in Decision 9; intended, not incidental.
 - **The scan is O(tracked files).** ~2s locally on this repo. Not a concern; noted so nobody has to re-measure.
 
 **Security posture.** Upholds [`security.instructions.md`](../../.github/instructions/security.instructions.md) #1 (no secrets/real identifiers in source) by making it **enforceable** rather than aspirational — the first time any mechanism in this repo has verified it. Object IDs are identifiers, not credentials: there is nothing to rotate, and this ADR does not pretend otherwise. What they are is **reconnaissance-grade tenant topology** in a public repo — they disclose which privileged groups exist and which tenant-wide roles they hold — which is why the control matters even though the incident has no rotation story. The scanner is read-only, makes no tenant calls, needs no credential, and **redacts every identifier it reports to its first 8 hex characters**, because CI logs on a public repo are public and a scanner that publishes the leak it found would be self-defeating.

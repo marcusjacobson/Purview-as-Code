@@ -192,19 +192,45 @@ function Get-Sha256Hex {
 }
 
 function Get-ScannedFileList {
+    <#
+        .SYNOPSIS
+            Enumerate the files to scan.
+
+        .DESCRIPTION
+            Working tree: tracked files PLUS untracked-but-not-ignored files.
+
+            The untracked half matters and was learned the hard way. A first cut
+            scanned `git ls-files` only, so a brand-new file was invisible until it
+            was staged — a contributor could write a file holding a real object ID,
+            run the scan, be told PASS, commit, and only then discover the leak in
+            CI. A local PASS that a later commit turns into a FAIL is worse than no
+            local run at all, because it is trusted. Untracked-not-ignored is what
+            "about to be committed" actually means.
+
+            Gitignored files are excluded on purpose: they never reach the remote,
+            and they are where local tenant exports legitimately land (ADR 0021's
+            exporter artifact directory).
+
+            At a ref (-Ref), only the committed tree exists and the distinction is
+            meaningless.
+    #>
     param([string]$Root, [string]$AtRef)
     Push-Location $Root
     try {
         if ([string]::IsNullOrWhiteSpace($AtRef)) {
-            $out = & git ls-files
+            $tracked = & git ls-files
+            if ($LASTEXITCODE -ne 0) { throw "git ls-files failed (exit $LASTEXITCODE)." }
+            $untracked = & git ls-files --others --exclude-standard
+            if ($LASTEXITCODE -ne 0) { throw "git ls-files --others failed (exit $LASTEXITCODE)." }
+            $out = @($tracked) + @($untracked)
         }
         else {
             $out = & git ls-tree -r --name-only $AtRef
+            if ($LASTEXITCODE -ne 0) {
+                throw "git ls-tree failed (exit $LASTEXITCODE) for ref '$AtRef'."
+            }
         }
-        if ($LASTEXITCODE -ne 0) {
-            throw "git enumeration failed (exit $LASTEXITCODE) for ref '$AtRef'."
-        }
-        return @($out | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        return @($out | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
     }
     finally {
         Pop-Location
