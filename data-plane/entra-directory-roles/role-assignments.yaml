@@ -94,10 +94,13 @@
 #                `scripts/Grant-EntraDirectoryRole.ps1`. User UPNs and
 #                individual user object IDs are intentionally rejected per
 #                `.github/instructions/security.instructions.md` rule #4
-#                (least privilege — assign to groups, not users). Empty
-#                list is valid and means "this directory role should have
-#                zero declarative assignments at the requested scope"; the
-#                reconciler will remove any drift.
+#                (least privilege — assign to groups, not users). An empty
+#                list is valid but is NOT a safe default: it means "this
+#                directory role should have zero declarative assignments at
+#                the requested scope", so under `-Apply -PruneMissing` the
+#                reconciler revokes every existing tenant assignment for the
+#                role. To leave a role untouched, omit the row entirely
+#                rather than listing it with `members: []`.
 #
 # Authentication note:
 #   The reconciler authenticates to Microsoft Graph using the data-plane
@@ -130,30 +133,20 @@
 #     members:
 #       - 00000000-0000-0000-0000-000000000000   # Entra group OID for the IP Admins group (isAssignableToRole=true)
 
-# Default steady state is an empty list.
-# Add one or more entries using the shape above, run the reconciler, and
-# review the drift report before merging.
-directoryRoles:
-  - name: Compliance Administrator
-    templateId: 17315797-102d-40b4-93e0-432062caca18
-    description: Lab admin group for Compliance Administrator in contoso.onmicrosoft.com. <REDACTED-GROUP> is the lab owner's PIM-for-Groups break-glass group; user-to-group membership is activated via PIM and is out of scope for this file.
-    scope: /
-    members:
-      - 00000000-0000-0000-0000-000000000000   # <REDACTED-GROUP> (isAssignableToRole=true)
-      - 00000000-0000-0000-0000-000000000000   # <REDACTED-GROUP> (isAssignableToRole=true; PIM-for-Groups)
-      - 00000000-0000-0000-0000-000000000000   # sg-purview-data-plane-compliance-admin (isAssignableToRole=true; wraps gh-oidc-purview-data-plane SP per #410)
-
-  - name: Compliance Data Administrator
-    templateId: e6d1a23a-da11-4be4-9570-befc86d067a7
-    description: Lab admin group for Compliance Data Administrator in contoso.onmicrosoft.com. <REDACTED-GROUP> is the lab owner's PIM-for-Groups break-glass group; user-to-group membership is activated via PIM and is out of scope for this file.
-    scope: /
-    members:
-      - 00000000-0000-0000-0000-000000000000   # <REDACTED-GROUP> (isAssignableToRole=true)
-      - 00000000-0000-0000-0000-000000000000   # <REDACTED-GROUP> (isAssignableToRole=true; PIM-for-Groups)
-
-  - name: Information Protection Administrator
-    templateId: 7495fdc4-34c4-4d15-a289-98788ce399fd
-    description: Lab admin group for Information Protection Administrator in contoso.onmicrosoft.com. Tenant exposes this role under the legacy displayName 'Azure Information Protection Administrator'; templateId resolution is required.
-    scope: /
-    members:
-      - 00000000-0000-0000-0000-000000000000   # <REDACTED-GROUP> (isAssignableToRole=true)
+# Default steady state is an empty list — the template ships it empty and it
+# is a total no-op: `Deploy-EntraDirectoryRoles.ps1` short-circuits before it
+# reads or writes a single directory-role assignment when this list is empty.
+#
+# Do NOT instead list a role with `members: []` or with the zero-GUID
+# placeholder as a "safe" default. Neither is safe:
+#   * `members: []` on a LISTED role means "this role must have zero
+#     assignments" — under `-Apply -PruneMissing` the reconciler revokes
+#     every existing tenant assignment for that role.
+#   * The zero-GUID placeholder on a LISTED role fails the
+#     `GET /groups/{id}` role-assignable probe, is dropped from the
+#     validated member set, and lands in the same revoke-everything state.
+# "Not listed" is the only shape that means "not managed".
+#
+# To adopt a role: run `-ExportCurrentState` first (mandatory first-run
+# bootstrap, see above), review the drift report, then merge.
+directoryRoles: []
