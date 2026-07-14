@@ -196,7 +196,7 @@
     Name / Reason. Suitable for capture to `$GITHUB_STEP_SUMMARY` or
     a file. No credential material is printed.
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Apply')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -694,6 +694,15 @@ Import-Module $module -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so neither destructive branch (repo-wins
+# overwrite, -PruneMissing delete) can be entered unattended from a local
+# terminal.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -969,6 +978,15 @@ try {
     # the comma-joined drifted-field set, matching the per-object
     # shape proven in the sibling Deploy-*.ps1 reconcilers.
     # Reference: docs/adr/0029-source-of-truth-direction-policy.md
+
+    # ADR 0052: every policy and rule whose tenant fields this run WILL
+    # overwrite. ONE list across both passes -- policies and rules are written
+    # in the same run, so the operator is entitled to see the whole blast
+    # radius before answering once. Constructed OUTSIDE the policy test below
+    # so the gate can read .Count on it unconditionally -- under `audit` the
+    # pass never runs, the list stays empty, and the gate stays silent.
+    $repoWinsOverwrites = New-Object 'System.Collections.Generic.List[string]'
+
     if ($DirectionPolicy -ne 'audit') {
         $skipDecisions = New-Object 'System.Collections.Generic.List[object]'
 
@@ -993,6 +1011,12 @@ try {
             }
             $fieldsText = ($row.Reason -replace '^Drift in: ', '')
             Write-Warning ("repo-wins overwriting tenant on retention policy '{0}' fields: {1}" -f $displayName, $fieldsText)
+            # Every Update row that survived Resolve-DirectionPolicyAction's Skip
+            # decision WILL be Set-, whatever policy let it through. The ADR 0052
+            # gate is keyed on this list -- the plan -- and never on
+            # $DirectionPolicy. See ConfirmGate.psm1 "KEY THE GATE ON THE PLAN,
+            # NOT ON THE POLICY".
+            $repoWinsOverwrites.Add(("policy '{0}'" -f $displayName)) | Out-Null
         }
 
         # Pass 2: rules. SkipNames is matched against rule.Name (NOT
@@ -1018,6 +1042,9 @@ try {
             }
             $fieldsText = [string]$row.Fields
             Write-Warning ("repo-wins overwriting tenant on retention rule '{0}' fields: {1}" -f $row.Name, $fieldsText)
+            # Same rule as the policy pass above: unconditional on the survivor
+            # path, never keyed on $DirectionPolicy.
+            $repoWinsOverwrites.Add(("rule '{0}'" -f $row.Name)) | Out-Null
         }
 
         # Machine-readable marker per skipped object for the workflow's
@@ -1043,6 +1070,86 @@ try {
     if ($DirectionPolicy -eq 'audit') {
         Write-Information '[ADR0029-AUDIT] DirectionPolicy=audit - no writes will fire. Plan below is read-only.' -InformationAction Continue
         $WhatIfPreference = $true
+    }
+
+    # ---- ADR 0052: destructive-operation confirmation gate ----
+    # The last point before the apply loops at which nothing has been written.
+    # Both destructive branches are gated here, once per run, via
+    # $PSCmdlet.ShouldContinue() -- NOT ShouldProcess(). ShouldContinue prompts
+    # unconditionally; ShouldProcess only prompts when ConfirmImpact >=
+    # $ConfirmPreference, which is precisely the comparison that silently
+    # defeated this gate before issue #85.
+    #
+    # Both gates are keyed on the PLAN -- the objects this run will actually
+    # overwrite or delete -- and never on $DirectionPolicy. Policies and rules
+    # are counted in ONE prompt per branch: they are written in the same run,
+    # and the operator is entitled to see the whole blast radius before
+    # answering once. The $yesToAll / $noToAll pair is shared, so a run that
+    # trips both gates prompts once.
+    #
+    # Suppressed by -Force, by an explicit -Confirm:$false (the CI path), and
+    # skipped under -WhatIf so a dry run still previews the deletes without
+    # blocking on input. `-DirectionPolicy audit` sets $WhatIfPreference above,
+    # so an audit run cannot prompt either.
+    # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+    $yesToAll = $false
+    $noToAll = $false
+    $confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+    $confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+    $gateArgs = @{
+        Cmdlet       = $PSCmdlet
+        Caption      = 'Destructive operation (ADR 0052)'
+        YesToAll     = ([ref]$yesToAll)
+        NoToAll      = ([ref]$noToAll)
+        Force        = $Force.IsPresent
+        IsWhatIf     = [bool]$WhatIfPreference
+        ConfirmBound = $confirmBound
+        ConfirmValue = $confirmValue
+    }
+
+    if ($repoWinsOverwrites.Count -gt 0) {
+        $overwriteNames = @($repoWinsOverwrites | Sort-Object -Unique)
+        $overwriteQuery = "This run will OVERWRITE tenant fields on {0} retention object(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+            $overwriteNames.Count, ($overwriteNames -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
+            throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'
+        }
+    }
+
+    # The full -PruneMissing blast radius, derived here from the same sources
+    # the two delete loops below read, so the prompt cannot understate what the
+    # run will delete. Three populations, and the third is the one an operator
+    # would not otherwise see coming:
+    #   1. orphan rules under a still-desired policy   (loop 1)
+    #   2. orphan policies                             (loop 2)
+    #   3. every tenant rule under an orphan policy -- removed with the parent,
+    #      whether or not that rule is itself declared in YAML.
+    # $desiredRuleKeys is hoisted from loop 1 (it was computed there) so both
+    # the gate and the loop read ONE definition and cannot drift apart.
+    $desiredRuleKeys = @()
+    foreach ($d in $desiredEntries) {
+        foreach ($dr in $d.rules) { $desiredRuleKeys += ('{0}\{1}' -f $d.name, $dr.name) }
+    }
+    $pruneTargets = @()
+    foreach ($key in $tenantRuleByKey.Keys) {
+        if ($desiredRuleKeys -contains $key) { continue }
+        if ($desiredPolicyNames -contains [string]$tenantRuleByKey[$key].policyName) {
+            $pruneTargets += ("rule '{0}'" -f $key)
+        }
+    }
+    foreach ($row in ($policyPlan | Where-Object { $_.Action -eq 'Orphan' })) {
+        $pruneTargets += ("policy '{0}'" -f $row.Name)
+        foreach ($cr in @($tenantRules | Where-Object { [string]$_.Policy -eq $row.Name })) {
+            $pruneTargets += ("rule '{0}\{1}'" -f $row.Name, [string]$cr.Name)
+        }
+    }
+    if ($PruneMissing.IsPresent -and $pruneTargets.Count -gt 0) {
+        $pruneNames = @($pruneTargets | Sort-Object -Unique)
+        $pruneQuery = "-PruneMissing will DELETE {0} orphan retention object(s) from the tenant: {1}. This cannot be undone. Continue?" -f `
+            $pruneNames.Count, ($pruneNames -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+            throw 'Aborted by operator at the -PruneMissing delete confirmation gate (ADR 0052). No tenant writes were made.'
+        }
     }
 
     # Apply policy-level plan. Policies must exist before rules can
@@ -1139,10 +1246,9 @@ try {
 
     # ---- Orphan rules + orphan policies (deletion last) -------------------
     # Tenant rules whose (policy, name) tuple is absent from the YAML.
-    $desiredRuleKeys = @()
-    foreach ($d in $desiredEntries) {
-        foreach ($dr in $d.rules) { $desiredRuleKeys += ('{0}\{1}' -f $d.name, $dr.name) }
-    }
+    # $desiredRuleKeys is computed once, above the ADR 0052 prune gate, which
+    # names these same rules to the operator. One definition, so the prompt and
+    # the deletes cannot disagree.
     foreach ($key in $tenantRuleByKey.Keys) {
         if ($desiredRuleKeys -contains $key) { continue }
         $tr = $tenantRuleByKey[$key]

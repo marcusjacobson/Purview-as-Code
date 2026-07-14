@@ -206,7 +206,7 @@
     `-ExportCurrentState`) work today; live apply is gated on
     resolving the NRE separately.
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Apply')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -537,6 +537,15 @@ Import-Module $module -ErrorAction Stop
 # Deploy-*.ps1 reconciler in this repo per issue #463.
 # Reference: docs/adr/0029-source-of-truth-direction-policy.md
 Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so neither destructive branch (repo-wins
+# overwrite, -PruneMissing delete) can be entered unattended from a local
+# terminal.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 #endregion
@@ -941,6 +950,13 @@ try {
     # Blocked entries are immune (LocationType conflict cannot be
     # papered over by a direction policy).
     # Reference: docs/adr/0029-source-of-truth-direction-policy.md
+
+    # ADR 0052: every adaptive scope whose tenant fields this run WILL
+    # overwrite. Constructed OUTSIDE the policy test below so the gate can
+    # read .Count on it unconditionally -- under `audit` the pass never runs,
+    # the list stays empty, and the gate correctly stays silent.
+    $repoWinsOverwrites = New-Object 'System.Collections.Generic.List[string]'
+
     if ($DirectionPolicy -ne 'audit') {
         $skipDecisions = New-Object 'System.Collections.Generic.List[object]'
         $keptPlan      = @()
@@ -966,6 +982,12 @@ try {
             }
             $fieldsText = @($p.Fields) -join ','
             Write-Warning ("repo-wins overwriting tenant on adaptive scope '{0}' fields: {1}" -f $displayName, $fieldsText)
+            # Every Update entry that survived Resolve-DirectionPolicyAction's
+            # Skip decision WILL be Set-, whatever policy let it through. The
+            # ADR 0052 gate is keyed on this list -- the plan -- and never on
+            # $DirectionPolicy. See ConfirmGate.psm1 "KEY THE GATE ON THE PLAN,
+            # NOT ON THE POLICY".
+            $repoWinsOverwrites.Add($displayName) | Out-Null
             $keptPlan += $p
         }
 
@@ -1041,6 +1063,62 @@ try {
         Write-Information '[ADR0029-AUDIT] DirectionPolicy=audit -- no writes would have fired. Plan above is read-only.' -InformationAction Continue
         $plan.Clear()
         $orphanScopes.Clear()
+    }
+
+    # ---- ADR 0052: destructive-operation confirmation gate ----
+    # The last point before Phase 2/3 at which nothing has been written.
+    # Both destructive branches are gated here, once per run, via
+    # $PSCmdlet.ShouldContinue() -- NOT ShouldProcess(). ShouldContinue prompts
+    # unconditionally; ShouldProcess only prompts when ConfirmImpact >=
+    # $ConfirmPreference, which is precisely the comparison that silently
+    # defeated this gate before issue #85.
+    #
+    # Both gates are keyed on the PLAN -- the objects this run will actually
+    # overwrite or delete -- and never on $DirectionPolicy. The gate sits
+    # AFTER the audit short-circuit above, so an audit run (which empties both
+    # the plan and the orphan list) presents an empty plan to both gates and
+    # cannot prompt. The $yesToAll / $noToAll pair is shared, so a run that
+    # trips both gates prompts once.
+    #
+    # Suppressed by -Force, by an explicit -Confirm:$false (the CI path), and
+    # skipped under -WhatIf so a dry run still previews the deletes without
+    # blocking on input.
+    # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+    $yesToAll = $false
+    $noToAll = $false
+    $confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+    $confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+    $gateArgs = @{
+        Cmdlet       = $PSCmdlet
+        Caption      = 'Destructive operation (ADR 0052)'
+        YesToAll     = ([ref]$yesToAll)
+        NoToAll      = ([ref]$noToAll)
+        Force        = $Force.IsPresent
+        IsWhatIf     = [bool]$WhatIfPreference
+        ConfirmBound = $confirmBound
+        ConfirmValue = $confirmValue
+    }
+
+    if ($repoWinsOverwrites.Count -gt 0) {
+        $overwriteNames = @($repoWinsOverwrites | Sort-Object -Unique)
+        $overwriteQuery = "This run will OVERWRITE tenant fields on {0} adaptive scope(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+            $overwriteNames.Count, ($overwriteNames -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
+            throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'
+        }
+    }
+
+    # Derived from $orphanScopes -- the delete loop's own source -- one line
+    # above the gate and read one line later, so it cannot diverge from the
+    # deletes it speaks for.
+    $pruneTargets = @($orphanScopes | ForEach-Object { [string]$_.Name })
+    if ($PruneMissing.IsPresent -and $pruneTargets.Count -gt 0) {
+        $pruneNames = @($pruneTargets | Sort-Object -Unique)
+        $pruneQuery = "-PruneMissing will DELETE {0} orphan adaptive scope(s) from the tenant: {1}. This cannot be undone. Continue?" -f `
+            $pruneNames.Count, ($pruneNames -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+            throw 'Aborted by operator at the -PruneMissing delete confirmation gate (ADR 0052). No tenant writes were made.'
+        }
     }
 
     # ---- Phase 2: Refresh session before any writes ----

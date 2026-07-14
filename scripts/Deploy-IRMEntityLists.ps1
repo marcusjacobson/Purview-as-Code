@@ -115,6 +115,21 @@
     Default `@()`. This script's workflow baseline carries `IRM-Lab-Priority-Users`
     per docs/adr/0039-irm-entity-list-tracked-fields.md.
 
+.PARAMETER Force
+    Suppress the safety guard on the operation you asked for. This
+    script has one: the ADR 0052 destructive-operation confirmation
+    prompt raised before the `repo-wins` overwrite branch and before
+    the `-PruneMissing` delete branch. It exposes no
+    `-ExportCurrentState`, so there is no YAML-clobber guard to
+    suppress.
+    `-Force` does NOT authorize overwriting a foreign-authored tenant
+    object, and it does NOT suppress `Conflict` rows -- that meaning was
+    split out to `-OverwriteForeignAuthor` by ADR 0053 (a switch this
+    IPPS-surface script does not carry, because
+    `Get-InsiderRiskEntityList` returns no authorship field to diff
+    against).
+    Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md.
+
 .PARAMETER ParametersFile
     Path to the environment parameters YAML (ADR 0012). Defaults to
     `infra/parameters/lab.yaml` resolved relative to the repo root.
@@ -173,7 +188,7 @@
         Reference:
         https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     [ValidateNotNullOrEmpty()]
     [string]$Path = (Join-Path $PSScriptRoot '..\data-plane\irm\entity-lists.yaml'),
@@ -184,6 +199,11 @@ param(
     [string]$DirectionPolicy = 'portal-wins',
 
     [string[]]$SkipNames = @(),
+
+    # ADR 0052: the operator's "do not ask me" switch. Carries NO default --
+    # a default of $true would suppress the confirmation gate on every run,
+    # including runs where nobody passed -Force.
+    [switch]$Force,
 
     [ValidateNotNullOrEmpty()]
     [string]$ParametersFile,
@@ -316,6 +336,15 @@ Import-Module 'powershell-yaml' -ErrorAction Stop
 
 # Reference: docs/adr/0029-source-of-truth-direction-policy.md
 Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so neither destructive branch (repo-wins
+# overwrite, -PruneMissing delete) can be entered unattended from a local
+# terminal.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 # Connect-IPPSSession -AccessToken requires ExchangeOnlineManagement
@@ -553,6 +582,13 @@ try {
     # Reference: docs/adr/0029-source-of-truth-direction-policy.md
     # Reference: docs/adr/0039-irm-entity-list-tracked-fields.md
     $script:Adr0029Skips = New-Object 'System.Collections.Generic.List[object]'
+
+    # ADR 0052: every entity list whose tenant fields this run WILL overwrite.
+    # Constructed OUTSIDE the policy test below so the gate can read .Count
+    # on it unconditionally -- under `audit` the pass never runs, the list
+    # stays empty, and the gate correctly stays silent.
+    $repoWinsOverwrites = New-Object 'System.Collections.Generic.List[string]'
+
     if ($DirectionPolicy -ne 'audit') {
         foreach ($row in $plan) {
             if ($row.Action -notin @('Create', 'Update', 'NoChange', 'Orphan')) { continue }
@@ -572,14 +608,78 @@ try {
                 })
                 continue
             }
-            if ($row.Action -eq 'Update' -and $DirectionPolicy -eq 'repo-wins') {
+            if ($row.Action -eq 'Update') {
                 $fieldsText = ($row.Reason -replace '^Drift in: ', '')
-                Write-Warning ("repo-wins overwriting tenant on IRM entity list '{0}' fields: {1}" -f $row.Name, $fieldsText)
+                if ($DirectionPolicy -eq 'repo-wins') {
+                    Write-Warning ("repo-wins overwriting tenant on IRM entity list '{0}' fields: {1}" -f $row.Name, $fieldsText)
+                }
+                # Every Update row that survived Resolve-DirectionPolicyAction's
+                # Skip decision WILL be Set-, whatever policy let it through.
+                # Collect it here, OUTSIDE the repo-wins test above: the ADR 0052
+                # gate is keyed on this list -- the plan -- and never on
+                # $DirectionPolicy. Populating it only under repo-wins would leave
+                # the list empty under portal-wins, the plan-keyed gate would see
+                # zero, and the overwrite would proceed unconfirmed. See
+                # ConfirmGate.psm1 "KEY THE GATE ON THE PLAN, NOT ON THE POLICY".
+                $repoWinsOverwrites.Add([string]$row.Name) | Out-Null
             }
         }
 
         foreach ($s in $script:Adr0029Skips) {
             Write-Information ("[ADR0029-SKIP] {0}" -f $s.DisplayName) -InformationAction Continue
+        }
+    }
+
+    # ---- ADR 0052: destructive-operation confirmation gate ----
+    # The last point before the write loop at which nothing has been written.
+    # Both destructive branches are gated here, once per run, via
+    # $PSCmdlet.ShouldContinue() -- NOT ShouldProcess(). ShouldContinue prompts
+    # unconditionally; ShouldProcess only prompts when ConfirmImpact >=
+    # $ConfirmPreference, which is precisely the comparison that silently
+    # defeated this gate before issue #85.
+    #
+    # Both gates are keyed on the PLAN -- the objects this run will actually
+    # overwrite or delete -- and never on $DirectionPolicy. The $yesToAll /
+    # $noToAll pair is shared, so a run that trips both gates prompts once.
+    #
+    # Suppressed by -Force, by an explicit -Confirm:$false (the CI path), and
+    # skipped under -WhatIf so a dry run still previews the deletes without
+    # blocking on input. `-DirectionPolicy audit` sets $WhatIfPreference above,
+    # so an audit run cannot prompt either.
+    # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+    $yesToAll = $false
+    $noToAll = $false
+    $confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+    $confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+    $gateArgs = @{
+        Cmdlet       = $PSCmdlet
+        Caption      = 'Destructive operation (ADR 0052)'
+        YesToAll     = ([ref]$yesToAll)
+        NoToAll      = ([ref]$noToAll)
+        Force        = $Force.IsPresent
+        IsWhatIf     = [bool]$WhatIfPreference
+        ConfirmBound = $confirmBound
+        ConfirmValue = $confirmValue
+    }
+
+    if ($repoWinsOverwrites.Count -gt 0) {
+        $overwriteNames = @($repoWinsOverwrites | Sort-Object -Unique)
+        $overwriteQuery = "This run will OVERWRITE tenant fields on {0} IRM entity list(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+            $overwriteNames.Count, ($overwriteNames -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
+            throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'
+        }
+    }
+
+    # Derived from the FINAL plan one line above the gate and read one line
+    # later, so it cannot diverge from the deletes it speaks for.
+    $pruneTargets = @($plan | Where-Object { $_.Action -eq 'Orphan' })
+    if ($PruneMissing.IsPresent -and $pruneTargets.Count -gt 0) {
+        $pruneNames = @($pruneTargets | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
+        $pruneQuery = "-PruneMissing will DELETE {0} orphan IRM entity list(s) from the tenant: {1}. This cannot be undone. Continue?" -f `
+            $pruneNames.Count, ($pruneNames -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+            throw 'Aborted by operator at the -PruneMissing delete confirmation gate (ADR 0052). No tenant writes were made.'
         }
     }
 

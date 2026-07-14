@@ -252,7 +252,7 @@
       * Pass `-SkipSchemaValidation` to bypass the check in emergency
         scenarios (e.g. fixing the schema itself). Do not use in CI.
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium', DefaultParameterSetName = 'Apply')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -809,6 +809,15 @@ Import-Module $module -ErrorAction Stop
 # shared module in PR #474.
 # Reference: docs/adr/0029-source-of-truth-direction-policy.md
 Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+# In-repo ADR 0052 destructive-operation confirmation gate. Wraps
+# $PSCmdlet.ShouldContinue() -- which prompts unconditionally, independent
+# of $ConfirmPreference -- so neither destructive branch (repo-wins
+# overwrite, -PruneMissing delete) can be entered unattended from a local
+# terminal.
+# Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 #endregion
@@ -1599,6 +1608,15 @@ try {
     # drifted object with the comma-joined drifted-field set, matching
     # the per-object shape proven in PRs #458 and #468.
     # Reference: docs/adr/0029-source-of-truth-direction-policy.md
+
+    # ADR 0052: every policy and rule whose tenant fields this run WILL
+    # overwrite. ONE list across both passes -- policies and rules are written
+    # in the same run, so the operator is entitled to see the whole blast
+    # radius before answering once. Constructed OUTSIDE the policy test below
+    # so the gate can read .Count on it unconditionally -- under `audit` the
+    # pass never runs, the list stays empty, and the gate stays silent.
+    $repoWinsOverwrites = New-Object 'System.Collections.Generic.List[string]'
+
     if ($DirectionPolicy -ne 'audit') {
         $skipDecisions = New-Object 'System.Collections.Generic.List[object]'
 
@@ -1626,6 +1644,11 @@ try {
             }
             $fieldsText = @($p.Fields) -join ','
             Write-Warning ("repo-wins overwriting tenant on auto-label policy '{0}' fields: {1}" -f $displayName, $fieldsText)
+            # Every Update entry that survived the Skip decision WILL be Set-,
+            # whatever policy let it through. The ADR 0052 gate is keyed on this
+            # list -- the plan -- and never on $DirectionPolicy. See
+            # ConfirmGate.psm1 "KEY THE GATE ON THE PLAN, NOT ON THE POLICY".
+            $repoWinsOverwrites.Add(("policy '{0}'" -f $displayName)) | Out-Null
             $keptPolicyPlan += $p
         }
 
@@ -1653,6 +1676,9 @@ try {
             }
             $fieldsText = @($r.Fields) -join ','
             Write-Warning ("repo-wins overwriting tenant on auto-label rule '{0}' fields: {1}" -f $displayName, $fieldsText)
+            # Same rule as the policy pass above: unconditional on the survivor
+            # path, never keyed on $DirectionPolicy.
+            $repoWinsOverwrites.Add(("rule '{0}'" -f $displayName)) | Out-Null
             $keptRulePlan += $r
         }
 
@@ -1741,6 +1767,66 @@ try {
         $rulePlan.Clear()
         $orphanPolicies = @()
         $orphanRules = @()
+    }
+
+    # ---- ADR 0052: destructive-operation confirmation gate ----
+    # The last point before Phase 2/3 at which nothing has been written.
+    # Both destructive branches are gated here, once per run, via
+    # $PSCmdlet.ShouldContinue() -- NOT ShouldProcess(). ShouldContinue prompts
+    # unconditionally; ShouldProcess only prompts when ConfirmImpact >=
+    # $ConfirmPreference, which is precisely the comparison that silently
+    # defeated this gate before issue #85.
+    #
+    # Both gates are keyed on the PLAN -- the objects this run will actually
+    # overwrite or delete -- and never on $DirectionPolicy. The gate sits AFTER
+    # the audit short-circuit above, which empties both plans and both orphan
+    # lists, so an audit run presents an empty plan to both gates and cannot
+    # prompt. Policies and rules are counted in ONE prompt per branch: they are
+    # written in the same run, and the operator is entitled to see the whole
+    # blast radius before answering once. The $yesToAll / $noToAll pair is
+    # shared, so a run that trips both gates prompts once.
+    #
+    # Suppressed by -Force, by an explicit -Confirm:$false (the CI path -- every
+    # workflow apply step binds it), and skipped under -WhatIf so a dry run
+    # still previews the deletes without blocking on input.
+    # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
+    $yesToAll = $false
+    $noToAll = $false
+    $confirmBound = $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Confirm')
+    $confirmValue = if ($confirmBound) { [bool]$PSCmdlet.MyInvocation.BoundParameters['Confirm'] } else { $false }
+    $gateArgs = @{
+        Cmdlet       = $PSCmdlet
+        Caption      = 'Destructive operation (ADR 0052)'
+        YesToAll     = ([ref]$yesToAll)
+        NoToAll      = ([ref]$noToAll)
+        Force        = $Force.IsPresent
+        IsWhatIf     = [bool]$WhatIfPreference
+        ConfirmBound = $confirmBound
+        ConfirmValue = $confirmValue
+    }
+
+    if ($repoWinsOverwrites.Count -gt 0) {
+        $overwriteNames = @($repoWinsOverwrites | Sort-Object -Unique)
+        $overwriteQuery = "This run will OVERWRITE tenant fields on {0} auto-label object(s) with the values from YAML: {1}. Portal edits to those fields are lost. Continue?" -f `
+            $overwriteNames.Count, ($overwriteNames -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $overwriteQuery)) {
+            throw 'Aborted by operator at the repo-wins overwrite confirmation gate (ADR 0052). No tenant writes were made.'
+        }
+    }
+
+    # Derived from the two delete loops' own sources one line above the gate,
+    # so it cannot diverge from the deletes it speaks for.
+    $pruneTargets = @(
+        @($orphanPolicies | ForEach-Object { "policy '{0}'" -f $_.Name }) +
+        @($orphanRules | ForEach-Object { "rule '{0}'" -f $_.Name })
+    )
+    if ($PruneMissing.IsPresent -and $pruneTargets.Count -gt 0) {
+        $pruneNames = @($pruneTargets | Sort-Object -Unique)
+        $pruneQuery = "-PruneMissing will DELETE {0} orphan auto-label object(s) from the tenant: {1}. This cannot be undone. Continue?" -f `
+            $pruneNames.Count, ($pruneNames -join ', ')
+        if (-not (Assert-DestructiveOperationConfirmed @gateArgs -Query $pruneQuery)) {
+            throw 'Aborted by operator at the -PruneMissing delete confirmation gate (ADR 0052). No tenant writes were made.'
+        }
     }
 
     # ---- Phase 2: Refresh session before any writes ----
