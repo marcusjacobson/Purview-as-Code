@@ -1703,6 +1703,36 @@ foreach ($entry in $termPlan.Plan) { $plan.Add($entry) | Out-Null }
 foreach ($orphan in $termPlan.Orphans) { $orphans.Add([pscustomobject]@{ Kind = 'Term'; Item = $orphan }) | Out-Null }
 
 Invoke-DirectionPolicyPlan -Plan $plan -Report $report
+
+# ADR 0029 audit short-circuit, continued (fixes #106): Invoke-DirectionPolicyPlan
+# clears `$plan` under `audit` -- it owns the only place that decision is made
+# -- but `$orphans` is a SEPARATE top-level list, populated by the six
+# `$orphans.Add(...)` call sites above, and this function is never passed it
+# and has no way to reach it. Left alone, the delete loop below still walks a
+# fully-populated `$orphans`, and nothing else in this script stops the
+# writes, so `-DirectionPolicy audit -PruneMissing` deleted tenant objects
+# while claiming "no writes would have fired."
+#
+# Fix: flip $WhatIfPreference here, the same mechanism Deploy-Collections.ps1
+# uses (and 8 further Class A reconcilers -- DataSources, DLPPolicies,
+# FilePlan, Glossary, IRMEntityLists, IRMPolicies, RetentionPolicies, Scans).
+# Every $PSCmdlet.ShouldProcess() call for the rest of this run -- the
+# create/update loop AND the -PruneMissing delete loop below -- now returns
+# $false and renders its "What if:" preview instead of writing. $orphans
+# itself is intentionally left fully populated so the delete loop still
+# WALKS it and the preview lines stay accurate, matching every other
+# script's -WhatIf contract.
+#
+# Side effect (intentional, not a regression): the ADR 0052 gate's `IsWhatIf`
+# argument below is `[bool]$WhatIfPreference`, captured AFTER this block
+# runs, so under audit mode the gate also stops prompting -- correct,
+# because there is nothing left to confirm. Before this fix, an operator who
+# answered "yes" (or passed -Force / -Confirm:$false) at that prompt still
+# got real deletes; after this fix, there is no prompt to answer.
+if ($DirectionPolicy -eq 'audit') {
+    $WhatIfPreference = $true
+}
+
 foreach ($blocked in $blockedRows) { $report.Add($blocked) | Out-Null }
 Show-PlanSummary -Report $report.ToArray()
 
@@ -1727,11 +1757,15 @@ if ($blockedRows.Count -gt 0) {
 # to see the whole blast radius before answering once.
 #
 # NOTE on `audit`: Invoke-DirectionPolicyPlan empties `$plan` under audit but
-# does NOT empty `$orphans`, and this script does not flip $WhatIfPreference the
-# way its IPPS siblings do. `-DirectionPolicy audit -PruneMissing` therefore
-# still reaches the delete loop -- a pre-existing ADR 0029 defect, reported
-# separately and NOT fixed here. The prune gate below is keyed on the plan, so
-# it correctly PROMPTS in that state rather than hiding it.
+# cannot touch `$orphans` -- a separate top-level list it is never passed.
+# That used to leave `-DirectionPolicy audit -PruneMissing` reaching the
+# delete loop for real (issue #106, ADR 0029 violation). It is fixed above:
+# this script now flips $WhatIfPreference under `audit`, the same mechanism
+# its IPPS siblings use, so every write in this run -- including the deletes
+# below -- renders a "What if:" preview instead of firing. Because the gate's
+# `IsWhatIf` argument is read AFTER that flip, the prune gate below correctly
+# stays SILENT under audit now (nothing left to confirm) rather than
+# prompting uselessly for a delete that can no longer happen.
 #
 # Suppressed by -Force, by an explicit -Confirm:$false (the CI path), and
 # skipped under -WhatIf -- where the branch is still WALKED so the per-write
