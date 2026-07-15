@@ -251,7 +251,7 @@ BeforeAll {
     # already declared here. A script gated without an entry here FAILS -- you
     # must state its class, not infer it.
     $script:DestructiveBranchCount = @{
-        # ---- Class A (15) : overwrite + prune ----
+        # ---- Class A (16) : overwrite + prune ----
         'Deploy-AdaptiveScopes.ps1'               = 2
         'Deploy-AutoLabelPolicies.ps1'            = 2
         'Deploy-Collections.ps1'                  = 2
@@ -267,6 +267,11 @@ BeforeAll {
         'Deploy-Scans.ps1'                        = 2
         'Deploy-UnifiedCatalog.ps1'               = 2
         'Deploy-UnifiedCatalogPolicies.ps1'       = 2
+        # Not a Deploy-*.ps1 -- the 22nd reconciler, found by #108 once the
+        # population was widened from the filename glob to the -PruneMissing
+        # predicate. Declares BOTH -DirectionPolicy (repo-wins overwrite) AND
+        # -PruneMissing (orphan-delete), so it is Class A like its 15 siblings.
+        'Set-AuditRetentionPolicy.ps1'            = 2
         # ---- Class B (6) : prune only, no -DirectionPolicy ----
         'Deploy-AdministrativeUnits.ps1'          = 1
         'Deploy-Classifications.ps1'              = 1
@@ -1027,16 +1032,54 @@ BeforeAll {
     #  THE GATED SET, AT RUN TIME -- and the #83 completion criterion.
     # =====================================================================
 
+    # THE POPULATION: EVERY DESTRUCTIVE-CAPABLE SCRIPT ON DISK, DERIVED FROM A
+    # PREDICATE, NOT A FILENAME GLOB (issue #108).
+    #
+    # Every `Deploy-*.ps1` filename glob in this file used to DEFINE "every
+    # reconciler". `Set-AuditRetentionPolicy.ps1` declares -PruneMissing, calls
+    # Remove-UnifiedAuditLogRetentionPolicy, shipped ConfirmImpact = 'Medium' --
+    # the live issue #85 defect -- and was invisible to every count in #83
+    # because its name is Set-*, not Deploy-*. The glob was the bug; the real
+    # invariant is the destructive capability itself, not the filename.
+    #
+    # A script belongs to this population iff it declares [switch]$PruneMissing
+    # -- the delete branch every reconciler in this repo can reach. Verified
+    # against the WHOLE scripts/ directory as of #108, not assumed from the
+    # `Deploy-*.ps1` set alone: Set-AuditRetentionPolicy.ps1 is the ONLY
+    # non-Deploy-*.ps1 script under scripts/ that declares -PruneMissing.
+    #
+    # This is the population used to determine "should this be gated" (the
+    # completion criterion below, and the destructive-branch class map's own
+    # self-check). It is deliberately NARROWER than "every *.ps1 in scripts/"
+    # -- see Get-GatedReconciler immediately below, which widens only the
+    # ENUMERATION its "has a real gate call" predicate walks, and is used to
+    # determine "IS this gated" instead.
+    function Get-DestructiveCapableScriptFile {
+        @(Get-ChildItem -Path (Join-Path $script:RepoRoot 'scripts') -Filter '*.ps1' |
+                Where-Object {
+                    $ast = Get-ScriptAstOrThrow -Path $_.FullName
+                    @($ast.ParamBlock.Parameters | Where-Object { (Get-AstVariableName -VariableAst $_.Name) -eq 'PruneMissing' }).Count -gt 0
+                })
+    }
+
     # Which reconcilers are gated, derived from the SOURCE at run time.
     #
     # The canonical derivation: a script is gated iff it contains at least one real
-    # Assert-DestructiveOperationConfirmed CommandAst. The AST-contract Describe
-    # below drives its -ForEach from a SECOND copy of this predicate (it has to --
-    # -ForEach is evaluated during DISCOVERY, which runs in a different SessionState
-    # where these helpers do not exist yet). The final Describe in this file asserts
-    # the two derivations agree, so the copy cannot silently drift.
+    # Assert-DestructiveOperationConfirmed CommandAst. That predicate was always
+    # filename-agnostic -- but the `Get-ChildItem -Filter 'Deploy-*.ps1'` feeding it
+    # was NOT, so a gated Set-AuditRetentionPolicy.ps1 would have been invisible here
+    # regardless of the AST check ever finding its gate call. Issue #108 widens the
+    # enumeration to every *.ps1 in scripts/; the "has a gate call" filter is
+    # unchanged and remains the sole determinant of membership, so this cannot pick
+    # up a non-reconciler utility script by accident.
+    #
+    # The AST-contract Describe below drives its -ForEach from a SECOND copy of this
+    # predicate (it has to -- -ForEach is evaluated during DISCOVERY, which runs in a
+    # different SessionState where these helpers do not exist yet). The final
+    # Describe in this file asserts the two derivations agree, so the copy cannot
+    # silently drift.
     function Get-GatedReconciler {
-        @(Get-ChildItem -Path (Join-Path $script:RepoRoot 'scripts') -Filter 'Deploy-*.ps1' |
+        @(Get-ChildItem -Path (Join-Path $script:RepoRoot 'scripts') -Filter '*.ps1' |
                 Where-Object { @(Get-GateCallAst -Ast (Get-ScriptAstOrThrow -Path $_.FullName)).Count -gt 0 } |
                 ForEach-Object { $_.Name } | Sort-Object)
     }
@@ -1544,18 +1587,35 @@ Describe 'The destructive-branch class map is DERIVED FROM THE SOURCE, not asser
     #                        AND -PruneMissing          => has a prune branch
     #   Class B (1 gate)  -- no -DirectionPolicy        => prune branch only
     #
-    # This runs against all 21 reconcilers, including the 17 PR-B has not gated
-    # yet, so PR-B inherits a class map that is already proven correct.
+    # This ran against all 21 Deploy-*.ps1 reconcilers through #83. #108 widens the
+    # population from that filename glob to the destructive-capability predicate
+    # (every script under scripts/ declaring -PruneMissing), which is what makes
+    # Set-AuditRetentionPolicy.ps1 -- the 22nd reconciler, and Set-*, not Deploy-* --
+    # visible to this class map's own self-check for the first time. See
+    # Get-DestructiveCapableScriptFile in the file-level BeforeAll.
 
     BeforeDiscovery {
+        # Self-contained: -ForEach is evaluated during DISCOVERY, which runs in a
+        # SessionState that cannot see Get-DestructiveCapableScriptFile (defined in
+        # the file-level BeforeAll, which has not executed yet). Mirrors that
+        # function's predicate by hand rather than a 'Deploy-*.ps1' filename glob.
         $script:AllReconcilers = @(
-            Get-ChildItem -Path (Join-Path $PSScriptRoot '..' '..' 'scripts') -Filter 'Deploy-*.ps1' |
+            Get-ChildItem -Path (Join-Path $PSScriptRoot '..' '..' 'scripts') -Filter '*.ps1' |
+                Where-Object {
+                    $tokens = $null
+                    $errors = $null
+                    $ast = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+                    @($ast.ParamBlock.Parameters | Where-Object {
+                                $_.Name -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                                (([string]$_.Name.VariablePath.UserPath) -replace '^.*:', '') -eq 'PruneMissing'
+                            }).Count -gt 0
+                } |
                 ForEach-Object { $_.Name }
         )
     }
 
-    It 'covers every Deploy-*.ps1 reconciler (no script may be silently absent)' {
-        $onDisk = @(Get-ChildItem -Path (Join-Path $script:RepoRoot 'scripts') -Filter 'Deploy-*.ps1' | ForEach-Object { $_.Name })
+    It 'covers every destructive-capable reconciler (no script may be silently absent)' {
+        $onDisk = @(Get-DestructiveCapableScriptFile | ForEach-Object { $_.Name })
         $declared = @($script:DestructiveBranchCount.Keys)
         ($onDisk | Sort-Object) | Should -Be ($declared | Sort-Object) `
             -Because 'a reconciler missing from the class map is a reconciler whose gate count nobody has decided'
@@ -1573,7 +1633,7 @@ Describe 'The destructive-branch class map is DERIVED FROM THE SOURCE, not asser
 
         It 'has a -PruneMissing branch (Class C -- no destructive branch -- is empty)' {
             $script:HasPruneMissing | Should -BeTrue `
-                -Because 'every one of the 21 reconcilers can delete or revoke tenant state; if this ever fails, the class map needs a Class C'
+                -Because 'every one of the 22 reconcilers can delete or revoke tenant state; if this ever fails, the class map needs a Class C'
         }
 
         It 'its declared gate count matches the class derivable from its parameters' {
@@ -1640,13 +1700,22 @@ Describe 'ADR 0052 reference implementations: AST contract (not source text)' {
     # by the file itself. A curated list of scripts-under-guard is a guard with an
     # opt-out, and the opt-out is silent.
     #
-    # So the list is DERIVED: every scripts/Deploy-*.ps1 carrying at least one real
+    # So the list is DERIVED: every script under scripts/ carrying at least one real
     # Assert-DestructiveOperationConfirmed CommandAst. AST, not text -- a comment or a
     # string mentioning the function name is not a gate (see the header note: prose
     # cannot forge an AST node). This makes the guard SELF-CLOSING: gating a script
     # automatically subjects it to the full contract, and no future author can gate a
     # script and silently escape review. Batch 2 adds eleven more; they arrive
     # pre-guarded.
+    #
+    # #108: the ENUMERATION this predicate walked used to be filtered to
+    # 'Deploy-*.ps1' before the "has a gate call" check ever ran, so a gated
+    # Set-AuditRetentionPolicy.ps1 would have been invisible to the full AST
+    # contract below -- wiring, ConfirmImpact, import, query text, decline-throw,
+    # plan-keying, the B2 rules -- NONE of it would have run against it, exactly the
+    # "gated but unexamined" hole batch 1.5 closed for the four PR-A scripts. The
+    # "has a gate call" predicate itself was always filename-agnostic and needed no
+    # change; only the glob feeding it did.
     #
     # Each script's expected gate count is declared in $script:DestructiveBranchCount
     # (file-level BeforeAll) -- a script gated without a declared class is a hard
@@ -1663,7 +1732,7 @@ Describe 'ADR 0052 reference implementations: AST contract (not source text)' {
         # time with the canonical helper and asserts it equals the set of scripts the
         # Contexts below actually examined. Let the copies drift and that goes RED.
         $script:GatedScripts = @(
-            Get-ChildItem -Path (Join-Path $PSScriptRoot '..' '..' 'scripts') -Filter 'Deploy-*.ps1' |
+            Get-ChildItem -Path (Join-Path $PSScriptRoot '..' '..' 'scripts') -Filter '*.ps1' |
                 Where-Object {
                     $tokens = $null
                     $errors = $null
@@ -2178,10 +2247,12 @@ Describe 'ADR 0052: CI cannot hang -- every workflow invocation of a GATED scrip
         $script:CiGated.Count | Should -BeGreaterThan 0 -Because 'the gated set is derived from the AST; zero means the derivation broke and every assertion below is vacuous'
         # The gated set is derived twice in this file (here and in the AST-contract
         # BeforeDiscovery). The completion Describe pins that they agree.
-        $script:CiGated.Count | Should -Be 20 -Because (
-            'twenty of the twenty-one reconcilers are gated; Deploy-EntraDirectoryRoles.ps1 is the one declared exception (issue #105). ' +
+        $script:CiGated.Count | Should -Be 21 -Because (
+            'twenty-one of the twenty-two destructive-capable reconcilers are gated -- #108 widened the population from a ' +
+            'Deploy-*.ps1 filename glob to every script declaring -PruneMissing, adding Set-AuditRetentionPolicy.ps1 as the ' +
+            '22nd. Deploy-EntraDirectoryRoles.ps1 is the one declared exception (issue #105). ' +
             "Found: $($script:CiGated.Count) -- [$($script:CiGated -join ', ')]. " +
-            'If #105 has landed, this number becomes 21 and $script:UngatedByDesign must be emptied.'
+            'If #105 has landed, this number becomes 22 and $script:UngatedByDesign must be emptied.'
         )
     }
 
@@ -2688,15 +2759,19 @@ if (`$repoWinsOverwrites.Count -gt 0) {
     }
 }
 
-Describe 'ADR 0052 rollout completion (#83): every reconciler gated, or declared' {
+Describe 'ADR 0052 rollout completion (#83/#108): every reconciler gated, or declared' {
 
     # MUST RUN AFTER the AST-contract Describe: the coverage assertion below reads
     # $script:ContractExamined, which that Describe's Contexts fill in as they run.
     # Pester executes Describes in file order, so this stays last.
 
     BeforeAll {
-        $script:AllReconcilersOnDisk = @(Get-ChildItem -Path (Join-Path $script:RepoRoot 'scripts') -Filter 'Deploy-*.ps1' |
-                ForEach-Object { $_.Name } | Sort-Object)
+        # Widened from a 'Deploy-*.ps1' filename glob to the destructive-capability
+        # predicate (issue #108). See Get-DestructiveCapableScriptFile above -- this
+        # is what turns "every Deploy-* reconciler is gated" into "every reconciler
+        # that can delete or revoke tenant state is gated", closing the exact hole
+        # the boundary note below used to name.
+        $script:AllReconcilersOnDisk = @(Get-DestructiveCapableScriptFile | ForEach-Object { $_.Name } | Sort-Object)
         $script:GatedNow = @(Get-GatedReconciler)
         $script:ExemptNames = @($script:UngatedByDesign.Keys | Sort-Object)
     }
@@ -2770,24 +2845,36 @@ Describe 'ADR 0052 rollout completion (#83): every reconciler gated, or declared
     # rollout's remaining work stated executably. Batch 2 gated the last eleven Class A
     # reconcilers and it turned GREEN. It is now a RATCHET, not a to-do list.
     #
-    # It goes red again if anyone adds a Deploy-*.ps1 that can delete or revoke tenant
-    # state without gating it. The fix is to GATE IT -- or to declare it in
-    # $script:UngatedByDesign with a stated, mechanically-verifiable reason, which the
-    # staleness guard above then refuses to let rot.
+    # #108 RE-OPENED IT ON PURPOSE. $script:AllReconcilersOnDisk was a `Deploy-*.ps1`
+    # filename GLOB, so this criterion only ever proved "every DEPLOY-* reconciler is
+    # gated" -- and `Set-AuditRetentionPolicy.ps1` (declares -PruneMissing, calls
+    # Remove-UnifiedAuditLogRetentionPolicy, shipped ConfirmImpact = 'Medium' -- the
+    # live issue #85 defect -- with NO gate and NO workflow behind it) was invisible to
+    # it, and to every other count in #83, because its name is Set-*, not Deploy-*. The
+    # glob was the bug: it silently narrowed "every reconciler" to "every reconciler
+    # whose author remembered to name it Deploy-*". #108 widens the population (see
+    # Get-DestructiveCapableScriptFile above) to a destructive-capability predicate --
+    # every script under scripts/ that declares [switch]$PruneMissing -- which is
+    # filename-agnostic by construction and picked this one up immediately: with the
+    # population widened and the script still ungated, this assertion went RED, naming
+    # Set-AuditRetentionPolicy.ps1 as the missing script. It is GREEN again now that
+    # #108 has gated it.
     #
     # ⚠️ BOUNDARY -- READ BEFORE TRUSTING THE WORD "COMPLETE".
-    # $script:AllReconcilersOnDisk is a `Deploy-*.ps1` GLOB (see the BeforeAll above).
-    # So this criterion proves "every DEPLOY-* reconciler is gated", NOT "every
-    # reconciler in the repo is gated". Those differ: `Set-AuditRetentionPolicy.ps1`
-    # declares -PruneMissing, calls Remove-UnifiedAuditLogRetentionPolicy, is
-    # ConfirmImpact='Medium' (the live issue #85 defect), has NO gate and NO workflow
-    # behind it -- and this assertion is BLIND TO IT because its name is Set-*, not
-    # Deploy-*. Tracked by issue #108, whose fix WIDENS this population from the
-    # filename glob to a destructive-capability predicate (every script declaring
-    # -PruneMissing). Until #108 lands, GREEN here means "the Deploy-* glob is fully
-    # gated", nothing wider. The glob that defines the population is exactly where the
-    # gap hid -- do not let this assertion's green be read as more than it proves.
-    It 'every Deploy-*.ps1 is gated, or declared ungated (the #83 completion criterion)' {
+    # This criterion proves "every script that declares -PruneMissing is gated", NOT
+    # "every script capable of a destructive tenant write is gated". A future
+    # reconciler that reached a destructive branch through some OTHER shape -- no
+    # -PruneMissing switch at all, e.g. an unconditional Remove-* on every run, or a
+    # delete branch gated by a differently-named switch -- would be invisible to this
+    # predicate exactly as Set-AuditRetentionPolicy.ps1 was invisible to the Deploy-*
+    # glob. The predicate that defines the population is still where the next gap
+    # would hide; #108 moved it to firmer ground, it did not retire it as a risk.
+    #
+    # It goes red again if anyone adds a script under scripts/ that declares
+    # -PruneMissing without gating it. The fix is to GATE IT -- or to declare it in
+    # $script:UngatedByDesign with a stated, mechanically-verifiable reason, which the
+    # staleness guard above then refuses to let rot.
+    It 'every destructive-capable script is gated, or declared ungated (the #83/#108 completion criterion)' {
         $accountedFor = @(($script:GatedNow + $script:ExemptNames) | Sort-Object -Unique)
         $missing = @($script:AllReconcilersOnDisk | Where-Object { $_ -notin $accountedFor })
 
