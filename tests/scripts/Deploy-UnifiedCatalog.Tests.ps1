@@ -249,6 +249,155 @@ Describe 'Invoke-DirectionPolicyPlan' {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Issue #106 -- Invoke-DirectionPolicyPlan clears `$plan` under `audit` but
+# cannot reach `$orphans`: a separate top-level list, populated by six
+# `$orphans.Add(...)` call sites before Invoke-DirectionPolicyPlan is ever
+# called, that this function is never passed and has no way to touch. Left
+# alone, `-DirectionPolicy audit -PruneMissing` reached the delete loop for
+# real and deleted tenant objects while the script's own log line claimed
+# "no writes would have fired" -- an ADR 0029 violation.
+#
+# Fix: flip $WhatIfPreference at the call site (the mechanism
+# Deploy-Collections.ps1 and 8 further Class A reconcilers already use), so
+# every $PSCmdlet.ShouldProcess() call for the rest of the run -- both the
+# create/update loop and the -PruneMissing delete loop -- renders a
+# "What if:" preview instead of writing.
+#
+# These tests drive the ACTUAL top-level delete-loop and write-loop AST
+# extracted from the committed script -- not a reimplementation -- per the
+# "RED-REPLAY PROOF" acceptance criterion on #106. Manually verified against
+# the pre-fix script: the delete-loop case fired 2/2 stub deletes and the
+# write-loop case fired 1/1 stub create; both go to 0 after the fix, which is
+# what the assertions below lock in.
+# ---------------------------------------------------------------------------
+Describe 'Issue #106 -- $orphans neutralized under -DirectionPolicy audit (ADR 0029)' {
+
+    BeforeAll {
+        $tokens = $null
+        $errors = $null
+        $script:Issue106Ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:ScriptPath, [ref]$tokens, [ref]$errors)
+        if ($errors.Count -gt 0) { throw ($errors | ForEach-Object Message | Out-String) }
+
+        # Only DIRECT top-level statements -- excludes the (already-correct,
+        # differently-scoped) audit short-circuit inside the
+        # Invoke-DirectionPolicyPlan FUNCTION body, so these lookups cannot
+        # accidentally match that one instead of the call-site fix.
+        $script:Issue106TopLevel = @($script:Issue106Ast.EndBlock.Statements)
+
+        $script:Issue106InvokeCallAst = $script:Issue106TopLevel | Where-Object {
+            $_.Extent.Text -match '^Invoke-DirectionPolicyPlan\b'
+        } | Select-Object -First 1
+
+        $script:Issue106AuditFixAst = $script:Issue106TopLevel | Where-Object {
+            $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+            $_.Extent.Text -match "DirectionPolicy -eq 'audit'" -and
+            $_.Extent.Text -match '\$WhatIfPreference\s*=\s*\$true'
+        } | Select-Object -First 1
+
+        $script:Issue106DeleteLoopAst = $script:Issue106TopLevel | Where-Object {
+            $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+            $_.Extent.Text -match '\$PruneMissing\.IsPresent' -and
+            $_.Extent.Text -match '\$orphans\.ToArray\(\)'
+        } | Select-Object -First 1
+
+        $script:Issue106WriteLoopAst = $script:Issue106TopLevel | Where-Object {
+            $_.Extent.Text -match '\$writeOrder' -and
+            $_.Extent.Text -match 'Invoke-UCBusinessDomainCreate'
+        } | Select-Object -First 1
+
+        if (-not $script:Issue106InvokeCallAst) { throw 'Could not locate the top-level Invoke-DirectionPolicyPlan call.' }
+        if (-not $script:Issue106DeleteLoopAst) { throw 'Could not locate the top-level -PruneMissing delete-loop statement.' }
+        if (-not $script:Issue106WriteLoopAst) { throw 'Could not locate the top-level $writeOrder write-loop statement.' }
+
+        # Builds and dot-sources a throwaway function that reproduces the
+        # REAL extracted top-level statements, in the same order the script
+        # itself executes them: [audit fix, if present] -> [body statement].
+        # $script:ReplayDeleteCalls / $script:ReplayCreateCalls record the
+        # process-boundary stub calls the function makes.
+        function Register-Issue106ReplayFunction {
+            param(
+                [Parameter(Mandatory)][string]$BodyText
+            )
+            $auditFixText = if ($script:Issue106AuditFixAst) { $script:Issue106AuditFixAst.Extent.Text } else { '# (no audit short-circuit present)' }
+            $functionText = @"
+function Invoke-Issue106Replay {
+    [CmdletBinding(SupportsShouldProcess = `$true, ConfirmImpact = 'High')]
+    param()
+$auditFixText
+$BodyText
+}
+"@
+            . ([ScriptBlock]::Create($functionText))
+        }
+    }
+
+    It 'places the audit short-circuit at top level, between Invoke-DirectionPolicyPlan and the delete loop' {
+        $script:Issue106AuditFixAst | Should -Not -BeNullOrEmpty -Because 'the #106 fix sets $WhatIfPreference at the call site -- Invoke-DirectionPolicyPlan cannot reach $orphans to neutralize it there'
+
+        $invokeIndex = $script:Issue106TopLevel.IndexOf($script:Issue106InvokeCallAst)
+        $fixIndex = $script:Issue106TopLevel.IndexOf($script:Issue106AuditFixAst)
+        $deleteIndex = $script:Issue106TopLevel.IndexOf($script:Issue106DeleteLoopAst)
+
+        $invokeIndex | Should -BeGreaterThan -1
+        $fixIndex | Should -BeGreaterThan $invokeIndex
+        $deleteIndex | Should -BeGreaterThan $fixIndex
+    }
+
+    It 'drives the real delete-loop AST under -DirectionPolicy audit -PruneMissing and fires zero deletes' {
+        $script:ReplayDeleteCalls = [System.Collections.Generic.List[string]]::new()
+        # $Context is required for signature parity with the real
+        # Invoke-UC*Delete call sites (each is invoked with -Context by
+        # name) but this stub does not need its value.
+        function Invoke-UCBusinessDomainDelete { param($Context, $DomainId) $null = $Context; $script:ReplayDeleteCalls.Add("BusinessDomain:$DomainId") }
+        function Invoke-UCTermDelete { param($Context, $TermId) $null = $Context; $script:ReplayDeleteCalls.Add("Term:$TermId") }
+
+        . Register-Issue106ReplayFunction -BodyText $script:Issue106DeleteLoopAst.Extent.Text
+
+        # Unqualified reads inside the dot-sourced Invoke-Issue106Replay
+        # function walk this scope chain, so these script-scoped
+        # assignments ARE consumed at runtime even though PSScriptAnalyzer's
+        # static, single-scope analysis cannot see that cross-scope read.
+        $script:DirectionPolicy = 'audit'
+        $script:PruneMissing = [switch]$true
+        $script:context = [pscustomobject]@{ Stub = $true }
+        $script:orphans = New-Object 'System.Collections.Generic.List[object]'
+        $script:orphans.Add([pscustomobject]@{ Kind = 'BusinessDomain'; Item = [pscustomobject]@{ id = '11111111-1111-1111-1111-111111111111'; name = 'OrphanDomain' } }) | Out-Null
+        $script:orphans.Add([pscustomobject]@{ Kind = 'Term'; Item = [pscustomobject]@{ id = '22222222-2222-2222-2222-222222222222'; name = 'OrphanTerm' } }) | Out-Null
+
+        Invoke-Issue106Replay -Confirm:$false
+
+        $script:ReplayDeleteCalls.Count | Should -Be 0 -Because 'audit mode must fire zero deletes even with -PruneMissing and a non-empty $orphans (pre-fix this was 2/2)'
+    }
+
+    It 'drives the real write-loop AST under -DirectionPolicy audit and fires zero creates, even with a non-empty $plan (defense in depth)' {
+        # In the real run $plan is already emptied by Invoke-DirectionPolicyPlan
+        # before this loop is reached, so this case is belt-and-braces: it
+        # proves $WhatIfPreference independently protects the write loop too,
+        # not only the delete loop.
+        $script:ReplayCreateCalls = [System.Collections.Generic.List[string]]::new()
+        function Invoke-UCBusinessDomainCreate { param($Context, $Payload) $null = $Context; $script:ReplayCreateCalls.Add("BusinessDomain:$($Payload.name)"); return [pscustomobject]@{ id = '00000000-0000-0000-0000-000000000000'; name = $Payload.name } }
+        function ConvertTo-BusinessDomainCreatePayload { param($Desired) return [pscustomobject]@{ name = $Desired.name } }
+
+        . Register-Issue106ReplayFunction -BodyText $script:Issue106WriteLoopAst.Extent.Text
+
+        $script:DirectionPolicy = 'audit'
+        $script:context = [pscustomobject]@{ Stub = $true }
+        $script:createdDomainIds = @{}
+        $script:effectiveDomainByName = @{}
+        $script:termIdByKey = @{}
+        $script:objectiveIdByName = @{}
+        $script:writeOrder = @('BusinessDomain', 'DataProduct', 'Okr', 'OkrKeyResult', 'CriticalDataElement', 'Term')
+        $script:plan = New-Object 'System.Collections.Generic.List[object]'
+        $script:plan.Add([pscustomobject]@{ Action = 'Create'; Kind = 'BusinessDomain'; Desired = [pscustomobject]@{ name = 'ReplayDomain' }; Tenant = $null; Fields = @(); Conflict = $false }) | Out-Null
+
+        Invoke-Issue106Replay -Confirm:$false
+
+        $script:ReplayCreateCalls.Count | Should -Be 0 -Because 'audit mode must fire zero creates (pre-fix this was 1/1 when $plan was non-empty)'
+    }
+}
+
 Describe 'Source surface contract' {
     It 'keeps the required reconciler switches and ADR markers in source' {
         $raw = Get-Content -LiteralPath $script:ScriptPath -Raw
