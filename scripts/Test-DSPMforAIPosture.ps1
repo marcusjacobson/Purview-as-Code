@@ -79,6 +79,8 @@
 .PARAMETER ParametersFile
     Path to the environment parameters YAML (ADR 0012). Defaults to
     `infra/parameters/lab.yaml`.
+    When the parameter is omitted, the PURVIEW_PARAMETERS_FILE environment
+    variable (ADR 0057) takes precedence over the lab default.
 
 .PARAMETER VaultName
     Key Vault that holds the automation certificate. When omitted,
@@ -373,8 +375,15 @@ Add-PostureRow -Report $report -Check 'posture.cadence' -Status 'OK' -Detail ([s
 
 if ($ConnectTenant.IsPresent) {
 
+    # When -ParametersFile is omitted, the PURVIEW_PARAMETERS_FILE environment
+    # variable (set per-environment by the CI workflows) selects the parameters
+    # file. See docs/adr/0057-multi-environment-and-branch-model.md.
     if (-not $ParametersFile) {
-        $ParametersFile = Join-Path $repoRoot 'infra/parameters/lab.yaml'
+        $ParametersFile = if ($env:PURVIEW_PARAMETERS_FILE) {
+            $env:PURVIEW_PARAMETERS_FILE
+        } else {
+            Join-Path $repoRoot 'infra/parameters/lab.yaml'
+        }
     }
     if (-not (Test-Path -LiteralPath $ParametersFile)) {
         Add-PostureRow -Report $report -Check 'Parameters file' -Status 'Fail' -Detail ("Not found: '{0}'." -f $ParametersFile)

@@ -77,6 +77,8 @@
 .PARAMETER ParametersFile
     Path to the environment parameters YAML file (ADR 0012). Defaults to
     `infra/parameters/lab.yaml` resolved relative to the repo root.
+    When the parameter is omitted, the PURVIEW_PARAMETERS_FILE environment
+    variable (ADR 0057) takes precedence over the lab default.
 
 .PARAMETER DisplayName
     Override the Entra app display name. When omitted (the default), the
@@ -130,8 +132,15 @@ $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $PSCommandPath
 $repoRoot = Split-Path -Parent $scriptRoot
 
+# When -ParametersFile is omitted, the PURVIEW_PARAMETERS_FILE environment
+# variable (set per-environment by the CI workflows) selects the parameters
+# file. See docs/adr/0057-multi-environment-and-branch-model.md.
 if (-not $ParametersFile) {
-    $ParametersFile = Join-Path $repoRoot 'infra/parameters/lab.yaml'
+    $ParametersFile = if ($env:PURVIEW_PARAMETERS_FILE) {
+        $env:PURVIEW_PARAMETERS_FILE
+    } else {
+        Join-Path $repoRoot 'infra/parameters/lab.yaml'
+    }
 }
 if (-not (Test-Path -LiteralPath $ParametersFile)) {
     Write-Error ("Parameters file not found: '{0}'. See docs/adr/0012-environment-parameters-file.md for the expected shape and infra/parameters/README.md for the consumer contract." -f $ParametersFile)
