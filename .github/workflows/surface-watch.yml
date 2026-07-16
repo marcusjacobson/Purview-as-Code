@@ -161,40 +161,49 @@ jobs:
           if ($driftDetected) {
             Add-Content -Path $env:GITHUB_OUTPUT -Value "drift=true"
             
-            # Build issue body.
-            $issueBody = @"
-## Surface-watch drift detected
+            # Build issue body. Uses a StringBuilder (not a here-string) because
+            # this run: block is a YAML block scalar with a nonzero indentation
+            # floor — a here-string's closing "@ must sit at column 0 with no
+            # leading whitespace, which is incompatible with that floor. See
+            # code-currency-watch.yml and watch-list-review.yml for the same
+            # idiom.
+            $sb = [System.Text.StringBuilder]::new()
+            [void]$sb.AppendLine("## Surface-watch drift detected")
+            [void]$sb.AppendLine("")
+            [void]$sb.AppendLine("The Microsoft Purview documentation surface has diverged from the [project plan §3 feature inventory](../../docs/project-plan.md#3-feature-inventory).")
 
-The Microsoft Purview documentation surface has diverged from the [project plan §3 feature inventory](../../docs/project-plan.md#3-feature-inventory).
-
-"@
-            
             if ($removalsReport.Count -gt 0) {
-              $issueBody += "`n### Features in §3 but not accessible on Learn`n`n"
-              $issueBody += ($removalsReport -join "`n")
-              $issueBody += "`n"
+              [void]$sb.AppendLine("")
+              [void]$sb.AppendLine("### Features in §3 but not accessible on Learn")
+              [void]$sb.AppendLine("")
+              foreach ($line in $removalsReport) { [void]$sb.AppendLine($line) }
             }
-            
+
             if ($changesReport.Count -gt 0) {
-              $issueBody += "`n### Features with changed titles`n`n"
-              $issueBody += ($changesReport -join "`n")
-              $issueBody += "`n"
+              [void]$sb.AppendLine("")
+              [void]$sb.AppendLine("### Features with changed titles")
+              [void]$sb.AppendLine("")
+              foreach ($line in $changesReport) { [void]$sb.AppendLine($line) }
             }
-            
+
             if ($additionsReport.Count -gt 0) {
-              $issueBody += "`n### New features on Learn (not in §3)`n`n"
-              $issueBody += ($additionsReport -join "`n")
-              $issueBody += "`n"
+              [void]$sb.AppendLine("")
+              [void]$sb.AppendLine("### New features on Learn (not in §3)")
+              [void]$sb.AppendLine("")
+              foreach ($line in $additionsReport) { [void]$sb.AppendLine($line) }
             }
-            
-            $issueBody += "`n---`n`n"
-            $issueBody += "**Next steps:**`n`n"
-            $issueBody += "1. Review each drift entry above`n"
-            $issueBody += "2. Update ``docs/project-plan.md`` §3 to reflect current Learn surface`n"
-            $issueBody += "3. File new §5 Progress checklist rows for net-new features (if applicable)`n"
-            $issueBody += "4. File new §8 Q-rows for unanswered design questions (if applicable)`n"
-            
-            Set-Content -Path surface-report.txt -Value $issueBody
+
+            [void]$sb.AppendLine("")
+            [void]$sb.AppendLine("---")
+            [void]$sb.AppendLine("")
+            [void]$sb.AppendLine("**Next steps:**")
+            [void]$sb.AppendLine("")
+            [void]$sb.AppendLine("1. Review each drift entry above")
+            [void]$sb.AppendLine("2. Update ``docs/project-plan.md`` §3 to reflect current Learn surface")
+            [void]$sb.AppendLine("3. File new §5 Progress checklist rows for net-new features (if applicable)")
+            [void]$sb.AppendLine("4. File new §8 Q-rows for unanswered design questions (if applicable)")
+
+            Set-Content -Path surface-report.txt -Value $sb.ToString()
             Write-Host "::notice::Drift detected. Issue will be opened."
           } else {
             Add-Content -Path $env:GITHUB_OUTPUT -Value "drift=false"
