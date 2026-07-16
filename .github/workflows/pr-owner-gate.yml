@@ -50,9 +50,11 @@ jobs:
             --json labels \
             --jq '.labels[].name')
 
-          echo "labels<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$LABELS" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "labels<<EOF"
+            echo "$LABELS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
           HAS_NEEDS_REVIEW=$(echo "$LABELS" | grep -c "needs-review" || true)
           HAS_APPROVED=$(echo "$LABELS" | grep -c "owner-approved" || true)

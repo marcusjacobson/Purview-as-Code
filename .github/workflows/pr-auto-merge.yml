@@ -222,6 +222,15 @@ jobs:
           # have closed for this PR. It is the only list we act on — nothing outside it is ever
           # touched, so this job cannot close an unrelated issue.
           # Reference: https://docs.github.com/en/graphql/reference/objects#pullrequest
+          #
+          # The query below is single-quoted ON PURPOSE: $owner, $name, and $number are
+          # GraphQL's OWN variable syntax, not shell variables, and must not be shell-expanded.
+          # Their actual values flow in separately via the -f owner= / -f name= / -F number=
+          # flags above, which `gh api graphql` binds to the declared GraphQL variables.
+          # Double-quoting this string (shellcheck's suggested fix) would have the shell
+          # substitute $owner/$name/$number with their unset, empty shell values, corrupting
+          # the query into `query(: String!, ...)`.
+          # shellcheck disable=SC2016
           LINKED=$(gh api graphql \
             -f owner="$OWNER" \
             -f name="$REPO_NAME" \
