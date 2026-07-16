@@ -42,14 +42,47 @@ jobs:
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
         run: |
-          COMBINED="${ISSUE_TITLE} ${ISSUE_BODY}"
-          COMBINED_LOWER=$(echo "$COMBINED" | tr '[:upper:]' '[:lower:]')
           ISSUE_NUMBER="${{ github.event.issue.number }}"
           REPO="${{ github.repository }}"
 
+          # Preferred path (fix #117): the issue body's own ## Squad Personas section
+          # (written by @idea-intake) already names the exact squad:* labels, embedded
+          # as backtick-quoted tokens, e.g.:
+          #   **Primary:** Automation Engineer (`squad:automation-engineer`)
+          #   **Supporting:** Tester / Validator (`squad:tester-validator`)
+          # Extract the section — everything between that heading and the next ## heading,
+          # or end of body — and pull every `squad:*` token out of it. If at least one is
+          # found, apply EXACTLY those labels and skip the keyword-grep fallback below
+          # entirely: that is what stops the keyword-grep from re-adding labels the Squad
+          # Personas section deliberately left out (the label-saturation defect this fixes).
+          SQUAD_SECTION=$(printf '%s\n' "$ISSUE_BODY" | awk '/^## Squad Personas/{flag=1; next} /^## /{flag=0} flag')
+          # The backticks in this pattern are the literal Markdown code-span delimiters
+          # GitHub renders around a label token (e.g. "`squad:automation-engineer`"), not
+          # command substitution -- they must stay inside single quotes so grep matches
+          # them as literal data. shellcheck's SC2016 flags any backtick inside single
+          # quotes as a possible unintended-expansion mistake; it is not one here.
+          # shellcheck disable=SC2016
+          SQUAD_LABELS=$(printf '%s\n' "$SQUAD_SECTION" | grep -oE '`squad:[a-z-]+`' | tr -d '`' | sort -u || true)
+
+          if [ -n "$SQUAD_LABELS" ]; then
+            LABEL_CSV=$(echo "$SQUAD_LABELS" | paste -sd, -)
+            echo "Routing via ## Squad Personas section: $LABEL_CSV"
+            gh issue edit "$ISSUE_NUMBER" --add-label "$LABEL_CSV" --repo "$REPO"
+            exit 0
+          fi
+
+          # Fallback: no ## Squad Personas section (or no squad:* token inside it) — e.g.
+          # an issue filed directly via `gh issue create` rather than through @idea-intake.
+          # Preserve the original keyword-grep routing unchanged so manually-filed issues
+          # keep getting triage signal.
+          echo "No ## Squad Personas section found (or no squad:* token in it); falling back to keyword routing."
+
+          COMBINED="${ISSUE_TITLE} ${ISSUE_BODY}"
+          COMBINED_LOWER=$(echo "$COMBINED" | tr '[:upper:]' '[:lower:]')
+
           # Note: Keyword routing is intentionally additive — an issue may receive multiple squad
-          # labels when it spans domains. The primary persona is determined by the issue body's
-          # ## Squad Personas section (written by @idea-intake).
+          # labels when it spans domains. This fallback only runs when the issue body has no
+          # ## Squad Personas section (or the section carries no squad:* token); see above.
 
           # Lead / Architect: architecture, ADRs, framework decisions, roadmap
           if echo "$COMBINED_LOWER" | grep -qE \
