@@ -1,10 +1,14 @@
 name: validate
 
+# dev and lab are operator branches (ADR 0057): a spin-off carries populated
+# desired state there, so validation must run on them too. The pester gate's
+# ShippedDesiredState suites enforce the ADR 0056 empty-desired-state contract
+# only when the target branch is main; every other gate applies unchanged.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, dev, lab]
   push:
-    branches: [main]
+    branches: [main, dev, lab]
 
 permissions:
   contents: read

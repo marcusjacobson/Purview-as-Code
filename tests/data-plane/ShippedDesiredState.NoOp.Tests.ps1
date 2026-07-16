@@ -48,12 +48,45 @@
     the PR: ShippedDesiredState.Tests.ps1 FAILS against the pre-fix tree, naming the 11
     populated files. A guard that passes on the broken state is worthless.
 
+    BRANCH AWARENESS (ADR 0057). The CLAIM 1 assertions read the SHIPPED YAML and
+    assert it is empty — a property of the template branch (main) only. An
+    operator spin-off populates desired state on its dev / lab branches by
+    design, so CLAIM 1 skips there. CLAIM 2 and the STRUCTURE proofs read
+    examples/** and the reconciler AST, hold in every copy, and never skip.
+
     References:
+      ADR 0057 — multi-environment and branch model (why CLAIM 1 is main-only)
       ADR 0056 — the template ships empty desired state
       ADR 0052 / ADR 0053 — deletes require an explicit -PruneMissing
       https://pester.dev/docs/quick-start
       https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_foreach
 #>
+
+BeforeDiscovery {
+    # ADR 0057: same branch resolution as ShippedDesiredState.Tests.ps1 — CI
+    # variables first (GITHUB_BASE_REF on pull_request, GITHUB_REF_NAME on push),
+    # local checked-out branch as the fallback. Skip ONLY on dev / lab.
+    # Reference: https://docs.github.com/en/actions/reference/workflows-and-actions/variables#default-environment-variables
+    $script:TargetBranch = $null
+    if ($env:GITHUB_BASE_REF) { $script:TargetBranch = $env:GITHUB_BASE_REF }
+    elseif ($env:GITHUB_REF_NAME) { $script:TargetBranch = $env:GITHUB_REF_NAME }
+    else {
+        try {
+            $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
+            $script:TargetBranch = [string](& git -C $repoRoot rev-parse --abbrev-ref HEAD 2>$null)
+        }
+        catch { $script:TargetBranch = $null }
+    }
+    if (-not $script:TargetBranch) { $script:TargetBranch = 'main' }
+
+    $script:SkipEmptyStateEnforcement = $script:TargetBranch.Trim() -in @('dev', 'lab')
+    if ($script:SkipEmptyStateEnforcement) {
+        $msg = ("ShippedDesiredState.NoOp: target branch '{0}' is an operator branch — the CLAIM 1 " +
+            '(shipped-state-is-empty) assertions are SKIPPED here and enforced on main only ' +
+            '(ADR 0057). CLAIM 2 and the STRUCTURE proofs still run.') -f $script:TargetBranch.Trim()
+        Write-Host $msg
+    }
+}
 
 BeforeAll {
     $script:RepoRoot   = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
@@ -187,7 +220,7 @@ Describe 'No-op proof — Deploy-Labels' {
         }
     }
 
-    It 'CLAIM 1 — the SHIPPED labels.yaml derives ZERO desired labels' {
+    It 'CLAIM 1 — the SHIPPED labels.yaml derives ZERO desired labels' -Skip:$script:SkipEmptyStateEnforcement {
         $hashes = Get-DesiredLabelHash -YamlPath 'data-plane/information-protection/labels.yaml'
         @($hashes).Count | Should -Be 0 -Because 'ADR 0056: the template ships `labels: []`'
     }
@@ -316,13 +349,13 @@ Describe 'No-op proof — Deploy-AutoLabelPolicies (the file that shipped the en
         }
     }
 
-    It 'CLAIM 1 — the SHIPPED auto-label-policies.yaml derives ZERO policies and ZERO rules' {
+    It 'CLAIM 1 — the SHIPPED auto-label-policies.yaml derives ZERO policies and ZERO rules' -Skip:$script:SkipEmptyStateEnforcement {
         $d = Get-DesiredAutoLabel -YamlPath 'data-plane/information-protection/auto-label-policies.yaml'
         @($d.Policies).Count | Should -Be 0
         @($d.Rules).Count    | Should -Be 0
     }
 
-    It 'CLAIM 1 — and no policy anywhere in the shipped file is at mode Enable' {
+    It 'CLAIM 1 — and no policy anywhere in the shipped file is at mode Enable' -Skip:$script:SkipEmptyStateEnforcement {
         # Belt and braces on the specific defect. Even if someone re-populates the list,
         # an enforcing policy must never be the shipped default.
         $raw = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'data-plane/information-protection/auto-label-policies.yaml') -Raw
@@ -382,13 +415,13 @@ Describe 'No-op proof — Deploy-Collections (no early guard: the proof is CONTA
         $script:CollectionsAst = Get-ScriptAst -ScriptName 'Deploy-Collections.ps1'
     }
 
-    It 'CLAIM 1 — the SHIPPED collections.yaml flattens to ZERO desired collections' {
+    It 'CLAIM 1 — the SHIPPED collections.yaml flattens to ZERO desired collections' -Skip:$script:SkipEmptyStateEnforcement {
         $root = Get-Yaml -RelativePath 'data-plane/collections/collections.yaml'
         $desired = @(ConvertTo-DesiredCollectionList -Tree $root -RootName 'purview-contoso-lab')
         $desired.Count | Should -Be 0 -Because 'ADR 0056: the template ships `collections: []`'
     }
 
-    It 'CLAIM 1 — and rootCollection ships UNSET (the account name is a tenant identifier, not desired state)' {
+    It 'CLAIM 1 — and rootCollection ships UNSET (the account name is a tenant identifier, not desired state)' -Skip:$script:SkipEmptyStateEnforcement {
         $root = Get-Yaml -RelativePath 'data-plane/collections/collections.yaml'
         # Emptying the list does not clear this scalar; it had to be handled separately.
         # `Deploy-Collections.ps1:852` treats it as optional and informational — the real

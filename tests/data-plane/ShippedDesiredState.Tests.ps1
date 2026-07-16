@@ -46,7 +46,16 @@
     the test that guards it — not a silent YAML change nobody reads. The
     'every copy, forever' Contexts must keep passing in that spin-off regardless.
 
+    BRANCH AWARENESS (ADR 0057). The empty-desired-state contract is a property
+    of the TEMPLATE branch: main (and the operator repo's main, which mirrors
+    upstream). An operator spin-off carries populated desired state on its
+    dev / lab branches by design, so on those branches the EMPTINESS assertions
+    (and only those) skip with a message. Every 'every copy, forever' assertion
+    — parse integrity, carve-out pins, no-raw-principal-GUID, examples/** is
+    inert — stays enforced on every branch of every copy.
+
     References:
+      ADR 0057 — multi-environment and branch model (why emptiness is main-only)
       ADR 0056 — the template ships empty desired state (why this file is uniform)
       ADR 0055 — identifier-shaped residual scan (why this file exists)
       ADR 0035 — records seed content is immovable (the seed-skip carve-out)
@@ -55,6 +64,35 @@
       ADR 0052 / ADR 0053 — the destructive-operation contract these lists feed
       https://pester.dev/docs/quick-start
 #>
+
+BeforeDiscovery {
+    # ADR 0057: resolve the branch this run validates. In CI the GitHub-provided
+    # variables are authoritative (GITHUB_BASE_REF on pull_request events,
+    # GITHUB_REF_NAME on push); locally, fall back to the checked-out branch.
+    # Reference: https://docs.github.com/en/actions/reference/workflows-and-actions/variables#default-environment-variables
+    $script:TargetBranch = $null
+    if ($env:GITHUB_BASE_REF) { $script:TargetBranch = $env:GITHUB_BASE_REF }
+    elseif ($env:GITHUB_REF_NAME) { $script:TargetBranch = $env:GITHUB_REF_NAME }
+    else {
+        try {
+            $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
+            $script:TargetBranch = [string](& git -C $repoRoot rev-parse --abbrev-ref HEAD 2>$null)
+        }
+        catch { $script:TargetBranch = $null }
+    }
+    if (-not $script:TargetBranch) { $script:TargetBranch = 'main' }
+
+    # Skip ONLY on the two operator branches. Any other branch — main, a template
+    # feature branch, a detached HEAD — enforces, so the guard cannot be dodged
+    # by working on a topic branch of the template.
+    $script:SkipEmptyStateEnforcement = $script:TargetBranch.Trim() -in @('dev', 'lab')
+    if ($script:SkipEmptyStateEnforcement) {
+        $msg = ("ShippedDesiredState: target branch '{0}' is an operator branch — the ADR 0056 " +
+            'empty-desired-state assertions are SKIPPED here and enforced on main only (ADR 0057). ' +
+            'All every-copy-forever assertions still run.') -f $script:TargetBranch.Trim()
+        Write-Host $msg
+    }
+}
 
 BeforeAll {
     $script:RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
@@ -209,9 +247,10 @@ Describe 'Shipped desired state — EVERY root list under data-plane/** ships EM
         $script:RootLists.Count        | Should -BeGreaterThan 25
     }
 
-    # ---- THE RULE.
+    # ---- THE RULE. Enforced on main only (ADR 0057): an operator spin-off
+    # ---- populates desired state on its dev / lab branches by design.
 
-    It 'ships EVERY root list empty, except the three named carve-outs' {
+    It 'ships EVERY root list empty, except the three named carve-outs' -Skip:$script:SkipEmptyStateEnforcement {
         $violations = [System.Collections.Generic.List[string]]::new()
 
         foreach ($rl in $script:RootLists) {
@@ -608,11 +647,17 @@ Describe 'Shipped desired state — examples/** is documentation, not a deploy p
             'tree. Defined at: ' + ($hits -join ', '))
     }
 
-    It 'no auto-label policy anywhere in data-plane/ or examples/ ships at mode: Enable' {
+    It 'no auto-label policy anywhere in data-plane/ or examples/ ships at mode: Enable' -Skip:$script:SkipEmptyStateEnforcement {
         # The generalisation of the assertion above. Blocking one policy by NAME is a
         # blocklist, and a blocklist only catches the instance you already found. The
         # hazard is the SHAPE: an enforcing auto-label policy shipped in a public
         # template. Block the shape.
+        #
+        # Main-only (ADR 0057): on an operator's dev / lab branch an enforcing
+        # policy is a legitimate END state — reached through the ADR 0016
+        # promotion ladder, one destructive-labelled PR per step, in the
+        # operator's own reviewed repo. What must never carry one is the
+        # template (and the operator main that mirrors it).
         $hits = [System.Collections.Generic.List[string]]::new()
         foreach ($rel in @(
                 'data-plane/information-protection/auto-label-policies.yaml'
