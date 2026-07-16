@@ -383,8 +383,8 @@ if ($fcList.Count -eq 1) {
         # carry a non-canonical name (for example gh-env-lab-ops) while the
         # issuer/subject/audiences already match. The name is advisory; only
         # subject/issuer/audiences are security-critical. Canonicalize later
-        # by deleting the credential and re-running this script (ADR 0057 §7).
-        Write-Warning ("Application '{0}' federated credential name is '{1}' (expected canonical name '{2}'). Subject/issuer/audiences match — continuing. To canonicalize: delete the credential and re-run this script." -f $DisplayName, $fc.name, $expectedFcName)
+        # by deleting the credential and re-running this script (ADR 0057 section 7).
+        Write-Warning ("Application '{0}' federated credential name is '{1}' (expected canonical name '{2}'). Subject/issuer/audiences match -- continuing. To canonicalize: delete the credential and re-run this script." -f $DisplayName, $fc.name, $expectedFcName)
     }
 
     Write-Information ("  = Federated credential matches ADR 0010 (id: {0})." -f $fc.id) -InformationAction Continue

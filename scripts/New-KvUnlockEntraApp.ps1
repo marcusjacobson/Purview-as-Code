@@ -239,7 +239,7 @@ function Assert-KvUnlockFederatedCredential {
     }
 
     if ($nameMismatch) {
-        Write-Warning ("Application '$DisplayName' federated credential name is '$($fc.name)' (expected canonical name '$($Expected.FcName)'). Subject/issuer/audiences match — continuing. To canonicalize: delete the credential and re-run this script (ADR 0057 §7).")
+        Write-Warning ("Application '$DisplayName' federated credential name is '$($fc.name)' (expected canonical name '$($Expected.FcName)'). Subject/issuer/audiences match -- continuing. To canonicalize: delete the credential and re-run this script (ADR 0057 section 7).")
     }
 
     return $fc

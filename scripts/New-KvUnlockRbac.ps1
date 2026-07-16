@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.4
+#Requires -Version 7.4
 <#
 .SYNOPSIS
     Deploy the kv-temp-unlock workflow's RBAC grant via infra/modules/kv-unlock-rbac.bicep (PR D1b / Issue #257).
