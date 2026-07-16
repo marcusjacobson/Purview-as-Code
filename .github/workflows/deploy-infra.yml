@@ -1,26 +1,79 @@
 name: deploy-infra
 
-# Manual-dispatch only until Wave 0 ships OIDC federated credentials
-# (scripts/New-AutomationIdentity.ps1) and the Purview account exists.
-# Re-add the `push:` trigger in the same PR that lands those deliverables.
+# Control-plane (Bicep) deployment. Manual-dispatch only until the push
+# trigger is deliberately enabled in a spin-off; re-add `push:` alongside
+# path filters when the operator wants merge-driven control-plane deploys.
+#
+# Environment routing (ADR 0057): the `environment` dispatch input selects
+# the GitHub Environment (`lab` default, `dev` optional). The job's
+# `environment:` declaration keeps the OIDC federated-credential subject
+# `repo:<org>/<repo>:environment:<environment>` intact (ADR 0010).
+# The resource group comes from the selected Environment's `PURVIEW_RG`
+# variable; the Bicep parameter file is selected per environment
+# (`infra/main.<environment>.bicepparam` for non-lab environments,
+# the shipped `infra/main.bicepparam` for lab).
+#
 # Reference: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
+# Reference: https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/deploy-github-actions
+# Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: >-
+          Target deployment environment (GitHub Environment name). `lab`
+          uses infra/main.bicepparam; any other environment requires a
+          matching infra/main.<environment>.bicepparam file (ADR 0057).
+        type: choice
+        options:
+          - lab
+          - dev
+        default: lab
+        required: false
 
 permissions:
   id-token: write   # OIDC federated login to Entra
   contents: read
 
-env:
-  LOCATION: eastus
-  RESOURCE_GROUP: rg-purview-lab
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: lab
+    # Dispatch-only workflow: `inputs.environment` is always present
+    # (default `lab`), so no branch mapping is needed here. See ADR 0057
+    # for the push-trigger branch mapping used by the data-plane workflows.
+    environment: ${{ inputs.environment || 'lab' }}
+    env:
+      ENVIRONMENT_NAME: ${{ inputs.environment || 'lab' }}
+      # Resource group name is environment-scoped configuration, sourced
+      # from the selected GitHub Environment's variables — never hardcoded.
+      # Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#environment-variables
+      RESOURCE_GROUP: ${{ vars.PURVIEW_RG }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve environment configuration
+        id: config
+        # Fail fast when the selected Environment is missing its variables,
+        # and pin the Bicep parameter file for the selected environment.
+        # Non-lab environments MUST provide infra/main.<environment>.bicepparam
+        # so a dev dispatch can never silently deploy lab-shaped parameters.
+        run: |
+          set -euo pipefail
+          if [ -z "$RESOURCE_GROUP" ]; then
+            echo "::error::vars.PURVIEW_RG is not set on the '$ENVIRONMENT_NAME' GitHub Environment. Set it before re-running." >&2
+            exit 1
+          fi
+          if [ "$ENVIRONMENT_NAME" = "lab" ]; then
+            PARAMS_FILE="infra/main.bicepparam"
+          else
+            PARAMS_FILE="infra/main.${ENVIRONMENT_NAME}.bicepparam"
+            if [ ! -f "$PARAMS_FILE" ]; then
+              echo "::error::Parameter file '$PARAMS_FILE' not found. Non-lab environments require their own Bicep parameter file (ADR 0057)." >&2
+              exit 1
+            fi
+          fi
+          echo "Environment: $ENVIRONMENT_NAME; resource group: $RESOURCE_GROUP; parameter file: $PARAMS_FILE"
+          echo "params_file=$PARAMS_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -38,15 +91,19 @@ jobs:
         run: az group show -n "$RESOURCE_GROUP" -o none
 
       - name: What-If
+        env:
+          PARAMS_FILE: ${{ steps.config.outputs.params_file }}
         run: |
           az deployment group what-if \
             --resource-group "$RESOURCE_GROUP" \
             --template-file infra/main.bicep \
-            --parameters infra/main.bicepparam
+            --parameters "$PARAMS_FILE"
 
       - name: Deploy
+        env:
+          PARAMS_FILE: ${{ steps.config.outputs.params_file }}
         run: |
           az deployment group create \
             --resource-group "$RESOURCE_GROUP" \
             --template-file infra/main.bicep \
-            --parameters infra/main.bicepparam
+            --parameters "$PARAMS_FILE"

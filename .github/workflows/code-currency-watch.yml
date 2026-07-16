@@ -60,6 +60,17 @@ on:
     - cron: '0 4 * * 1'
   workflow_dispatch:
     inputs:
+      environment:
+        description: >-
+          Target deployment environment (GitHub Environment name).
+          Defaults to lab. Push/schedule runs map branch dev -> dev and
+          every other branch -> lab (ADR 0057).
+        type: choice
+        options:
+          - lab
+          - dev
+        default: lab
+        required: false
       min_severity:
         description: 'Lowest severity that opens an issue: retiring | actionable | informational.'
         type: choice
@@ -87,7 +98,7 @@ jobs:
   check-currency:
     name: Check code currency
     runs-on: ubuntu-latest
-    environment: lab          # Matches the OIDC federated-credential subject (ADR 0010).
+    environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}  # Matches the OIDC federated-credential subject (ADR 0010 / ADR 0057).
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2

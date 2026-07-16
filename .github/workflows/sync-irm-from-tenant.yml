@@ -4,7 +4,7 @@ name: sync-irm-from-tenant
 # forward-apply workflow for the Insider Risk Management (IRM) policy
 # surface (ADR 0051). Detects portal-only edits to the
 # Microsoft Purview Insider Risk Management policy surface in the
-# contoso.onmicrosoft.com tenant and opens (or refreshes) a GitHub
+# target tenant (selected environment) and opens (or refreshes) a GitHub
 # ISSUE describing the drift.
 #
 # Tier-3 surface -- ISSUE, not PR. Unlike the sensitivity-label,
@@ -56,8 +56,9 @@ name: sync-irm-from-tenant
 #
 # Federated credential reuse: the gh-oidc-purview-data-plane app's
 # federated credential is scoped to
-# `repo:contoso/Purview-as-Code-Generic:environment:lab`
-# (per ADR 0010). Because this job declares `environment: lab`, no new
+# `repo:<org>/<repo>:environment:<environment>`
+# (per ADR 0010). Because this job declares the selected `environment:`
+# (ADR 0057), no new
 # federated credential subject is required for the schedule trigger.
 #
 # Key Vault access: the runner principal signs the IPPS client_assertion
@@ -90,6 +91,17 @@ on:
     - cron: '0 8 * * *'
   workflow_dispatch:
     inputs:
+      environment:
+        description: >-
+          Target deployment environment (GitHub Environment name).
+          Defaults to lab. Push/schedule runs map branch dev -> dev and
+          every other branch -> lab (ADR 0057).
+        type: choice
+        options:
+          - lab
+          - dev
+        default: lab
+        required: false
       skip_names_irm:
         description: |
           Comma-separated list of Insider Risk Management policy names
@@ -119,15 +131,20 @@ permissions:
   issues: write             # gh issue create / gh label create when drift detected.
 
 concurrency:
-  group: sync-irm-lab
+  group: sync-irm-${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
   cancel-in-progress: false
 
 jobs:
   sync:
     name: Detect IRM policy drift from tenant
     runs-on: ubuntu-latest
-    environment: lab
+    environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
     env:
+      ENVIRONMENT_NAME: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+      # Reconciler parameters-file override (ADR 0057): every
+      # Deploy-*.ps1 / Export-*.ps1 honors PURVIEW_PARAMETERS_FILE when
+      # -ParametersFile is not passed explicitly.
+      PURVIEW_PARAMETERS_FILE: infra/parameters/${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}.yaml
       KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
     steps:
       - name: Checkout
@@ -155,7 +172,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not $env:KEY_VAULT_NAME) {
-            throw "vars.KEY_VAULT_NAME is not set on the lab environment. Set it before re-running."
+            throw "vars.KEY_VAULT_NAME is not set on the '$($env:ENVIRONMENT_NAME)' GitHub Environment. Set it before re-running."
           }
           # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
           az keyvault update `
@@ -241,7 +258,7 @@ jobs:
           $sb = [System.Text.StringBuilder]::new()
           [void]$sb.AppendLine('## Summary')
           [void]$sb.AppendLine('')
-          [void]$sb.AppendLine('The scheduled Insider Risk Management reverse drift-detection companion detected drift between the desired-state `data-plane/irm/policies.yaml` and the live `contoso.onmicrosoft.com` tenant.')
+          [void]$sb.AppendLine("The scheduled Insider Risk Management reverse drift-detection companion detected drift between the desired-state ``data-plane/irm/policies.yaml`` and the live tenant behind the ``$($env:ENVIRONMENT_NAME)`` environment.")
           [void]$sb.AppendLine('')
           [void]$sb.AppendLine('This issue was opened automatically by `.github/workflows/sync-irm-from-tenant.yml`.')
           [void]$sb.AppendLine('')
@@ -323,7 +340,7 @@ jobs:
           # Idempotency guard: if an open drift issue for this surface
           # already exists, refresh it with a comment instead of opening
           # a duplicate.
-          $title = 'IRM policy drift detected in contoso.onmicrosoft.com tenant'
+          $title = "IRM policy drift detected in the $($env:ENVIRONMENT_NAME) environment tenant"
           # `// empty` so an empty result set yields no output (not the
           # literal string "null", which is truthy in PowerShell).
           $open = (gh issue list `

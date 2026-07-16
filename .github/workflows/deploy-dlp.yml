@@ -1,7 +1,7 @@
 name: deploy-dlp
 
 # Reconciles the Microsoft Purview Data Loss Prevention (DLP) policies +
-# rules in the contoso.onmicrosoft.com tenant from
+# rules in the target tenant (selected environment) from
 # data-plane/dlp/policies.yaml.
 #
 # Sibling of deploy-auto-label-policies.yml (PR #477) and
@@ -85,7 +85,7 @@ name: deploy-dlp
 #
 # Key Vault access: the runner principal signs the IPPS
 # client_assertion JWT via `az keyvault key sign` against
-# kv-contoso-lab-01. The vault is private-network by default; the
+# the environment's automation Key Vault (vars.KEY_VAULT_NAME). The vault is private-network by default; the
 # apply job temp-opens the public endpoint for the duration of the
 # apply / re-export and restores it via an `if: always()` step.
 #
@@ -111,6 +111,17 @@ name: deploy-dlp
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: >-
+          Target deployment environment (GitHub Environment name).
+          Defaults to lab. Push/schedule runs map branch dev -> dev and
+          every other branch -> lab (ADR 0057).
+        type: choice
+        options:
+          - lab
+          - dev
+        default: lab
+        required: false
       direction_policy:
         description: |
           ADR 0029 source-of-truth direction policy. Three modes:
@@ -146,14 +157,14 @@ on:
         default: ''
         required: false
   push:
-    branches: [main]
+    branches: [main, dev, lab]
     paths:
       - 'data-plane/dlp/policies.yaml'
       - 'data-plane/dlp/policies.schema.json'
       - 'scripts/Deploy-DLPPolicies.ps1'
       - 'scripts/Get-PurviewIPPSAccessToken.ps1'
       - 'scripts/modules/DirectionPolicy.psm1'
-      - 'infra/parameters/lab.yaml'
+      - 'infra/parameters/*.yaml'
       - '.github/workflows/deploy-dlp.yml'
 
 # Deny-by-default at workflow scope. Each job declares the minimum
@@ -162,18 +173,23 @@ on:
 permissions: {}
 
 concurrency:
-  group: deploy-dlp-lab
+  group: deploy-dlp-${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
   cancel-in-progress: false
 
 jobs:
   apply:
     name: Apply DLP policies
     runs-on: ubuntu-latest
-    environment: lab
+    environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
     permissions:
       id-token: write       # OIDC token for azure/login@v2.
       contents: read        # Checkout only; does not push or open PRs.
     env:
+      ENVIRONMENT_NAME: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+      # Reconciler parameters-file override (ADR 0057): every
+      # Deploy-*.ps1 / Export-*.ps1 honors PURVIEW_PARAMETERS_FILE when
+      # -ParametersFile is not passed explicitly.
+      PURVIEW_PARAMETERS_FILE: infra/parameters/${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}.yaml
       KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
       # Defaults applied for `push` events (where github.event.inputs
       # is null) so the rest of the job can read the env vars
@@ -252,7 +268,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not $env:KEY_VAULT_NAME) {
-            throw "vars.KEY_VAULT_NAME is not set on the lab environment. Set it before re-running."
+            throw "vars.KEY_VAULT_NAME is not set on the '$($env:ENVIRONMENT_NAME)' GitHub Environment. Set it before re-running."
           }
           az keyvault update `
             --name $env:KEY_VAULT_NAME `
@@ -466,8 +482,12 @@ jobs:
           # sync-dlp-from-tenant.yml) so an apply-time drift-back PR and
           # the daily scheduled drift-back PR cannot fight over the same
           # branch and PR.
-          branch: auto/dlp-portal-wins-drift
-          base: main
+          # Environment-suffixed so lab and dev drift-back PRs never
+          # fight over one branch; base follows the triggering branch
+          # so drift returns to the source-of-truth branch it came from
+          # (ADR 0057).
+          branch: auto/dlp-portal-wins-drift-${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+          base: ${{ github.ref_name }}
           delete-branch: false
           title: 'chore(data-plane): drift-back sync DLP policies skipped under portal-wins'
           commit-message: |
@@ -478,7 +498,7 @@ jobs:
             drifts on DLP policies and/or rules per ADR 0029.
             Re-exports the live Microsoft Purview Data Loss Prevention
             (DLP) policy set (and rules) in tenant
-            contoso.onmicrosoft.com into data-plane/dlp/policies.yaml
+            the target tenant into data-plane/dlp/policies.yaml
             so the repo can be brought back in sync with the tenant.
 
             See: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-dlpcompliancepolicy
@@ -523,7 +543,7 @@ jobs:
               automatically dispatch other workflows
               (`validate.yml` etc.). To run validation, **close
               and reopen this PR**, or push an empty commit to the
-              `auto/dlp-portal-wins-drift` branch.
+              `auto/dlp-portal-wins-drift-<environment>` branch.
             - Trigger: run [${{ github.run_id }}](../actions/runs/${{ github.run_id }})
               of `${{ github.workflow }}` on
               `${{ github.ref_name }}` at `${{ github.sha }}`.

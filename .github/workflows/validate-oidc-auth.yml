@@ -6,8 +6,8 @@ name: validate-oidc-auth
 # via Connect-IPPSSession -AccessToken).
 #
 # This workflow performs no persistent state changes. It only:
-#   1. Federates an OIDC token to the control-plane app and reads the lab
-#      resource group via ARM as proof of the handshake.
+#   1. Federates an OIDC token to the control-plane app and reads the
+#      target resource group via ARM as proof of the handshake.
 #   2. Briefly opens the Key Vault firewall (publicNetworkAccess Enabled)
 #      so the GitHub-hosted runner can read the data-plane cert. The
 #      control-plane app authorizes this via Contributor on the RG (Wave
@@ -19,11 +19,18 @@ name: validate-oidc-auth
 #      session, lists one role group as proof, and disconnects.
 #
 # The two app identities are kept distinct per ADR 0010 (per-workflow
-# identity, single-subject federated credential `environment:lab`). The
+# identity, single-subject federated credential `environment:<name>`). The
 # certificate-backed JWT path is required because the data-plane app's
 # private key is a non-exportable Key Vault managed key per ADR 0011 -- the
 # default Connect-IPPSSession -CertificateThumbprint path is impossible by
 # design.
+#
+# Environment routing (ADR 0057): the `environment` dispatch input selects
+# which GitHub Environment (`lab` default, `dev` optional) supplies the
+# secrets and variables, so one workflow validates the OIDC contract for
+# either environment. All environment-specific values (resource group,
+# Key Vault, certificate name, tenant domain) come from the selected
+# Environment's variables -- never hardcoded.
 #
 # References:
 #   https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
@@ -35,39 +42,65 @@ name: validate-oidc-auth
 
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target deployment environment (GitHub Environment name) to validate.'
+        type: choice
+        options:
+          - lab
+          - dev
+        default: lab
+        required: false
 
 permissions:
   id-token: write
   contents: read
 
-# Shared concurrency group across every workflow that toggles the lab Key
-# Vault firewall (`kv-contoso-lab-01`). Currently shared with
+# Shared concurrency group, per environment, across every workflow that
+# toggles that environment's Key Vault firewall. Currently shared with
 # `.github/workflows/kv-temp-unlock.yml`. Two firewall-toggling runs must
 # never overlap, otherwise one run's re-lock can clobber another run's
 # open window or vice versa. `cancel-in-progress: false` so an in-flight
 # run always reaches its re-lock / cleanup step.
 # Reference: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs
 concurrency:
-  group: kv-firewall-lab
+  group: kv-firewall-${{ inputs.environment || 'lab' }}
   cancel-in-progress: false
 
 jobs:
   validate:
     name: Validate OIDC to ARM and Security & Compliance PowerShell
     runs-on: ubuntu-latest
-    environment: lab
+    environment: ${{ inputs.environment || 'lab' }}
     env:
-      # All values below are environment-variable, sourced from
-      # infra/parameters/lab.yaml. They are not secrets; the secret material
-      # is only the federated app credentials.
+      # All values below are environment-scoped configuration, sourced from
+      # the selected GitHub Environment's variables (ADR 0057). They are not
+      # secrets; the secret material is only the federated app credentials.
+      # Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#environment-variables
+      ENVIRONMENT_NAME: ${{ inputs.environment || 'lab' }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      RESOURCE_GROUP: rg-purview-lab
-      KEY_VAULT_NAME: kv-contoso-lab-01
-      DATA_PLANE_CERT_NAME: gh-oidc-purview-data-plane
-      TENANT_DOMAIN: contoso.onmicrosoft.com
+      RESOURCE_GROUP: ${{ vars.PURVIEW_RG }}
+      KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+      DATA_PLANE_CERT_NAME: ${{ vars.DATA_PLANE_CERT_NAME }}
+      TENANT_DOMAIN: ${{ vars.TENANT_DOMAIN }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify environment variables are configured
+        # Fail fast, before any Azure call, when the selected GitHub
+        # Environment is missing a required variable.
+        run: |
+          set -euo pipefail
+          missing=0
+          for pair in "PURVIEW_RG:$RESOURCE_GROUP" "KEY_VAULT_NAME:$KEY_VAULT_NAME" "DATA_PLANE_CERT_NAME:$DATA_PLANE_CERT_NAME" "TENANT_DOMAIN:$TENANT_DOMAIN"; do
+            name="${pair%%:*}"; value="${pair#*:}"
+            if [ -z "$value" ]; then
+              echo "::error::vars.$name is not set on the '$ENVIRONMENT_NAME' GitHub Environment. Set it before re-running." >&2
+              missing=1
+            fi
+          done
+          exit $missing
 
       # ------------------------------------------------------------------
       # 1. Control-plane proof -- ARM
@@ -89,7 +122,7 @@ jobs:
         run: |
           az account show --query "{tenant:tenantId,subscription:id,user:user.name}" -o json
 
-      - name: ARM proof -- read lab resource group
+      - name: ARM proof -- read target resource group
         id: arm-rg
         # Requires the control-plane app to hold at least Reader on the RG.
         # If this fails with AuthorizationFailed, the OIDC handshake itself
@@ -105,7 +138,7 @@ jobs:
       # state per Wave 0 #5a. The GitHub-hosted runner has no private link
       # or trusted-service path, so the data-plane cert read fails with
       # `ForbiddenByConnection`. The control-plane SP holds Contributor on
-      # rg-purview-lab via Wave 0 #5d, which authorizes the toggle. The
+      # the resource group via Wave 0 #5d, which authorizes the toggle. The
       # paired close step below runs with `if: always()` so the vault is
       # re-locked even when the S&C proof fails.
       #
@@ -134,8 +167,8 @@ jobs:
       # 2. Data-plane proof -- Security & Compliance PowerShell
       # ------------------------------------------------------------------
       # The data-plane app's federated credential carries the same
-      # `environment:lab` subject as the control-plane app (different app,
-      # same subject). azure/login@v2 re-mints a token under the new
+      # `environment:<name>` subject as the control-plane app (different
+      # app, same subject). azure/login@v2 re-mints a token under the new
       # client-id; the previous CLI session is overwritten in-place.
       - name: Azure login (data-plane app)
         uses: azure/login@v2

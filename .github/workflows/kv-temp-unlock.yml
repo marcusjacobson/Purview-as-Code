@@ -1,6 +1,15 @@
 name: kv-temp-unlock
 
-# Owner-gated, time-bounded temporary unlock of kv-contoso-lab-01.
+# Owner-gated, time-bounded temporary unlock of the automation Key Vault
+# of the selected environment (vars.KEY_VAULT_NAME on the matching
+# kv-unlock GitHub Environment).
+#
+# Environment routing (ADR 0057): the `environment` dispatch input selects
+# the deployment environment (`lab` default, `dev` optional). The unlock
+# runs under the paired unlock Environment -- `kv-unlock` for `lab`,
+# `kv-unlock-dev` for `dev` -- so each environment's approval rules,
+# secrets, and variables stay independent. Both jobs share the selected
+# unlock Environment so the approval gate and the OIDC subject match.
 #
 # The steady-state firewall posture is publicNetworkAccess=Disabled
 # defaultAction=Deny (Wave 0 #5a). This workflow opens the vault to public
@@ -13,28 +22,30 @@ name: kv-temp-unlock
 # Defense-in-depth layers:
 #   1. Dispatch: limited to identities with Actions:write on the repo
 #      (currently the owner only).
-#   2. Approval: GitHub Environment `kv-unlock` is configured to limit
-#      deployments to the `main` branch. On GitHub Pro / Team /
+#   2. Approval: the selected unlock GitHub Environment (`kv-unlock` or
+#      `kv-unlock-dev`) is configured to limit deployments to the
+#      branch(es) the operator designates. On GitHub Pro / Team /
 #      Enterprise (or if the repo is public) it additionally carries a
 #      required-reviewer rule pinning approval to the lab owner
 #      (contoso). On GitHub Free with a private repo, deployment
 #      protection rules (Required reviewers, Wait timer) are not
 #      available and the environment acts as a branch-restricted no-op
-#      approval. The `environment: kv-unlock` declaration remains in
-#      place so the gate activates automatically on plan upgrade or
+#      approval. The unlock `environment:` declaration remains in place
+#      so the gate activates automatically on plan upgrade or
 #      repo-visibility change with no workflow edit.
 #      Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#deployment-protection-rules
 #      Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#required-reviewers
 #   3. Identity: the unlock executes under a purpose-specific Entra
 #      app (`gh-oidc-purview-kv-unlock`) via OIDC federated credential
 #      with subject
-#      `repo:contoso/Purview-as-Code-Generic:environment:kv-unlock`,
+#      `repo:<org>/<repo>:environment:<kv-unlock environment>`,
 #      per ADR 0010. No stored client secrets.
 #      Reference: https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect
-#   4. Authorization: the kv-unlock SP holds the custom role
-#      `Purview-Lab-KV-Firewall-Toggler` (read + `Microsoft.KeyVault/vaults/write`)
-#      at the `kv-contoso-lab-01` vault scope only. It cannot touch any
-#      other resource in the subscription -- not the resource group, not
+#   4. Authorization: the kv-unlock SP holds the KV-firewall-toggler
+#      custom role (read + `Microsoft.KeyVault/vaults/write`; name set by
+#      `kvFirewallTogglerRoleName` in infra/modules/role-definitions.bicep)
+#      at the automation vault scope only. It cannot touch any other
+#      resource in the subscription -- not the resource group, not
 #      another Key Vault, not the Purview account.
 #      Reference: https://learn.microsoft.com/en-us/azure/role-based-access-control/custom-roles
 #   5. Time bound: the `duration_minutes` input is hard-capped at 30 in
@@ -49,10 +60,9 @@ name: kv-temp-unlock
 # Why two jobs (approval -> unlock):
 #   The two-job split keeps the approval surface (job 1, no Azure
 #   credentials) physically separated from the Azure-acting surface
-#   (job 2, OIDC token minted). Both jobs run under
-#   `environment: kv-unlock` so the kv-unlock app's federated credential
-#   subject
-#   (`repo:contoso/Purview-as-Code-Generic:environment:kv-unlock`)
+#   (job 2, OIDC token minted). Both jobs run under the selected unlock
+#   environment so the kv-unlock app's federated credential subject
+#   (`repo:<org>/<repo>:environment:<kv-unlock environment>`)
 #   matches at OIDC exchange time. The approval gate still fires on
 #   job 1 (deployment protection rules are evaluated per job, per the
 #   GitHub Environments reference below), and job 2 only starts after
@@ -67,6 +77,14 @@ name: kv-temp-unlock
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: 'Target deployment environment (GitHub Environment name). Selects the paired unlock environment: lab -> kv-unlock, dev -> kv-unlock-dev.'
+        type: choice
+        options:
+          - lab
+          - dev
+        default: lab
+        required: false
       reason:
         description: 'Why this unlock is needed (recorded in the run summary and Activity Log).'
         required: true
@@ -82,25 +100,25 @@ on:
 
 permissions: {}
 
-# Shared concurrency group across every workflow that toggles the lab Key
-# Vault firewall (`kv-contoso-lab-01`). Currently shared with
+# Shared concurrency group, per environment, across every workflow that
+# toggles that environment's Key Vault firewall. Currently shared with
 # `.github/workflows/validate-oidc-auth.yml`. Two firewall-toggling runs
 # must never overlap, otherwise one run's re-lock can clobber another
 # run's open window or vice versa. `cancel-in-progress: false` so an
 # in-flight unlock always reaches its `if: always()` re-lock step.
 # Reference: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs
 concurrency:
-  group: kv-firewall-lab
+  group: kv-firewall-${{ inputs.environment || 'lab' }}
   cancel-in-progress: false
 
 jobs:
   approval:
-    name: Lab-owner approval gate
+    name: Owner approval gate
     runs-on: ubuntu-latest
-    # `kv-unlock` Environment has @contoso as the sole required
-    # reviewer. The job sits in `Waiting` until approved.
+    # The selected unlock Environment carries the owner as the sole
+    # required reviewer. The job sits in `Waiting` until approved.
     # Reference: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment#required-reviewers
-    environment: kv-unlock
+    environment: ${{ inputs.environment == 'dev' && 'kv-unlock-dev' || 'kv-unlock' }}
     outputs:
       reason: ${{ steps.echo.outputs.reason }}
       duration_minutes: ${{ steps.echo.outputs.duration_minutes }}
@@ -130,25 +148,43 @@ jobs:
     name: Open, hold, re-lock Key Vault firewall
     needs: approval
     runs-on: ubuntu-latest
-    # `environment: kv-unlock` matches the kv-unlock Entra app's
+    # The unlock `environment:` matches the kv-unlock Entra app's
     # federated credential subject
-    # (`repo:<owner>/<repo>:environment:kv-unlock`), so OIDC token
-    # exchange succeeds. The same environment is used by the `approval`
-    # job above so the deployment protection rules (when present on a
-    # paid plan) gate this job too.
+    # (`repo:<owner>/<repo>:environment:<kv-unlock environment>`), so OIDC
+    # token exchange succeeds. The same environment is used by the
+    # `approval` job above so the deployment protection rules (when
+    # present on a paid plan) gate this job too.
     # Reference: https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust
-    environment: kv-unlock
+    environment: ${{ inputs.environment == 'dev' && 'kv-unlock-dev' || 'kv-unlock' }}
     permissions:
       id-token: write
       contents: read
     env:
+      ENVIRONMENT_NAME: ${{ inputs.environment || 'lab' }}
+      UNLOCK_ENVIRONMENT_NAME: ${{ inputs.environment == 'dev' && 'kv-unlock-dev' || 'kv-unlock' }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      RESOURCE_GROUP: rg-purview-lab
-      KEY_VAULT_NAME: kv-contoso-lab-01
+      # Environment-scoped configuration from the unlock Environment's
+      # variables (ADR 0057); never hardcoded.
+      RESOURCE_GROUP: ${{ vars.PURVIEW_RG }}
+      KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
       REASON: ${{ needs.approval.outputs.reason }}
       REQUESTED_DURATION: ${{ needs.approval.outputs.duration_minutes }}
     steps:
+      - name: Verify environment variables are configured
+        run: |
+          set -euo pipefail
+          missing=0
+          if [ -z "$RESOURCE_GROUP" ]; then
+            echo "::error::vars.PURVIEW_RG is not set on the '$UNLOCK_ENVIRONMENT_NAME' GitHub Environment. Set it before re-running." >&2
+            missing=1
+          fi
+          if [ -z "$KEY_VAULT_NAME" ]; then
+            echo "::error::vars.KEY_VAULT_NAME is not set on the '$UNLOCK_ENVIRONMENT_NAME' GitHub Environment. Set it before re-running." >&2
+            missing=1
+          fi
+          exit $missing
+
       - name: Validate duration and compute hold seconds
         id: bounds
         env:

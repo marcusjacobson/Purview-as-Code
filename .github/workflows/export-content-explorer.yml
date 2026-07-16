@@ -18,6 +18,18 @@ on:
   schedule:
     - cron: '0 7 * * 1'
   workflow_dispatch:
+    inputs:
+      environment:
+        description: >-
+          Target deployment environment (GitHub Environment name).
+          Defaults to lab. Push/schedule runs map branch dev -> dev and
+          every other branch -> lab (ADR 0057).
+        type: choice
+        options:
+          - lab
+          - dev
+        default: lab
+        required: false
 
 permissions:
   id-token: write
@@ -26,7 +38,11 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-latest
-    environment: lab
+    environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+    env:
+      ENVIRONMENT_NAME: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+      # Reconciler parameters-file override (ADR 0057).
+      PURVIEW_PARAMETERS_FILE: infra/parameters/${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}.yaml
     # Slightly larger than the per-solution deploy-*.yml defaults because the
     # exporter paginates per (item, workload) pair with a 1-second
     # throttle between calls (ADR 0021 Decision 7).

@@ -2,7 +2,7 @@ name: deploy-irm
 
 # Isolated FORWARD apply companion for the Microsoft Purview Insider Risk
 # Management (IRM) policy surface. Reconciles the IRM policies in the
-# contoso.onmicrosoft.com tenant from data-plane/irm/policies.yaml via
+# target tenant (selected environment) from data-plane/irm/policies.yaml via
 # scripts/Deploy-IRMPolicies.ps1.
 #
 # Forward twin of the already-landed reverse companion
@@ -102,6 +102,17 @@ name: deploy-irm
 on:
   workflow_dispatch:
     inputs:
+      environment:
+        description: >-
+          Target deployment environment (GitHub Environment name).
+          Defaults to lab. Push/schedule runs map branch dev -> dev and
+          every other branch -> lab (ADR 0057).
+        type: choice
+        options:
+          - lab
+          - dev
+        default: lab
+        required: false
       irm_direction_policy:
         description: |
           ADR 0029 source-of-truth direction policy for the Insider Risk
@@ -155,7 +166,7 @@ on:
         default: 'IRM Lab — Data leaks by priority users,IRM Lab — Data theft by departing users,IRM Lab — General data leaks,IRM Lab — Risky AI usage'
         required: false
   push:
-    branches: [main]
+    branches: [main, dev, lab]
     paths:
       - 'data-plane/irm/policies.yaml'
       - 'data-plane/irm/policies.schema.json'
@@ -171,18 +182,23 @@ on:
 permissions: {}
 
 concurrency:
-  group: deploy-irm-lab
+  group: deploy-irm-${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
   cancel-in-progress: false
 
 jobs:
   apply:
     name: Apply IRM policies
     runs-on: ubuntu-latest
-    environment: lab
+    environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
     permissions:
       id-token: write       # OIDC token for azure/login@v2.
       contents: read        # Checkout only; does not push or open PRs.
     env:
+      ENVIRONMENT_NAME: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+      # Reconciler parameters-file override (ADR 0057): every
+      # Deploy-*.ps1 / Export-*.ps1 honors PURVIEW_PARAMETERS_FILE when
+      # -ParametersFile is not passed explicitly.
+      PURVIEW_PARAMETERS_FILE: infra/parameters/${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}.yaml
       KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
       # Defaults applied for `push` events (where github.event.inputs is
       # null) so the rest of the job can read the env vars unconditionally
@@ -259,7 +275,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not $env:KEY_VAULT_NAME) {
-            throw "vars.KEY_VAULT_NAME is not set on the lab environment. Set it before re-running."
+            throw "vars.KEY_VAULT_NAME is not set on the '$($env:ENVIRONMENT_NAME)' GitHub Environment. Set it before re-running."
           }
           # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
           az keyvault update `

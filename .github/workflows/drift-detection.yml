@@ -2,7 +2,7 @@ name: drift-detection
 
 # Scheduled drift-detection loop for the Purview-as-Code lab. Runs all
 # reconcilers in read-only mode (-WhatIf) against the live
-# contoso.onmicrosoft.com tenant and opens a GitHub issue when drift is
+# target tenant (selected environment) and opens a GitHub issue when drift is
 # detected between the repo's desired-state YAML and the live tenant.
 #
 # A read-only, issue-only drift-detection watch loop.
@@ -14,12 +14,13 @@ name: drift-detection
 #
 # Federated credential reuse: the gh-oidc-purview-data-plane app's
 # federated credential is scoped to
-# `repo:contoso/Purview-as-Code-Generic:environment:lab`
-# (per ADR 0010). Because this job declares `environment: lab`, no new
+# `repo:<org>/<repo>:environment:<environment>`
+# (per ADR 0010). Because this job declares the selected `environment:`
+# (ADR 0057), no new
 # federated credential subject is required for the schedule trigger.
 #
 # Key Vault access: the runner principal signs the IPPS client_assertion
-# JWT via `az keyvault key sign` against kv-contoso-lab-01. The vault is
+# JWT via `az keyvault key sign` against the environment's automation Key Vault (vars.KEY_VAULT_NAME). The vault is
 # private-network by default; the workflow temp-opens its public endpoint
 # for the duration of the drift check and restores it via an
 # `if: always()` step.
@@ -37,6 +38,18 @@ on:
     # https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
     - cron: '0 2 * * 1'
   workflow_dispatch:
+    inputs:
+      environment:
+        description: >-
+          Target deployment environment (GitHub Environment name).
+          Defaults to lab. Push/schedule runs map branch dev -> dev and
+          every other branch -> lab (ADR 0057).
+        type: choice
+        options:
+          - lab
+          - dev
+        default: lab
+        required: false
 
 permissions:
   id-token: write           # OIDC token for azure/login@v2.
@@ -44,15 +57,20 @@ permissions:
   issues: write             # gh issue create when drift detected.
 
 concurrency:
-  group: drift-detection-lab
+  group: drift-detection-${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
   cancel-in-progress: false
 
 jobs:
   detect-drift:
     name: Detect drift
     runs-on: ubuntu-latest
-    environment: lab
+    environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
     env:
+      ENVIRONMENT_NAME: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+      # Reconciler parameters-file override (ADR 0057): every
+      # Deploy-*.ps1 / Export-*.ps1 honors PURVIEW_PARAMETERS_FILE when
+      # -ParametersFile is not passed explicitly.
+      PURVIEW_PARAMETERS_FILE: infra/parameters/${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}.yaml
       KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
     steps:
       - name: Checkout
@@ -77,7 +95,7 @@ jobs:
         shell: pwsh
         run: |
           if (-not $env:KEY_VAULT_NAME) {
-            throw "vars.KEY_VAULT_NAME is not set on the lab environment. Set it before re-running."
+            throw "vars.KEY_VAULT_NAME is not set on the '$($env:ENVIRONMENT_NAME)' GitHub Environment. Set it before re-running."
           }
           az keyvault update `
             --name $env:KEY_VAULT_NAME `
@@ -172,7 +190,7 @@ jobs:
           $issueBody = @"
           ## Summary
 
-          The scheduled drift-detection loop detected differences between the repo's desired-state YAML under ``data-plane/`` and the live ``contoso.onmicrosoft.com`` tenant.
+          The scheduled drift-detection loop detected differences between the repo's desired-state YAML under ``data-plane/`` and the live tenant behind the ``$($env:ENVIRONMENT_NAME)`` environment.
 
           This issue was opened automatically by ``.github/workflows/drift-detection.yml``.
 
@@ -195,7 +213,7 @@ jobs:
           "@
 
           gh issue create `
-            --title "Drift detected in contoso.onmicrosoft.com tenant" `
+            --title "Drift detected in the $($env:ENVIRONMENT_NAME) environment tenant" `
             --body $issueBody `
             --label "needs-review,squad:automation-engineer,drift-detected"
 
