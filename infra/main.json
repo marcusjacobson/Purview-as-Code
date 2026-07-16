@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "478020856831942788"
+      "templateHash": "16743510756458680581"
     }
   },
   "parameters": {
@@ -75,7 +75,14 @@
     "keyVaultName": {
       "type": "string",
       "metadata": {
-        "description": "Name of the lab automation Key Vault from `infra/parameters/lab.yaml` (`resources.keyVault.name`). Consumed by `modules/role-definitions.bicep` so the `Purview-Lab-KV-Firewall-Toggler` custom role is assignable only at the vault resource scope. The vault itself is provisioned by `scripts/New-AutomationKeyVault.ps1` (Wave 0 #5a), not from this template; this parameter only resolves an `existing` reference."
+        "description": "Name of the lab automation Key Vault from `infra/parameters/lab.yaml` (`resources.keyVault.name`). Consumed by `modules/role-definitions.bicep` so the Key Vault firewall-toggler custom role is assignable only at the vault resource scope. The vault itself is provisioned by `scripts/New-AutomationKeyVault.ps1` (Wave 0 #5a), not from this template; this parameter only resolves an `existing` reference."
+      }
+    },
+    "kvFirewallTogglerRoleName": {
+      "type": "string",
+      "defaultValue": "Purview-Lab-KV-Firewall-Toggler",
+      "metadata": {
+        "description": "Display name for the Key Vault firewall-toggler custom role declared in `modules/role-definitions.bicep`. The default preserves the name existing single-environment deployments carry; per-environment `.bicepparam` files may override it. The role-definition GUID is seeded from this name, so overriding creates a NEW role definition — migration procedure in docs/adr/0057-multi-environment-and-branch-model.md."
       }
     }
   },
@@ -111,6 +118,9 @@
         "parameters": {
           "keyVaultName": {
             "value": "[parameters('keyVaultName')]"
+          },
+          "kvFirewallTogglerRoleName": {
+            "value": "[parameters('kvFirewallTogglerRoleName')]"
           }
         },
         "template": {
@@ -120,7 +130,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "3127994151465139573"
+              "templateHash": "5970322923136205331"
             }
           },
           "parameters": {
@@ -129,19 +139,26 @@
               "metadata": {
                 "description": "Name of the lab automation Key Vault from `infra/parameters/lab.yaml` (`resources.keyVault.name`). Resolved as an existing resource so the custom role is assignable only at the vault resource scope."
               }
+            },
+            "kvFirewallTogglerRoleName": {
+              "type": "string",
+              "defaultValue": "Purview-Lab-KV-Firewall-Toggler",
+              "metadata": {
+                "description": "Display name of the least-privilege Key Vault firewall-toggler custom role. Override per environment (for example `Purview-Dev-KV-Firewall-Toggler`); renaming creates a new role definition (see ADR 0057)."
+              }
             }
           },
           "variables": {
-            "kvFirewallTogglerRoleName": "[guid(subscription().id, 'Purview-Lab-KV-Firewall-Toggler')]"
+            "kvFirewallTogglerRoleDefinitionName": "[guid(subscription().id, parameters('kvFirewallTogglerRoleName'))]"
           },
           "resources": [
             {
               "type": "Microsoft.Authorization/roleDefinitions",
               "apiVersion": "2022-04-01",
-              "name": "[variables('kvFirewallTogglerRoleName')]",
+              "name": "[variables('kvFirewallTogglerRoleDefinitionName')]",
               "properties": {
-                "roleName": "Purview-Lab-KV-Firewall-Toggler",
-                "description": "PR D1a / Issue #256 — least-privilege custom role granting only Microsoft.KeyVault/vaults/write, assignable to the lab automation Key Vault. Used by the kv-temp-unlock workflow identity to toggle publicNetworkAccess on/off.",
+                "roleName": "[parameters('kvFirewallTogglerRoleName')]",
+                "description": "PR D1a / Issue #256 — least-privilege custom role granting only Microsoft.KeyVault/vaults/write, assignable to the automation Key Vault. Used by the kv-temp-unlock workflow identity to toggle publicNetworkAccess on/off.",
                 "type": "CustomRole",
                 "permissions": [
                   {
@@ -163,16 +180,16 @@
             "kvFirewallTogglerRoleId": {
               "type": "string",
               "metadata": {
-                "description": "Full resource ID of the `Purview-Lab-KV-Firewall-Toggler` custom role definition. Consumed by `infra/modules/kv-unlock-rbac.bicep` (PR D1b) once the kv-unlock SP object ID is known."
+                "description": "Full resource ID of the Key Vault firewall-toggler custom role definition. Consumed by `infra/modules/kv-unlock-rbac.bicep` (PR D1b) once the kv-unlock SP object ID is known."
               },
-              "value": "[resourceId('Microsoft.Authorization/roleDefinitions', variables('kvFirewallTogglerRoleName'))]"
+              "value": "[resourceId('Microsoft.Authorization/roleDefinitions', variables('kvFirewallTogglerRoleDefinitionName'))]"
             },
             "kvFirewallTogglerRoleGuid": {
               "type": "string",
               "metadata": {
                 "description": "Role-definition GUID (the `name` segment of the resource ID). Convenience output for scripts that pass `--role` by ID rather than name."
               },
-              "value": "[variables('kvFirewallTogglerRoleName')]"
+              "value": "[variables('kvFirewallTogglerRoleDefinitionName')]"
             }
           }
         }
@@ -199,7 +216,7 @@
     "kvFirewallTogglerRoleId": {
       "type": "string",
       "metadata": {
-        "description": "Full resource ID of the `Purview-Lab-KV-Firewall-Toggler` custom role definition. Consumed by PR D1b's `scripts/New-KvUnlockRbac.ps1`."
+        "description": "Full resource ID of the Key Vault firewall-toggler custom role definition. Consumed by PR D1b's `scripts/New-KvUnlockRbac.ps1`."
       },
       "value": "[reference(resourceId('Microsoft.Resources/deployments', 'role-definitions'), '2025-04-01').outputs.kvFirewallTogglerRoleId.value]"
     }

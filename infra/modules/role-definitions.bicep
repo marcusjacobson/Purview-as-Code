@@ -1,6 +1,8 @@
 // Custom RBAC role definitions for the lab.
 //
-// PR D1a / Issue #256. Declares `Purview-Lab-KV-Firewall-Toggler` — the
+// PR D1a / Issue #256. Declares the Key Vault firewall-toggler custom role
+// (default name `Purview-Lab-KV-Firewall-Toggler`, overridable per
+// environment via `kvFirewallTogglerRoleName` per ADR 0057) — the
 // minimum-privilege custom role used by the kv-temp-unlock workflow's
 // purpose-specific identity (`gh-oidc-purview-kv-unlock`, provisioned by
 // PR D1b and consumed by PR D2 / Issue #255). The role grants exactly
@@ -37,6 +39,14 @@ targetScope = 'resourceGroup'
 @description('Name of the lab automation Key Vault from `infra/parameters/lab.yaml` (`resources.keyVault.name`). Resolved as an existing resource so the custom role is assignable only at the vault resource scope.')
 param keyVaultName string
 
+// The default preserves the role name that existing single-environment
+// deployments already carry. Because the role-definition GUID below is
+// seeded from this name, overriding it mints a NEW role definition rather
+// than renaming the old one — migration procedure in
+// docs/adr/0057-multi-environment-and-branch-model.md.
+@description('Display name of the least-privilege Key Vault firewall-toggler custom role. Override per environment (for example `Purview-Dev-KV-Firewall-Toggler`); renaming creates a new role definition (see ADR 0057).')
+param kvFirewallTogglerRoleName string = 'Purview-Lab-KV-Firewall-Toggler'
+
 // Existing-resource reference for the vault so `vault.id` resolves to the
 // full vault resource ID for `assignableScopes`. Reference:
 // https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/existing-resource
@@ -47,15 +57,16 @@ resource vault 'Microsoft.KeyVault/vaults@2026-02-01' existing = {
 // Deterministic role-definition name. The resource type contract requires
 // `name` to be a GUID; seeding from the subscription ID + role display
 // name makes the role idempotent across re-runs (same GUID -> upsert) but
-// unique per subscription. Reference:
+// unique per subscription — and means a changed `kvFirewallTogglerRoleName`
+// yields a different GUID, i.e. a new role definition. Reference:
 // https://learn.microsoft.com/en-us/azure/templates/microsoft.authorization/roledefinitions
-var kvFirewallTogglerRoleName = guid(subscription().id, 'Purview-Lab-KV-Firewall-Toggler')
+var kvFirewallTogglerRoleDefinitionName = guid(subscription().id, kvFirewallTogglerRoleName)
 
 resource kvFirewallTogglerRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
-  name: kvFirewallTogglerRoleName
+  name: kvFirewallTogglerRoleDefinitionName
   properties: {
-    roleName: 'Purview-Lab-KV-Firewall-Toggler'
-    description: 'PR D1a / Issue #256 — least-privilege custom role granting only Microsoft.KeyVault/vaults/write, assignable to the lab automation Key Vault. Used by the kv-temp-unlock workflow identity to toggle publicNetworkAccess on/off.'
+    roleName: kvFirewallTogglerRoleName
+    description: 'PR D1a / Issue #256 — least-privilege custom role granting only Microsoft.KeyVault/vaults/write, assignable to the automation Key Vault. Used by the kv-temp-unlock workflow identity to toggle publicNetworkAccess on/off.'
     type: 'CustomRole'
     permissions: [
       {
@@ -73,7 +84,7 @@ resource kvFirewallTogglerRole 'Microsoft.Authorization/roleDefinitions@2022-04-
   }
 }
 
-@description('Full resource ID of the `Purview-Lab-KV-Firewall-Toggler` custom role definition. Consumed by `infra/modules/kv-unlock-rbac.bicep` (PR D1b) once the kv-unlock SP object ID is known.')
+@description('Full resource ID of the Key Vault firewall-toggler custom role definition. Consumed by `infra/modules/kv-unlock-rbac.bicep` (PR D1b) once the kv-unlock SP object ID is known.')
 output kvFirewallTogglerRoleId string = kvFirewallTogglerRole.id
 
 @description('Role-definition GUID (the `name` segment of the resource ID). Convenience output for scripts that pass `--role` by ID rather than name.')

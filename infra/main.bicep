@@ -39,8 +39,11 @@ param tags object = {
   owner: 'contoso-lab'
 }
 
-@description('Name of the lab automation Key Vault from `infra/parameters/lab.yaml` (`resources.keyVault.name`). Consumed by `modules/role-definitions.bicep` so the `Purview-Lab-KV-Firewall-Toggler` custom role is assignable only at the vault resource scope. The vault itself is provisioned by `scripts/New-AutomationKeyVault.ps1` (Wave 0 #5a), not from this template; this parameter only resolves an `existing` reference.')
+@description('Name of the lab automation Key Vault from `infra/parameters/lab.yaml` (`resources.keyVault.name`). Consumed by `modules/role-definitions.bicep` so the Key Vault firewall-toggler custom role is assignable only at the vault resource scope. The vault itself is provisioned by `scripts/New-AutomationKeyVault.ps1` (Wave 0 #5a), not from this template; this parameter only resolves an `existing` reference.')
 param keyVaultName string
+
+@description('Display name for the Key Vault firewall-toggler custom role declared in `modules/role-definitions.bicep`. The default preserves the name existing single-environment deployments carry; per-environment `.bicepparam` files may override it. The role-definition GUID is seeded from this name, so overriding creates a NEW role definition — migration procedure in docs/adr/0057-multi-environment-and-branch-model.md.')
+param kvFirewallTogglerRoleName string = 'Purview-Lab-KV-Firewall-Toggler'
 
 resource purview 'Microsoft.Purview/accounts@2024-04-01-preview' = {
   name: purviewAccountName
@@ -69,6 +72,7 @@ module customRoles 'modules/role-definitions.bicep' = {
   name: 'role-definitions'
   params: {
     keyVaultName: keyVaultName
+    kvFirewallTogglerRoleName: kvFirewallTogglerRoleName
   }
 }
 
@@ -77,5 +81,5 @@ output purviewAccountName string = purview.name
 output purviewAtlasEndpoint string = 'https://${purview.name}.purview.azure.com'
 output systemAssignedPrincipalId string = purview.identity.principalId
 
-@description('Full resource ID of the `Purview-Lab-KV-Firewall-Toggler` custom role definition. Consumed by PR D1b\'s `scripts/New-KvUnlockRbac.ps1`.')
+@description('Full resource ID of the Key Vault firewall-toggler custom role definition. Consumed by PR D1b\'s `scripts/New-KvUnlockRbac.ps1`.')
 output kvFirewallTogglerRoleId string = customRoles.outputs.kvFirewallTogglerRoleId
