@@ -22,8 +22,11 @@ jobs:
         id: find-stacked
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Attacker-controlled (the PR author's own branch name) — must flow through
+          # env, never spliced inline into the run: script text. See
+          # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+          MERGED_HEAD: ${{ github.event.pull_request.head.ref }}
         run: |
-          MERGED_HEAD="${{ github.event.pull_request.head.ref }}"
           DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
           REPO="${{ github.repository }}"
 
@@ -52,8 +55,12 @@ jobs:
         if: steps.find-stacked.outputs.stacked_prs != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same attacker-controlled value as the previous step, now carried through a
+          # step output. actionlint's expression check does not taint-track through
+          # `steps.*.outputs.*`, but the underlying string is unchanged, so this must
+          # stay out of the inline-interpolated run: text for the same reason as above.
+          MERGED_HEAD: ${{ steps.find-stacked.outputs.merged_head }}
         run: |
-          MERGED_HEAD="${{ steps.find-stacked.outputs.merged_head }}"
           DEFAULT_BRANCH="${{ steps.find-stacked.outputs.default_branch }}"
           REPO="${{ github.repository }}"
           MERGED_PR_NUMBER="${{ github.event.pull_request.number }}"

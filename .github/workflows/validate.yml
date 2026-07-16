@@ -50,6 +50,30 @@ jobs:
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
           Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Warning -EnableExit
 
+  actionlint:
+    name: Lint GitHub Actions workflows
+    runs-on: ubuntu-latest
+    # actionlint (rhysd/actionlint) checks every workflow under .github/workflows/**
+    # for script-injection risk (untrusted github.event.* values spliced directly into
+    # run: scripts), unpinned actions, shellcheck-style issues in run: steps, and other
+    # workflow-syntax problems. Added under #115, which catalogued this repo's full
+    # workflow tree with actionlint v1.7.12 and found exactly one finding (an injection
+    # risk in pr-stacked-retarget.yml, fixed in the same PR that added this job).
+    # Downloads and runs the standalone release binary via the project's own documented
+    # install script rather than a marketplace action or Docker image, matching this
+    # file's existing tool-installation pattern (az bicep install / pip install
+    # yamllint / Install-Module PSScriptAnalyzer above).
+    # Reference: https://github.com/rhysd/actionlint/blob/main/docs/usage.md#use-actionlint-on-github-actions
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download actionlint
+        id: get_actionlint
+        shell: bash
+        run: bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+      - name: Run actionlint
+        shell: bash
+        run: ${{ steps.get_actionlint.outputs.executable }} -color
+
   identifier-residue:
     name: Identifier residual scan (no real tenant identifiers)
     runs-on: ubuntu-latest
