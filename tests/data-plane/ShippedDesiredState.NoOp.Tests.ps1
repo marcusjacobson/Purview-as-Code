@@ -84,7 +84,7 @@ BeforeDiscovery {
         $msg = ("ShippedDesiredState.NoOp: target branch '{0}' is an operator branch — the CLAIM 1 " +
             '(shipped-state-is-empty) assertions are SKIPPED here and enforced on main only ' +
             '(ADR 0057). CLAIM 2 and the STRUCTURE proofs still run.') -f $script:TargetBranch.Trim()
-        Write-Host $msg
+        Write-Information $msg -InformationAction Continue
     }
 }
 

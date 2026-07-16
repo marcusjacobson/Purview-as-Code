@@ -90,7 +90,7 @@ BeforeDiscovery {
         $msg = ("ShippedDesiredState: target branch '{0}' is an operator branch — the ADR 0056 " +
             'empty-desired-state assertions are SKIPPED here and enforced on main only (ADR 0057). ' +
             'All every-copy-forever assertions still run.') -f $script:TargetBranch.Trim()
-        Write-Host $msg
+        Write-Information $msg -InformationAction Continue
     }
 }
 
