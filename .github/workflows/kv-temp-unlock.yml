@@ -261,6 +261,36 @@ jobs:
           # Brief settle window for the firewall change to propagate.
           sleep 10
 
+      - name: Verify the open actually stuck (read back)
+        # Deliberately a SEPARATE step from `open`: if this verification
+        # fails, `open`'s outcome stays 'success', so the always() re-lock
+        # below still runs and the vault is never left half-open.
+        #
+        # Why verify at all: an Azure Policy `modify` effect (for example an
+        # MG-scoped Key Vault publicNetworkAccess modify policy in a governed
+        # tenant) REWRITES the open PUT's value inside the same operation --
+        # `az keyvault update` exits 0, the hold window elapses, and the
+        # operator's one-off task fails mysteriously. Observed live
+        # downstream. See the 'Governed tenants' section of
+        # docs/runbooks/kv-temp-unlock.md for the bounded-exemption
+        # procedure.
+        # Reference: https://learn.microsoft.com/en-us/azure/governance/policy/concepts/effect-modify
+        id: openverify
+        run: |
+          set -euo pipefail
+          STATE=$(az keyvault show \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}" \
+            -o tsv)
+          PNA=$(echo "$STATE" | cut -f1)
+          DA=$(echo "$STATE" | cut -f2)
+          if [ "$PNA" != "Enabled" ] || [ "$DA" != "Allow" ]; then
+            echo "::error::Key Vault open did not stick (publicNetworkAccess=$PNA, defaultAction=$DA; expected Enabled/Allow). Since 'az keyvault update' exited 0, an Azure Policy 'modify' effect most likely rewrote the value inside the same operation -- check the Activity Log for a Microsoft.Authorization/policies/modify/action event at the 'Open Key Vault firewall' timestamp, and see the 'Governed tenants' section of docs/runbooks/kv-temp-unlock.md for the bounded policy-exemption procedure." >&2
+            exit 1
+          fi
+          echo "Open verified: publicNetworkAccess=Enabled, defaultAction=Allow."
+
       - name: Hold the vault open for the approved duration
         id: hold
         env:
@@ -313,6 +343,7 @@ jobs:
           BOUNDS_OUTCOME: ${{ steps.bounds.outcome }}
           PRE_OUTCOME: ${{ steps.pre.outcome }}
           OPEN_OUTCOME: ${{ steps.open.outcome }}
+          OPENVERIFY_OUTCOME: ${{ steps.openverify.outcome }}
           HOLD_OUTCOME: ${{ steps.hold.outcome }}
           RELOCK_OUTCOME: ${{ steps.relock.outcome }}
           ASSERT_OUTCOME: ${{ steps.assert.outcome }}
@@ -329,6 +360,7 @@ jobs:
             echo "| Validate bounds | $BOUNDS_OUTCOME |"
             echo "| Pre-unlock state guard | $PRE_OUTCOME |"
             echo "| Open vault firewall | $OPEN_OUTCOME |"
+            echo "| Verify open (read back) | $OPENVERIFY_OUTCOME |"
             echo "| Hold window | $HOLD_OUTCOME |"
             echo "| Re-lock vault firewall | $RELOCK_OUTCOME |"
             echo "| Assert final locked state | $ASSERT_OUTCOME |"

@@ -8,11 +8,17 @@ name: validate-oidc-auth
 # This workflow performs no persistent state changes. It only:
 #   1. Federates an OIDC token to the control-plane app and reads the
 #      target resource group via ARM as proof of the handshake.
-#   2. Briefly opens the Key Vault firewall (publicNetworkAccess Enabled)
-#      so the GitHub-hosted runner can read the data-plane cert. The
-#      control-plane app authorizes this via Contributor on the RG (Wave
-#      0 #5d). The vault is re-locked at the end of the job whether the
-#      smoke passes or fails -- steady state remains Disabled (Wave 0 #5a).
+#   2. Briefly opens the Key Vault firewall (publicNetworkAccess Enabled
+#      AND networkAcls.defaultAction Allow -- a defaultAction=Deny vault
+#      with no ipRules stays unreachable after a publicNetworkAccess-only
+#      open) so the GitHub-hosted runner can read the data-plane cert,
+#      then READS BACK the state and fails loudly if an Azure Policy
+#      `modify` effect silently reverted the open. The control-plane app
+#      authorizes this via Contributor on the RG (Wave 0 #5d). The vault
+#      is re-locked at the end of the job whether the smoke passes or
+#      fails -- publicNetworkAccess returns to Disabled and defaultAction
+#      is restored to its pre-open value, so steady-state posture is
+#      never changed by this workflow.
 #   3. Federates a fresh OIDC token to the data-plane app, fetches a
 #      Key-Vault-signed S&C app-only access token via
 #      scripts/Get-PurviewIPPSAccessToken.ps1, opens an S&C PowerShell
@@ -153,15 +159,64 @@ jobs:
       - name: Open Key Vault firewall (temporary)
         id: kv-open
         run: |
+          set -euo pipefail
+          # Capture the pre-open networkAcls.defaultAction so the close step
+          # can RESTORE it: adopted vaults may carry the hardened
+          # defaultAction=Deny posture (the kv-temp-unlock steady state),
+          # while template-bootstrap vaults carry Allow -- this workflow
+          # must never change a vault's steady-state posture.
+          # Reference: https://learn.microsoft.com/en-us/azure/key-vault/general/network-security
+          PRE_DA=$(az keyvault show \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "properties.networkAcls.defaultAction" -o tsv 2>/dev/null || true)
+          echo "pre_da=${PRE_DA:-Allow}" >> "$GITHUB_OUTPUT"
+          echo "Pre-open defaultAction: ${PRE_DA:-<unset>}"
+          # Open BOTH firewall layers. A vault with
+          # networkAcls.defaultAction=Deny and no ipRules stays unreachable
+          # after a publicNetworkAccess-only open: data-plane calls fail with
+          # "(Forbidden) Client address is not authorized and caller is not a
+          # trusted service" while publicNetworkAccess reads Enabled.
+          # Observed live on an adopted (legacy) vault downstream.
           az keyvault update \
             --name "$KEY_VAULT_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --public-network-access Enabled \
-            --query "properties.publicNetworkAccess" -o tsv
+            --default-action Allow \
+            --only-show-errors \
+            --query "{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}" \
+            -o json
           # Brief settle window. KV firewall changes are typically
           # near-instant but the data-plane RBAC cache can lag a few
           # seconds; 10s keeps the cert read deterministic.
           sleep 10
+
+      - name: Verify the open actually stuck (read back)
+        # Deliberately a SEPARATE step from kv-open: if this verification
+        # fails, kv-open's outcome stays 'success', so the always() re-lock
+        # below still runs and the vault is never left half-open.
+        #
+        # Why verify at all: an Azure Policy `modify` effect (for example an
+        # MG-scoped Key Vault publicNetworkAccess modify policy in a governed
+        # tenant) REWRITES the open PUT's value inside the same operation --
+        # `az keyvault update` exits 0, the workflow proceeds, and every
+        # later data-plane step fails mysteriously. Observed live downstream.
+        # Reference: https://learn.microsoft.com/en-us/azure/governance/policy/concepts/effect-modify
+        id: kv-open-verify
+        run: |
+          set -euo pipefail
+          STATE=$(az keyvault show \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}" \
+            -o tsv)
+          PNA=$(echo "$STATE" | cut -f1)
+          DA=$(echo "$STATE" | cut -f2)
+          if [ "$PNA" != "Enabled" ] || [ "$DA" != "Allow" ]; then
+            echo "::error::Key Vault open did not stick (publicNetworkAccess=$PNA, defaultAction=$DA; expected Enabled/Allow). Since 'az keyvault update' exited 0, an Azure Policy 'modify' effect most likely rewrote the value inside the same operation -- check the Activity Log for a Microsoft.Authorization/policies/modify/action event at the 'Update Key Vault' timestamp, and see the 'Governed tenants' section of docs/runbooks/kv-temp-unlock.md for the bounded policy-exemption procedure." >&2
+            exit 1
+          fi
+          echo "Open verified: publicNetworkAccess=Enabled, defaultAction=Allow."
 
       # ------------------------------------------------------------------
       # 2. Data-plane proof -- Security & Compliance PowerShell
@@ -256,12 +311,34 @@ jobs:
       - name: Close Key Vault firewall
         id: kv-close
         if: always() && steps.kv-open.outcome == 'success'
+        env:
+          PRE_DA: ${{ steps.kv-open.outputs.pre_da }}
         run: |
+          set -euo pipefail
+          # Restore the lock: publicNetworkAccess back to Disabled, and
+          # networkAcls.defaultAction back to its pre-open value (Deny for
+          # hardened/adopted vaults -- the posture kv-temp-unlock's
+          # pre-unlock guard requires -- or Allow for bootstrap-stage
+          # vaults), so this workflow never changes steady-state posture.
           az keyvault update \
             --name "$KEY_VAULT_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --public-network-access Disabled \
-            --query "properties.publicNetworkAccess" -o tsv
+            --default-action "${PRE_DA:-Allow}" \
+            --only-show-errors \
+            --query "{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}" \
+            -o json
+          # Read back and assert the lock landed (same policy-modify
+          # defense as the open verify, in the locking direction).
+          FINAL_PNA=$(az keyvault show \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "properties.publicNetworkAccess" -o tsv)
+          if [ "$FINAL_PNA" != "Disabled" ]; then
+            echo "::error::Key Vault re-lock did not stick (publicNetworkAccess=$FINAL_PNA; expected Disabled). Investigate before treating this run as complete -- the vault may still be publicly reachable." >&2
+            exit 1
+          fi
+          echo "Vault re-locked: publicNetworkAccess=Disabled, defaultAction=${PRE_DA:-Allow}."
 
       - name: Job summary
         if: always()
@@ -269,6 +346,7 @@ jobs:
           ARM_ACCOUNT_OUTCOME: ${{ steps.arm-account.outcome }}
           ARM_RG_OUTCOME: ${{ steps.arm-rg.outcome }}
           KV_OPEN_OUTCOME: ${{ steps.kv-open.outcome }}
+          KV_OPEN_VERIFY_OUTCOME: ${{ steps.kv-open-verify.outcome }}
           SCC_OUTCOME: ${{ steps.scc.outcome }}
           KV_CLOSE_OUTCOME: ${{ steps.kv-close.outcome }}
         run: |
@@ -280,6 +358,7 @@ jobs:
             echo "| Control-plane OIDC -> ARM \`az account show\` | $ARM_ACCOUNT_OUTCOME |"
             echo "| Control-plane OIDC -> ARM \`az group show\` | $ARM_RG_OUTCOME |"
             echo "| KV firewall open (temporary) | $KV_OPEN_OUTCOME |"
+            echo "| KV firewall open verified (read back) | $KV_OPEN_VERIFY_OUTCOME |"
             echo "| Data-plane OIDC -> S&C \`Get-RoleGroup\` | $SCC_OUTCOME |"
             echo "| KV firewall re-lock | $KV_CLOSE_OUTCOME |"
           } >> "$GITHUB_STEP_SUMMARY"

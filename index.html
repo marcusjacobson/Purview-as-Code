@@ -1439,6 +1439,30 @@ Follow [Getting started §1–§2](getting-started.md) for the exact `az ad app`
 > Never commit any of these values. They live only in GitHub secrets and in your local
 > `az account set` context.
 
+### Adopting a pre-existing Key Vault — firewall posture
+
+A Key Vault has **two** independent public-network layers: `publicNetworkAccess` and
+`networkAcls.defaultAction` ([Key Vault network security](https://learn.microsoft.com/en-us/azure/key-vault/general/network-security)).
+The workflows treat `publicNetworkAccess` as the toggle and handle `defaultAction` explicitly,
+because a vault carrying `defaultAction: Deny` with no `ipRules` — a common legacy state on an
+adopted vault — stays unreachable after a `publicNetworkAccess`-only open: data-plane calls fail
+with "(Forbidden) Client address is not authorized and caller is not a trusted service" while
+`publicNetworkAccess` reads `Enabled`.
+
+What to expect when you point the automation at an adopted vault:
+
+- [`validate-oidc-auth.yml`](../.github/workflows/validate-oidc-auth.yml) opens **both** layers
+  (`Enabled`/`Allow`) for its window, verifies the open stuck by reading the state back, and on
+  close restores `publicNetworkAccess: Disabled` **and your vault's pre-open `defaultAction`** —
+  it never changes the vault's steady-state posture.
+- [`kv-temp-unlock.yml`](../.github/workflows/kv-temp-unlock.yml) requires the hardened steady
+  posture (`publicNetworkAccess: Disabled`, `defaultAction: Deny`) at its pre-unlock guard and
+  re-locks to exactly that posture. Bring an adopted vault to that posture before using it.
+- In a governance-managed tenant, an Azure Policy `modify` effect can silently revert the open;
+  both workflows now fail loudly on the read-back when that happens — see the
+  ["Governed tenants" section of the kv-temp-unlock runbook](runbooks/kv-temp-unlock.md) for the
+  bounded policy-exemption procedure.
+
 ### Optional — add a second (`dev`) environment
 
 The tailored repo runs single-environment (`lab`) with no further setup — every workflow defaults
