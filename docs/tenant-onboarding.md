@@ -40,6 +40,22 @@ Use either path:
   cd <your-repo>
   ```
 
+> **Seed the automation labels first.** GitHub's **Use this template** does **not** copy labels,
+> so a fresh spin-off starts with the label-driven automation dormant — `pr-auto-merge.yml` /
+> `@owner-approval` gate on `owner-approved`, `@idea-intake` on `needs-review`, destructive PRs on
+> `destructive`, issue triage on `squad:*` — and the first merge fails with `'owner-approved' not
+> found`. Seed the full required set once, idempotently, with an authenticated
+> [`gh`](https://cli.github.com/) that has push access:
+>
+> ```bash
+> pwsh ./scripts/New-RepoLabels.ps1            # add -WhatIf to preview; re-runs are a no-op
+> ```
+>
+> Some workflows self-seed their own labels at run time, but three — `owner-approved`,
+> `destructive`, `surface-watch` — have no run-time fallback, so this step is the only thing that
+> creates them. See
+> [Creating a repository from a template](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template).
+
 ## Step 2 — Decouple your copy with the Kickoff agent
 
 Sever your copy from the source template so it can never contribute content back, per

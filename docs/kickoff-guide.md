@@ -45,6 +45,15 @@ of the no-push-back boundary. See
 Prefer a local-only workspace instead? `git clone` it and pick the local-workspace mode in the next
 step.
 
+**Seed the automation labels.** "Use this template" does not copy labels, so the label-gated
+automation (`owner-approved` auto-merge, `needs-review`, `destructive`, `squad:*` routing) starts
+dormant — the first merge otherwise fails with `'owner-approved' not found`. Run the idempotent
+seeder once with an authenticated `gh` that has push access:
+
+```bash
+pwsh ./scripts/New-RepoLabels.ps1
+```
+
 ### 2. Decouple with the Kickoff agent
 
 Open the copy in VS Code, start Copilot Chat, and run [`@operator-kickoff`](../.github/agents/operator-kickoff.agent.md).
