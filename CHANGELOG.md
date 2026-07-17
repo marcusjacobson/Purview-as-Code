@@ -16,6 +16,16 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself. Pure upstream mirror-sync PRs that carry only upstream CHANGELOG entries and no repo-local changes may omit a new bullet (the upstream entries already document the imported changes).
 
+## 2026-07-17
+
+### Added
+
+- **scripts:** `-SubjectFormat auto|classic|immutable` on `New-AutomationEntraApp.ps1` / `New-KvUnlockEntraApp.ps1` — first-class support for GitHub's immutable (ID-embedded) OIDC subject claims per [ADR 0058](docs/adr/0058-immutable-oidc-subject-claims.md) (#126). Repositories created on or after 2026-07-15 (and repos renamed/transferred/opted-in after that date) mint `repo:<org>@<ownerId>/<repo>@<repoId>:environment:<env>`; the scripts previously built only the classic ADR 0010 subject and hard-refuse mismatches, so a post-cutoff spin-off either failed `azure/login` with `AADSTS700213` (classic credential) or failed every reconcile (hand-corrected immutable credential) — observed live on the downstream operations repo, where all six federated credentials had to be updated by hand. The scripts now resolve the repository's numeric identity at runtime (`gh api` with an unauthenticated `api.github.com` fallback), prefer the format the repository mints (creation-date heuristic; `immutable` override for renamed/transferred/opted-in repos; `classic` pins the old behavior offline), and accept either format on verification — with a shape-only pattern acceptance (warning, not refusal) when the IDs could not be resolved, and a loud dormancy warning for a classic credential on an immutable-minting repo. Every ADR 0010 invariant (single credential, environment-scoped subject, never-silently-reconcile) is unchanged; tests extended/added for both scripts (33 tests); `getting-started.md` §1/§2 document the two-format contract and the `gh api` ID-resolution commands.
+
+### Documentation
+
+- **docs:** ADR 0058 — federated-credential subjects support GitHub's immutable (ID-embedded) OIDC subject format; classic + immutable become a two-format contract with the immutable form preferred wherever GitHub mints it (#126).
+
 ## 2026-07-16
 
 ### Changed
