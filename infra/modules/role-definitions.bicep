@@ -6,16 +6,25 @@
 // minimum-privilege custom role used by the kv-temp-unlock workflow's
 // purpose-specific identity (`gh-oidc-purview-kv-unlock`, provisioned by
 // PR D1b and consumed by PR D2 / Issue #255). The role grants exactly
-// `Microsoft.KeyVault/vaults/write`, scoped to the lab automation Key
-// Vault, which is the operation `az keyvault update --public-network-access`
-// requires.
+// `Microsoft.KeyVault/vaults/read` + `Microsoft.KeyVault/vaults/write`,
+// scoped to the lab automation Key Vault: `read` is what the workflow's
+// `az keyvault show` state guards ("Pre-unlock state guard", "Assert
+// final vault state is locked") require, and `write` is what
+// `az keyvault update --public-network-access` requires. A write-only
+// grant fails the workflow at the pre-unlock guard with
+// AuthorizationFailed on `vaults/read` after a successful azure/login —
+// caught on the first live tenant run; keep this action list in lockstep
+// with the role documented in docs/runbooks/kv-temp-unlock.md.
 //
 // Why a custom role: built-in roles that grant `vaults/write` (Owner,
 // Contributor, Key Vault Contributor) also grant vault deletion or
-// data-plane access. The kv-temp-unlock workflow only needs to flip the
-// firewall flag and must not be able to read secrets, rotate keys, delete
-// the vault, or change other vault properties beyond what `vaults/write`
-// already implies on the vault resource.
+// data-plane access. The kv-temp-unlock workflow only needs to read the
+// vault's management-plane properties and flip the firewall flag; it must
+// not be able to read secrets, rotate keys, delete the vault, or change
+// other vault properties beyond what `vaults/read` + `vaults/write`
+// already imply on the vault resource (both are management-plane actions,
+// not dataActions -- neither exposes secret, key, or certificate
+// material).
 //
 // Permissions to apply: `Microsoft.Authorization/roleDefinitions/write`
 // is part of `Owner` and `User Access Administrator`, NOT `Contributor`.
@@ -66,11 +75,12 @@ resource kvFirewallTogglerRole 'Microsoft.Authorization/roleDefinitions@2022-04-
   name: kvFirewallTogglerRoleDefinitionName
   properties: {
     roleName: kvFirewallTogglerRoleName
-    description: 'PR D1a / Issue #256 — least-privilege custom role granting only Microsoft.KeyVault/vaults/write, assignable to the automation Key Vault. Used by the kv-temp-unlock workflow identity to toggle publicNetworkAccess on/off.'
+    description: 'PR D1a / Issue #256 — least-privilege custom role granting only Microsoft.KeyVault/vaults/read + Microsoft.KeyVault/vaults/write, assignable to the automation Key Vault. Used by the kv-temp-unlock workflow identity to verify (az keyvault show) and toggle (az keyvault update) publicNetworkAccess.'
     type: 'CustomRole'
     permissions: [
       {
         actions: [
+          'Microsoft.KeyVault/vaults/read'
           'Microsoft.KeyVault/vaults/write'
         ]
         notActions: []
