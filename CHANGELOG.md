@@ -16,6 +16,12 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself. Pure upstream mirror-sync PRs that carry only upstream CHANGELOG entries and no repo-local changes may omit a new bullet (the upstream entries already document the imported changes).
 
+## 2026-07-17
+
+### Fixed
+
+- **infra:** grant `Microsoft.KeyVault/vaults/read` to the KV firewall-toggler custom role in `role-definitions.bicep` (#125). The role granted only `vaults/write`, but `kv-temp-unlock.yml`'s "Pre-unlock state guard" and "Assert final vault state is locked" steps run `az keyvault show`, which needs `vaults/read` — so the workflow failed at the guard with `AuthorizationFailed` after a successful `azure/login`. `docs/runbooks/kv-temp-unlock.md` already documented the role as read + write; the bicep never caught up, and the template repo (no tenant credentials by design) could never exercise the path — the downstream operations-repo run was its first live execution. The action list converges on exactly `['Microsoft.KeyVault/vaults/read','Microsoft.KeyVault/vaults/write']`, the list already hot-fixed into both downstream tenants via `az role definition update`, so a future module redeploy is a no-op on permissions, not a revert. `infra/main.json` regenerated with the same bicep 0.44.1.10279 that generated it; `New-KvUnlockRbac.ps1` header prose ("the single action") corrected in lockstep.
+
 ## 2026-07-16
 
 ### Changed
