@@ -95,25 +95,55 @@ jobs:
 
           echo "All sanity gates passed for PR #$PR_NUMBER."
 
-      - name: Enable auto-merge with squash
+      - name: Determine merge method
+        id: method
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+
+          # Default: squash -- one tidy commit per feature PR. A shared-history PR
+          # that must preserve its individual commits -- above all an upstream-template
+          # sync, which ADR 0057 section 9 mandates land as a MERGE COMMIT and never be
+          # squashed (squashing rewrites the shared history the ff-only mirror contract
+          # depends on) -- opts out by carrying the `merge-commit` label (seeded by
+          # scripts/New-RepoLabels.ps1). Rebase is never offered: it also rewrites that
+          # shared history.
+          # Reference: https://cli.github.com/manual/gh_pr_merge
+          LABELS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
+          if echo "$LABELS" | grep -qx "merge-commit"; then
+            echo "flag=--merge" >> "$GITHUB_OUTPUT"
+            echo "name=merge commit" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=--squash" >> "$GITHUB_OUTPUT"
+            echo "name=squash" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_FLAG: ${{ steps.method.outputs.flag }}
+          METHOD_NAME: ${{ steps.method.outputs.name }}
+        run: |
+          set -euo pipefail
           PR_NUMBER="${{ github.event.pull_request.number }}"
           REPO="${{ github.repository }}"
 
           gh pr merge "$PR_NUMBER" \
             --repo "$REPO" \
-            --squash \
+            "$MERGE_FLAG" \
             --auto \
             --delete-branch
 
-          echo "Auto-merge enabled for PR #$PR_NUMBER (squash + delete branch on merge)."
+          echo "Auto-merge enabled for PR #$PR_NUMBER ($METHOD_NAME + delete branch on merge)."
 
       - name: Post confirmation comment
         if: success()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METHOD_NAME: ${{ steps.method.outputs.name }}
         run: |
           PR_NUMBER="${{ github.event.pull_request.number }}"
           REPO="${{ github.repository }}"
@@ -123,7 +153,7 @@ jobs:
             --body "<!-- pr-auto-merge:confirmation -->
           ## Auto-merge enabled
 
-          The \`owner-approved\` label has been detected. Auto-merge has been enabled with squash strategy. This branch will be deleted after merge.
+          The \`owner-approved\` label has been detected. Auto-merge has been enabled with the **$METHOD_NAME** strategy. (Apply the \`merge-commit\` label before approving to land the PR as a merge commit instead of squash — required for a shared-history PR such as an upstream-template sync, ADR 0057 section 9.) This branch will be deleted after merge.
 
           *Triggered by the \`pr-auto-merge\` workflow.*"
 
@@ -265,7 +295,7 @@ jobs:
             if gh issue close "$ISSUE_NUMBER" \
                  --repo "$REPO" \
                  --reason completed \
-                 --comment "Closed by the \`pr-auto-merge\` workflow: PR #${PR_NUMBER} was squash-merged as \`${MERGE_SHA}\`. GitHub does not fire its implicit linked-issue closure for pull requests merged by \`GITHUB_TOKEN\` (issue #73), so the workflow performs the close explicitly."; then
+                 --comment "Closed by the \`pr-auto-merge\` workflow: PR #${PR_NUMBER} was merged as \`${MERGE_SHA}\`. GitHub does not fire its implicit linked-issue closure for pull requests merged by \`GITHUB_TOKEN\` (issue #73), so the workflow performs the close explicitly."; then
               echo "Issue #$ISSUE_NUMBER closed."
             else
               echo "::warning::Could not close issue #$ISSUE_NUMBER. Close it manually. Continuing."

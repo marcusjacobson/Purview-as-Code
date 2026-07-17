@@ -80,7 +80,8 @@ function Get-RequiredLabel {
 
     return @(
         [pscustomobject]@{ Name = 'needs-review'; Color = 'fbca04'; Description = 'Awaiting lab-owner review before merge' }
-        [pscustomobject]@{ Name = 'owner-approved'; Color = '0e8a16'; Description = 'Lab owner approved; pr-auto-merge enables squash auto-merge' }
+        [pscustomobject]@{ Name = 'owner-approved'; Color = '0e8a16'; Description = 'Lab owner approved; pr-auto-merge enables auto-merge' }
+        [pscustomobject]@{ Name = 'merge-commit'; Color = 'c5def5'; Description = 'pr-auto-merge lands the PR as a merge commit instead of squash, for a shared-history PR (e.g. an upstream-template sync per ADR 0057 section 9)' }
         [pscustomobject]@{ Name = 'destructive'; Color = 'd93f0b'; Description = 'PR deletes or prunes existing state; rollback plan + qualified review required' }
         [pscustomobject]@{ Name = 'drift-detected'; Color = 'b60205'; Description = 'Drift detected between desired-state YAML and the live tenant' }
         [pscustomobject]@{ Name = 'code-currency'; Color = '1d76db'; Description = 'Code-currency watch loop finding (Slice 12)' }
