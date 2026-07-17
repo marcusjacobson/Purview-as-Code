@@ -84,8 +84,8 @@ Under **Settings → Secrets and variables → Actions**:
 - Secrets (Environment: `kv-unlock`):
   - `AZURE_CLIENT_ID_KV_UNLOCK` = the **kv-unlock** app's `appId` (consumed by [`kv-temp-unlock.yml`](../.github/workflows/kv-temp-unlock.yml)).
   - `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID` — the unlock job runs under this Environment, so it reads these from here.
-- Variables (Environment: `lab` — per [ADR 0057](adr/0057-multi-environment-and-branch-model.md) the workflows read every tenant-specific non-secret value from the selected Environment's variables and fail fast when one is unset):
-  - `PURVIEW_ACCOUNT_NAME` = `purview-contoso-lab` (or your actual account name)
+- Variables (Environment: `lab` — per [ADR 0057](adr/0057-multi-environment-and-branch-model.md) the workflows read tenant-specific non-secret values from the selected Environment's variables; each workflow's fail-fast guard checks exactly the variables that workflow consumes):
+  - `PURVIEW_ACCOUNT_NAME` = your **classic** Purview account name — **omit this variable on a unified-only tenant.** No workflow fail-fast guard requires it (guards are scoped to what each workflow consumes; [`validate-oidc-auth.yml`](../.github/workflows/validate-oidc-auth.yml) runs green without it, by design). It is consumed only by data-plane reconcilers resolving `${env:PURVIEW_ACCOUNT_NAME}` tokens ([ADR 0023](adr/0023-identifier-resolution.md) Category 2), which fail with a named unset-token error if such a token is reached without the variable — the correct fail-closed outcome on a unified-only tenant, where classic reconcilers cannot run anyway ([ADR 0047](adr/0047-unified-catalog-preview-api-coexistence.md)/[ADR 0048](adr/0048-purview-account-discovery-gate.md)). Never set it to the shipped placeholder as if real, and never to a pay-as-you-go metering resource's name (ADR 0048).
   - `PURVIEW_RG` = `rg-purview-lab` (or your actual resource group)
   - `KEY_VAULT_NAME` = your automation Key Vault name
   - `TENANT_DOMAIN` = your tenant primary domain (for example `contoso.onmicrosoft.com`)
@@ -132,6 +132,17 @@ The `contoso-lab` account already holds live state in the template's worked exam
 
 1. Edit [`infra/main.bicepparam`](../infra/main.bicepparam) so `purviewAccountName` and `location` match the existing account.
 2. Edit [`data-plane/collections/collections.yaml`](../data-plane/collections/collections.yaml) so `rootCollection` equals the existing account name (root collection shares the account name).
+
+### Unified-only path (tenant-level Unified Catalog, no classic account)
+
+If discovery per [ADR 0048](adr/0048-purview-account-discovery-gate.md) confirmed the tenant is on the tenant-level Unified Catalog experience — no classic `Microsoft.Purview/accounts` governance resource exists, and any discovered pay-as-you-go metering resource must **never** be targeted — deploy the control-plane stack **without** the classic account, using the same canonical command:
+
+```bash
+az deployment group create -g rg-purview-lab -f infra/main.bicep -p infra/main.bicepparam \
+  --parameters deployPurviewAccount=false
+```
+
+This still deploys [`infra/modules/role-definitions.bicep`](../infra/modules/role-definitions.bicep) (the KV firewall-toggler custom role that `kv-temp-unlock.yml` depends on) while skipping the `Microsoft.Purview/accounts` resource entirely ([conditional deployment](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/conditional-resource-deployment)). Leave `purviewAccountName` at the shipped placeholder (ADR 0048 outcome matrix) and omit the `PURVIEW_ACCOUNT_NAME` Environment variable (§2). The classic §4 export/deploy flow does not apply — classic reconcilers cannot drive the unified data plane ([ADR 0047](adr/0047-unified-catalog-preview-api-coexistence.md)).
 
 ## 4. First deploy
 

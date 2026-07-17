@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "16743510756458680581"
+      "templateHash": "7132697569527366891"
     }
   },
   "parameters": {
@@ -14,7 +14,14 @@
       "minLength": 3,
       "maxLength": 63,
       "metadata": {
-        "description": "Name of the Purview account. Must be globally unique within the tenant."
+        "description": "Name of the Purview account. Must be globally unique within the tenant. When `deployPurviewAccount` is false (unified-only tenants per ADR 0048), the shipped placeholder stays in place and the value is unused."
+      }
+    },
+    "deployPurviewAccount": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy the classic `Microsoft.Purview/accounts` resource. Set false for tenants on the tenant-level Unified Catalog experience (ADR 0047/0048): no classic account exists there, a pay-as-you-go metering resource must never be targeted, and this template must still deploy the role-definitions module via the canonical command. Reference: https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/conditional-resource-deployment"
       }
     },
     "location": {
@@ -88,6 +95,7 @@
   },
   "resources": [
     {
+      "condition": "[parameters('deployPurviewAccount')]",
       "type": "Microsoft.Purview/accounts",
       "apiVersion": "2024-04-01-preview",
       "name": "[parameters('purviewAccountName')]",
@@ -199,19 +207,19 @@
   "outputs": {
     "purviewAccountId": {
       "type": "string",
-      "value": "[resourceId('Microsoft.Purview/accounts', parameters('purviewAccountName'))]"
+      "value": "[if(parameters('deployPurviewAccount'), resourceId('Microsoft.Purview/accounts', parameters('purviewAccountName')), '')]"
     },
     "purviewAccountName": {
       "type": "string",
-      "value": "[parameters('purviewAccountName')]"
+      "value": "[if(parameters('deployPurviewAccount'), parameters('purviewAccountName'), '')]"
     },
     "purviewAtlasEndpoint": {
       "type": "string",
-      "value": "[format('https://{0}.purview.azure.com', parameters('purviewAccountName'))]"
+      "value": "[if(parameters('deployPurviewAccount'), format('https://{0}.purview.azure.com', parameters('purviewAccountName')), '')]"
     },
     "systemAssignedPrincipalId": {
       "type": "string",
-      "value": "[reference(resourceId('Microsoft.Purview/accounts', parameters('purviewAccountName')), '2024-04-01-preview', 'full').identity.principalId]"
+      "value": "[if(parameters('deployPurviewAccount'), reference(resourceId('Microsoft.Purview/accounts', parameters('purviewAccountName')), '2024-04-01-preview', 'full').identity.principalId, '')]"
     },
     "kvFirewallTogglerRoleId": {
       "type": "string",
