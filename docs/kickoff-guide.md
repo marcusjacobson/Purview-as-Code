@@ -69,9 +69,10 @@ the diff and commit it on a branch.
 
 Authenticate GitHub Actions to Azure with a Microsoft Entra app + OIDC federated credential — no
 stored client secret. Set the environment secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-`AZURE_SUBSCRIPTION_ID`), the `PURVIEW_ACCOUNT_NAME` variable, and the `OWNER_APPROVAL_LOGIN`
-repository variable (your GitHub login — both the auto-merge gate and the idea-intake
-`needs-review` auto-add read it). Exact commands:
+`AZURE_SUBSCRIPTION_ID`), the `PURVIEW_ACCOUNT_NAME` variable (classic accounts only — omit it on
+a unified-only tenant per [ADR 0048](adr/0048-purview-account-discovery-gate.md)), and the
+`OWNER_APPROVAL_LOGIN` repository variable (your GitHub login — both the auto-merge gate and the
+idea-intake `needs-review` auto-add read it). Exact commands:
 [Getting started §1–§2](getting-started.md). Grounding:
 [Use Azure Login with OpenID Connect](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect),
 [Store information in variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables).

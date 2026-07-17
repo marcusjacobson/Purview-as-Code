@@ -143,10 +143,15 @@ Follow [Getting started §1–§2](getting-started.md) for the exact `az ad app`
    [Access control in Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions).
 3. In **Settings → Environments → `<env>`**, set secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
    `AZURE_SUBSCRIPTION_ID` and the variables `PURVIEW_ACCOUNT_NAME`, `PURVIEW_RG`,
-   `KEY_VAULT_NAME`, `TENANT_DOMAIN`, and `DATA_PLANE_CERT_NAME` — the workflows read every
-   tenant-specific non-secret value from the selected Environment's variables and fail fast when
-   one is unset, per [ADR 0057](adr/0057-multi-environment-and-branch-model.md). See
-   [Getting started §2](getting-started.md) for the per-environment breakdown (including the
+   `KEY_VAULT_NAME`, `TENANT_DOMAIN`, and `DATA_PLANE_CERT_NAME` — the workflows read
+   tenant-specific non-secret values from the selected Environment's variables, and each
+   workflow's fail-fast guard checks exactly the variables that workflow consumes, per
+   [ADR 0057](adr/0057-multi-environment-and-branch-model.md). **Unified-only tenants omit
+   `PURVIEW_ACCOUNT_NAME`** — no workflow guard requires it; it feeds only the classic
+   reconcilers' `${env:PURVIEW_ACCOUNT_NAME}` tokens ([ADR 0023](adr/0023-identifier-resolution.md)
+   Category 2), and per the [ADR 0048](adr/0048-purview-account-discovery-gate.md) outcome matrix
+   the `purviewAccountName` surfaces keep the shipped placeholder on a confirmed-unified tenant.
+   See [Getting started §2](getting-started.md) for the per-environment breakdown (including the
    `kv-unlock` Environment's own secret and variables).
 4. In **Settings → Secrets and variables → Actions → Variables**, set the repository variable
    `OWNER_APPROVAL_LOGIN` to your GitHub login. Two workflows read it: the

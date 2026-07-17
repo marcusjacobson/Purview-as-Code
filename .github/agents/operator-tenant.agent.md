@@ -434,7 +434,7 @@ owner kept the default) or a missed surface — list each for the owner to confi
 
 Print, but never store, the values the owner must set themselves:
 
-- **GitHub Environment secrets** (`Settings → Environments → <env>`): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`. Variable: `PURVIEW_ACCOUNT_NAME`.
+- **GitHub Environment secrets** (`Settings → Environments → <env>`): `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`. Variable: `PURVIEW_ACCOUNT_NAME` — classic accounts only; on a confirmed-unified tenant the variable is **omitted** (no workflow guard requires it, and the `purviewAccountName` surfaces keep the shipped placeholder per the [ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md) outcome matrix).
 - **OIDC federated credential** on the Entra app, subject `repo:<org>/<repo>:environment:<env>` — per [Use Azure Login with OpenID Connect](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect). Mirror the exact `az ad app federated-credential create` shape in [`docs/getting-started.md`](../../docs/getting-started.md).
 - **Purview data-plane roles** at the root collection: `Collection Admin`, `Data Curator`, `Data Source Administrator` — per [Access control in Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions).
 

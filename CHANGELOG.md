@@ -18,9 +18,17 @@ To add an entry:
 
 ## 2026-07-17
 
+### Added
+
+- **infra:** `deployPurviewAccount bool` parameter (default `true`) makes the classic `Microsoft.Purview/accounts` resource conditional in `main.bicep` (#127). Operators on the tenant-level Unified Catalog experience ([ADR 0047](docs/adr/0047-unified-catalog-preview-api-coexistence.md)/[ADR 0048](docs/adr/0048-purview-account-discovery-gate.md) — no classic account exists, and a PAYG metering resource must never be targeted) can now run the canonical `az deployment group create -f infra/main.bicep` with `--parameters deployPurviewAccount=false` and still get the `role-definitions` module (the KV firewall-toggler role `kv-temp-unlock.yml` depends on); previously they had to deploy the module standalone, violating the canonical-commands rule (observed downstream). Outputs are `''` under the documented ternary guard (`systemAssignedPrincipalId` uses the null-forgiving operator for BCP318); ARM's `if()` evaluates only the matching branch, so the `reference()` never fires when the account is skipped; `main.json` regenerated with the same bicep 0.44.1.10279.
+
 ### Fixed
 
 - **infra:** grant `Microsoft.KeyVault/vaults/read` to the KV firewall-toggler custom role in `role-definitions.bicep` (#125). The role granted only `vaults/write`, but `kv-temp-unlock.yml`'s "Pre-unlock state guard" and "Assert final vault state is locked" steps run `az keyvault show`, which needs `vaults/read` — so the workflow failed at the guard with `AuthorizationFailed` after a successful `azure/login`. `docs/runbooks/kv-temp-unlock.md` already documented the role as read + write; the bicep never caught up, and the template repo (no tenant credentials by design) could never exercise the path — the downstream operations-repo run was its first live execution. The action list converges on exactly `['Microsoft.KeyVault/vaults/read','Microsoft.KeyVault/vaults/write']`, the list already hot-fixed into both downstream tenants via `az role definition update`, so a future module redeploy is a no-op on permissions, not a revert. `infra/main.json` regenerated with the same bicep 0.44.1.10279 that generated it; `New-KvUnlockRbac.ps1` header prose ("the single action") corrected in lockstep.
+
+### Documentation
+
+- **docs:** define the `PURVIEW_ACCOUNT_NAME` Environment-variable contract for unified-only operators: **omit the variable** (#127). Verified against current main: no workflow consumes or guards it — each workflow's fail-fast guard checks exactly the variables that workflow consumes, so `validate-oidc-auth.yml` running green without it is by design; the variable feeds only the classic reconcilers' `${env:PURVIEW_ACCOUNT_NAME}` tokens via `Resolve-EnvTokens.ps1` (ADR 0023 Category 2, named unset-token error — fail-closed on a tenant classic reconcilers cannot drive anyway), matching the ADR 0048 outcome matrix (placeholder stays on confirmed-unified tenants). Corrects the docs that overstated the guard behavior (`getting-started.md` §2, `tenant-onboarding.md` Step 5, `kickoff-guide.md` §4, `github-actions.instructions.md`, `operator-tenant.agent.md`); adds the unified-only deploy path to `getting-started.md` §3 and the canonical account-less command to `build-deploy.instructions.md`.
 
 ## 2026-07-16
 
