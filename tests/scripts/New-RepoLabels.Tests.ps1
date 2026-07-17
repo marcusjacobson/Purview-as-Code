@@ -122,6 +122,18 @@ Describe 'Get-RequiredLabel shape' {
         }
     }
 
+    It 'keeps every description within GitHub''s 100-character label limit' {
+        # gh label create returns HTTP 422 when a description exceeds 100
+        # characters, and the seeder halts on the first failed create -- so an
+        # over-long description leaves every label after it uncreated on a fresh
+        # spin-off. Regression guard for the 143-char merge-commit description
+        # that reached main in #131.
+        foreach ($l in $script:Required) {
+            $l.Description.Length |
+                Should -BeLessOrEqual 100 -Because "GitHub caps label descriptions at 100 chars; '$($l.Name)' is $($l.Description.Length)"
+        }
+    }
+
     It 'has no duplicate label names' {
         $names = $script:Required | ForEach-Object { $_.Name }
         ($names | Sort-Object -Unique).Count | Should -Be $names.Count
