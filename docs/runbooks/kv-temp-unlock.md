@@ -137,6 +137,11 @@ section above remain in force.
    - `az keyvault update --public-network-access Enabled
      --default-action Allow` to open the firewall, followed by a 10s
      settle window.
+   - **Verify the open actually stuck** -- `az keyvault show` reads the
+     state back and fails the job (with a policy-diagnosis hint) when
+     the values did not land, because an Azure Policy `modify` effect
+     can rewrite the open inside the same operation while `az` exits 0.
+     See "Governed tenants" below. The re-lock still runs.
    - `sleep` for `duration_minutes * 60` seconds.
    - `if: always()` re-lock to `publicNetworkAccess: Disabled
      --default-action Deny`.
@@ -209,6 +214,63 @@ AzureDiagnostics
 The `identity_claim_appid_g` column is the Entra app (client) ID that
 issued the call; cross-reference it with the workflow's federated
 credential subject to confirm the call came from the expected identity.
+
+## Governed tenants — when Azure Policy silently reverts the open
+
+In a governance-managed tenant, a management-group-scoped Azure Policy
+with a [`modify` effect](https://learn.microsoft.com/en-us/azure/governance/policy/concepts/effect-modify)
+(for example, an initiative that forces Key Vault `publicNetworkAccess`
+to `Disabled`) **rewrites the open PUT inside the same operation**:
+`az keyvault update` exits 0, the workflow proceeds, and every later
+data-plane call fails mysteriously with a Forbidden/network error while
+the vault reads locked. Observed live during downstream tenant wiring.
+
+**Symptom.** The "Verify the open actually stuck (read back)" step fails
+with `Key Vault open did not stick` (both this workflow and
+[`validate-oidc-auth.yml`](../../.github/workflows/validate-oidc-auth.yml)
+carry the read-back). Before that step existed, the failure surfaced
+only as mysterious data-plane errors after a green open.
+
+**Diagnosis.** Filter the Activity Log on the vault for the run window:
+a `Microsoft.Authorization/policies/modify/action` event at the same
+timestamp as the workflow's "Update Key Vault" event is the tell. The
+event names the policy assignment and definition that fired.
+
+**Remedy — bounded policy exemption (Waiver).** Do not disable or edit
+the policy assignment. Create an
+[exemption](https://learn.microsoft.com/en-us/azure/governance/policy/concepts/exemption-structure)
+scoped to the **single vault**, pinned via
+`--policy-definition-reference-ids` to the **one** definition inside the
+initiative that rewrites `publicNetworkAccess`, with `--expires-on` as a
+self-expiring backstop ([az policy exemption](https://learn.microsoft.com/en-us/cli/azure/policy/exemption)):
+
+```bash
+# Requires Microsoft.Authorization/policyExemptions/write on the scope
+# (Resource Policy Contributor or higher).
+VAULT_ID=$(az keyvault show --name "$KEY_VAULT_NAME" --resource-group "$RESOURCE_GROUP" --query id -o tsv)
+
+az policy exemption create \
+  --name "kv-temp-unlock-window" \
+  --scope "$VAULT_ID" \
+  --policy-assignment "<assignment resource ID from the Activity Log event>" \
+  --policy-definition-reference-ids "<the one definition reference id that rewrites publicNetworkAccess>" \
+  --exemption-category Waiver \
+  --expires-on "<UTC ISO-8601 end of the intended window, e.g. 30 minutes out>" \
+  --description "Bounded exemption for a kv-temp-unlock window; expires automatically."
+
+# ... run the kv-temp-unlock / validate-oidc-auth dispatch ...
+
+az policy exemption delete --name "kv-temp-unlock-window" --scope "$VAULT_ID"
+```
+
+Delete the exemption as soon as the window closes. ⚠️ A `CanNotDelete`
+resource lock on the vault (or its resource group) **blocks exemption
+deletion** — that is what `--expires-on` is for: the exemption
+self-expires even when the delete is blocked, so always set it to the
+end of the intended window, not a far-future date. This procedure ran
+successfully downstream (MG-scoped initiative, `modify`-effect Key Vault
+publicNetworkAccess definition, single-vault Waiver pinned to one
+definition reference, expiry backstop).
 
 ## Identity scope
 
