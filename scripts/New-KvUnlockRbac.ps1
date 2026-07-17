@@ -7,9 +7,11 @@
     PR D1b. Deploys the `Purview-Lab-KV-Firewall-Toggler` -> kv-unlock SP
     role assignment at the lab Key Vault scope. Companion to
     `scripts/New-KvUnlockEntraApp.ps1`: that script creates the identity,
-    this one binds the identity to the only permission it needs
-    (`Microsoft.KeyVault/vaults/write`, declared as the single action of
-    the custom role in `infra/modules/role-definitions.bicep`).
+    this one binds the identity to the only permissions it needs
+    (`Microsoft.KeyVault/vaults/read` + `Microsoft.KeyVault/vaults/write`,
+    declared as the two actions of the custom role in
+    `infra/modules/role-definitions.bicep` -- read for the workflow's
+    `az keyvault show` state guards, write for `az keyvault update`).
 
     Why a separate script (not folded into `New-AutomationRbac.ps1`):
 

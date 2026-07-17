@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.44.1.10279",
-      "templateHash": "16743510756458680581"
+      "templateHash": "5340948956549871068"
     }
   },
   "parameters": {
@@ -130,7 +130,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.44.1.10279",
-              "templateHash": "5970322923136205331"
+              "templateHash": "2502342409245635384"
             }
           },
           "parameters": {
@@ -158,11 +158,12 @@
               "name": "[variables('kvFirewallTogglerRoleDefinitionName')]",
               "properties": {
                 "roleName": "[parameters('kvFirewallTogglerRoleName')]",
-                "description": "PR D1a / Issue #256 — least-privilege custom role granting only Microsoft.KeyVault/vaults/write, assignable to the automation Key Vault. Used by the kv-temp-unlock workflow identity to toggle publicNetworkAccess on/off.",
+                "description": "PR D1a / Issue #256 — least-privilege custom role granting only Microsoft.KeyVault/vaults/read + Microsoft.KeyVault/vaults/write, assignable to the automation Key Vault. Used by the kv-temp-unlock workflow identity to verify (az keyvault show) and toggle (az keyvault update) publicNetworkAccess.",
                 "type": "CustomRole",
                 "permissions": [
                   {
                     "actions": [
+                      "Microsoft.KeyVault/vaults/read",
                       "Microsoft.KeyVault/vaults/write"
                     ],
                     "notActions": [],
