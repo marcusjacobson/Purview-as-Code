@@ -107,28 +107,35 @@ Describe 'Test-IdentifierResidue — manifest contract' {
         }
     }
 
-    It 'PINS the reviewRequired quarantine to exactly the known entries, BY VALUE' {
+    It 'PINS the reviewRequired quarantine to exactly the known entries (EMPTY — #98), BY VALUE' {
         # The quarantine is a quarantine, not an escape hatch.
         #
         # Pinning the COUNT alone is not enough, and the gap is not theoretical:
-        # with only a count pinned, the two hashes could be SWAPPED for two
-        # different ones — count still 2, test still green — and the quarantine
-        # would now be covering two identifiers nobody reviewed. A quarantine that
-        # can be SUBSTITUTED is a path exclusion with better PR.
+        # with only a count pinned, entries could be SWAPPED for different ones —
+        # count unchanged, test still green — and the quarantine would now be
+        # covering identifiers nobody reviewed. A quarantine that can be
+        # SUBSTITUTED is a path exclusion with better PR.
         #
-        # So pin the literal digests too. This is safe to do in the open precisely
-        # BECAUSE they are hashes: they disclose nothing about the identifiers they
-        # cover, which is the whole reason reviewRequired is SHA-256-keyed. Growing
-        # OR substituting the quarantine now requires editing this test, which is a
+        # So pin the literal digests too (there are none left to pin, which is
+        # itself the assertion). This is safe to do in the open precisely BECAUSE
+        # they are hashes: they disclose nothing about the identifiers they cover,
+        # which is the whole reason reviewRequired is SHA-256-keyed. Growing OR
+        # substituting the quarantine now requires editing this test, which is a
         # deliberate, visible review signal.
-        $expected = @(
-            '6bb5e87d3144d4e6dac9e6d5dfc4b47999cb63df062eef342567ccaddf8e5068'  # docs/adr/0035 — File Plan property Guid
-            '53fc1662c3b2d2b3c056cf9e9513b8ef5da860141b468fb8d547a23a1dab41a8'  # docs/adr/0035 — File Plan property Policy GUID
-        )
+        #
+        # Formerly 2 entries (docs/adr/0035 — File Plan property `Guid` and
+        # `Policy` GUID). Issue #98 established both GUIDs' provenance by
+        # empirical cross-tenant verification and promoted them to
+        # identifierScan.microsoftConstants in the manifest, emptying this list.
+        # validate.yml now runs Test-IdentifierResidue.ps1 -FailOnReview, so a
+        # future addition here fails the build immediately rather than passing in
+        # report-mode — see .github/agents/tenant-placeholders.yaml
+        # identifierScan.reviewRequired.
+        $expected = @()
         $actual = @($script:Manifest.identifierScan.reviewRequired |
                 ForEach-Object { ([string]$_.sha256).ToLowerInvariant() } | Sort-Object)
 
-        $actual.Count | Should -Be 2 -Because 'the quarantine must not GROW without review'
+        $actual.Count | Should -Be 0 -Because 'both prior entries were promoted to microsoftConstants (#98); the quarantine must not GROW without review'
         $actual | Should -Be (@($expected) | Sort-Object) -Because 'the quarantine must not be SUBSTITUTED without review'
     }
 

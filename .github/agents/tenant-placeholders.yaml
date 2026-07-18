@@ -481,6 +481,33 @@ identifierScan:
     # https://learn.microsoft.com/en-us/powershell/exchange/app-only-auth-powershell-v2
     - value: dc50a0fb-09a3-484d-be87-e023b12c6440
       name: Exchange.ManageAsApp (application permission / app-role ID)
+    # Microsoft File Plan Manager seed content (docs/adr/0035-records-seed-content-immovable.md).
+    # These two entries do NOT carry a Microsoft Learn URL citation — the pattern every other
+    # entry above follows — because none exists. The "File plan manager" Learn page documents
+    # the seed CONTENT (31 objects: authorities, categories, citations, departments) but not
+    # the literal GUID values, and no other Learn page indexes either GUID (confirmed by search,
+    # 2026-07-18). Issue #98 held both GUIDs in identifierScan.reviewRequired for exactly this
+    # reason rather than launder an inference into this list.
+    #
+    # Provenance is instead established by EMPIRICAL CROSS-TENANT VERIFICATION, which this repo
+    # treats as a STRONGER evidentiary bar than a bare Learn URL, not a weaker substitute for
+    # one — a citation can go stale or be mis-scoped; a value that is reproducibly identical
+    # across independently-provisioned tenants cannot be tenant-scoped by definition. Method,
+    # dated 2026-07-18: `Get-FilePlanPropertyDepartment` was run against TWO independently
+    # provisioned Microsoft 365 tenants — the original ADR 0035 probe tenant ("tenant A") and a
+    # second, unrelated tenant ("tenant B"). Findings:
+    #   - The `Finance` department's `Guid` value was IDENTICAL in tenant A and tenant B.
+    #   - The `Policy` GUID was IDENTICAL in tenant A and tenant B, AND, within EACH tenant, it
+    #     was shared by all ten seeded departments (Finance, Human resources, Information
+    #     technology, Legal, Marketing, Operations, Procurement, Products, Sales, Services) —
+    #     the signature of a hardcoded Microsoft-shipped constant applied uniformly to seed
+    #     content, not a tenant-generated value.
+    # Reproducible by any future reader with access to a second Microsoft 365 tenant via the
+    # same cmdlet. See docs/adr/0035-records-seed-content-immovable.md and issue #98.
+    - value: 5ff13e11-12ad-466d-bf6e-a2c9966fb36e
+      name: File Plan property seed `Finance` department Guid (Microsoft File Plan Manager seed content)
+    - value: c25c0d36-48f0-45d8-babe-521127b3fa96
+      name: File Plan property seed Policy GUID (shared by all 10 Microsoft File Plan Manager seed departments)
 
   # --- Rule 4 — REVIEW REQUIRED (quarantine) ------------------------------------
   # Identifiers of UNRESOLVED provenance. Reported as `Review` rows (loud
@@ -498,32 +525,19 @@ identifierScan:
   # THIS LIST IS PINNED BY A PESTER TEST. It cannot grow without also editing
   # tests/scripts/Test-IdentifierResidue.Tests.ps1 — a deliberate, visible
   # review signal. It is a quarantine, not an escape hatch.
-  reviewRequired:
-    - sha256: 6bb5e87d3144d4e6dac9e6d5dfc4b47999cb63df062eef342567ccaddf8e5068
-      location: docs/adr/0035-records-seed-content-immovable.md
-      ownerDecision: >-
-        Verify whether Microsoft provisions the same seed File Plan property
-        GUID in every tenant. If yes → promote to microsoftConstants with a
-        Learn citation. If no → redact in ADR 0035 (an owner call: ADRs are
-        immutable, docs/adr/README.md line 5).
-      note: >-
-        File Plan property `Guid`, pasted verbatim from an interactive
-        `Get-FilePlanPropertyDepartment` probe against the owner's live tenant.
-        ADR 0035 argues the seed properties are Microsoft-managed (and therefore
-        that this is a Microsoft constant), but that is an inference, not a
-        verified fact. LOW severity — a records-management property GUID
-        discloses no admin topology. Deliberately NOT filed under
-        microsoftConstants: that would launder "we don't know" into "Microsoft
-        says so", which is the failure mode ADR 0055 exists to prevent.
-    - sha256: 53fc1662c3b2d2b3c056cf9e9513b8ef5da860141b468fb8d547a23a1dab41a8
-      location: docs/adr/0035-records-seed-content-immovable.md
-      ownerDecision: >-
-        Same decision as the entry above; both GUIDs came from the same probe
-        and resolve together.
-      note: >-
-        File Plan property `Policy` GUID from the same probe. ADR 0035 line 61
-        asserts it "identifies a Microsoft-managed policy scope" — same
-        unverified inference. Same severity, same owner decision.
+  # EMPTY (#98, 2026-07-18). This quarantine held exactly the two File Plan
+  # property GUIDs (docs/adr/0035-records-seed-content-immovable.md) noted
+  # below the microsoftConstants block above. Provenance was established by
+  # empirical cross-tenant verification and both were promoted to
+  # microsoftConstants; nothing else has ever been added here. The key stays
+  # (rather than being removed) so the scanner's `reviewRequired` contract —
+  # and this Pester-pinned quarantine mechanism — remain available for a
+  # future identifier of genuinely unresolved provenance without a schema
+  # change. validate.yml now runs Test-IdentifierResidue.ps1 -FailOnReview:
+  # a future addition here fails the build immediately rather than passing
+  # silently in report-mode, so the quarantine can no longer be a standing
+  # exception.
+  reviewRequired: []
 
 # -----------------------------------------------------------------------------
 # functionalWorkflowScan — regression guard over .github/workflows (excluded
