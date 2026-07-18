@@ -21,7 +21,22 @@
          set follows automatically.
       2. It reads each linked source doc, ordinal-sorts them for a
          deterministic order, and rebuilds the embedded region.
-      3. In default mode it writes the file back (honouring -WhatIf / -Confirm).
+      3. Every relative link inside each doc's content (Markdown `[text](path)`
+         and, defensively, HTML `href="path"`) is rewritten so it resolves from
+         index.html's actual location — the repo root — instead of from the
+         source doc's own directory. A source doc's links are authored relative
+         to wherever that doc lives on disk (e.g. a link inside docs/foo.md is
+         relative to docs/); once copied verbatim into index.html at the repo
+         root, the same relative path points one or more directories off from
+         its intended target. The rewrite joins the doc's repo-root-relative
+         directory to the link, then normalises away the resulting `../`
+         segments (see ConvertTo-RepoRootRelativeLink below), so e.g. a link
+         `../adr/0057-....md` written inside docs/solutions/foo.md becomes
+         `docs/adr/0057-....md`, not the unresolved
+         `docs/solutions/../adr/0057-....md`. Absolute URLs (`scheme://`),
+         protocol-relative (`//host/...`) and domain-absolute (`/path`) links,
+         anchor-only links (`#section`), and `mailto:` links are left untouched.
+      4. In default mode it writes the file back (honouring -WhatIf / -Confirm).
          In -Check mode it makes no changes and throws if the embedded snapshots
          no longer match the source docs — this is what the CI freshness gate
          in .github/workflows/validate.yml runs.
@@ -68,6 +83,140 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Collapse a forward-slash relative path's '.' and '..' segments so the
+# result is the shortest equivalent path — e.g. 'docs/solutions/../adr/x.md'
+# -> 'docs/adr/x.md'. A leading '..' that would climb above the join root is
+# preserved rather than discarded (defensive: should not occur for a link
+# that resolves to a real file inside this repository).
+function ConvertTo-NormalizedRelativePath {
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    $hasTrailingSlash = $Path.EndsWith('/')
+    $segments = $Path -split '/'
+    $stack = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($segment in $segments) {
+        if ([string]::IsNullOrEmpty($segment) -or $segment -eq '.') {
+            continue
+        }
+        if ($segment -eq '..') {
+            if ($stack.Count -gt 0 -and $stack[$stack.Count - 1] -ne '..') {
+                $stack.RemoveAt($stack.Count - 1)
+            }
+            else {
+                $stack.Add($segment)
+            }
+            continue
+        }
+        $stack.Add($segment)
+    }
+
+    $result = $stack -join '/'
+    if ($hasTrailingSlash -and $result -and -not $result.EndsWith('/')) {
+        $result += '/'
+    }
+    return $result
+}
+
+# Rewrite a single link target authored relative to $DocDir (the embedded
+# doc's own directory, repo-root-relative, forward-slash, '' for a doc at the
+# repo root) so it resolves correctly relative to the repo root instead —
+# where index.html, the embedding target, actually lives. Absolute URLs
+# (scheme://), protocol-relative (//host/...), domain-absolute (/path),
+# anchor-only (#section), and mailto: links pass through unchanged.
+function ConvertTo-RepoRootRelativeLink {
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$DocDir,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Target
+    )
+
+    if ([string]::IsNullOrEmpty($Target)) {
+        return $Target
+    }
+    if ($Target -match '^[A-Za-z][A-Za-z0-9+.\-]*:' -or
+        $Target.StartsWith('//') -or
+        $Target.StartsWith('/') -or
+        $Target.StartsWith('#')) {
+        # Scheme-qualified (incl. mailto:), protocol-relative, domain-absolute,
+        # or anchor-only — none of these are relative to the doc's directory.
+        return $Target
+    }
+
+    $anchor = ''
+    $pathPart = $Target
+    $hashIndex = $Target.IndexOf('#')
+    if ($hashIndex -ge 0) {
+        $pathPart = $Target.Substring(0, $hashIndex)
+        $anchor = $Target.Substring($hashIndex)
+    }
+    if ([string]::IsNullOrEmpty($pathPart)) {
+        return $Target
+    }
+
+    $combined = if ($DocDir) { "$DocDir/$pathPart" } else { $pathPart }
+    return (ConvertTo-NormalizedRelativePath -Path $combined) + $anchor
+}
+
+# Rewrite every relative Markdown link ('[text](path)', including images,
+# which share the same ']( ... )' shape) and, defensively, every HTML
+# href="path" attribute inside a single source doc's raw content, so the
+# links resolve from the repo root once embedded into index.html. Operates
+# only on the doc's own text — never touches index.html's surrounding markup
+# or its client-side <script> blocks, which this function never sees.
+function ConvertTo-RewrittenDocContent {
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Content,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$DocDir
+    )
+
+    $result = $Content
+
+    # Markdown-style: ']( target )' — covers both [text](target) and
+    # ![alt](target) image links.
+    $mdPattern = [regex]'\]\(([^)]+)\)'
+    $sb = [System.Text.StringBuilder]::new()
+    $lastIndex = 0
+    foreach ($match in $mdPattern.Matches($result)) {
+        [void]$sb.Append($result.Substring($lastIndex, $match.Index - $lastIndex))
+        $rewritten = ConvertTo-RepoRootRelativeLink -DocDir $DocDir -Target $match.Groups[1].Value
+        [void]$sb.Append('](' + $rewritten + ')')
+        $lastIndex = $match.Index + $match.Length
+    }
+    [void]$sb.Append($result.Substring($lastIndex))
+    $result = $sb.ToString()
+
+    # HTML-style: href="target" or href='target'.
+    $hrefPattern = [regex]'href=(["''])([^"'']+)\1'
+    $sb = [System.Text.StringBuilder]::new()
+    $lastIndex = 0
+    foreach ($match in $hrefPattern.Matches($result)) {
+        [void]$sb.Append($result.Substring($lastIndex, $match.Index - $lastIndex))
+        $quote = $match.Groups[1].Value
+        $rewritten = ConvertTo-RepoRootRelativeLink -DocDir $DocDir -Target $match.Groups[2].Value
+        [void]$sb.Append('href=' + $quote + $rewritten + $quote)
+        $lastIndex = $match.Index + $match.Length
+    }
+    [void]$sb.Append($result.Substring($lastIndex))
+    return $sb.ToString()
+}
+
 $startMarker = '<!-- EMBEDDED-DOCS:START -->'
 $endMarker = '<!-- EMBEDDED-DOCS:END -->'
 
@@ -111,6 +260,13 @@ $blocks = foreach ($href in $ordered) {
         throw "Linked doc '$href' does not exist (resolved to: $sourcePath). Fix the link in $IndexPath or add the file."
     }
     $content = ([System.IO.File]::ReadAllText($sourcePath)) -replace "`r`n", "`n"
+    # Rewrite the doc's own relative links so they resolve from index.html's
+    # location (the repo root) rather than from $href's directory. $href is
+    # already forward-slash and repo-root-relative (e.g. 'docs/foo.md';
+    # 'README.md' at the root itself), so its directory is $docDir.
+    $lastSlash = $href.LastIndexOf('/')
+    $docDir = if ($lastSlash -ge 0) { $href.Substring(0, $lastSlash) } else { '' }
+    $content = ConvertTo-RewrittenDocContent -Content $content -DocDir $docDir
     # Defensive: a literal script-closing tag would break the surrounding
     # <script> block. None exist today; neutralise if one is ever introduced.
     $content = $content -replace '</script>', '<\/script>'
