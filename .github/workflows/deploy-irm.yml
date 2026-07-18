@@ -98,6 +98,21 @@ name: deploy-irm
 #   https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
 #   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
 #   https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#onworkflow_dispatchinputs
+#   https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability
+#
+# Skip gate (ADR 0054): this push-triggered workflow fires on every merge
+# to a tracked branch, including on every un-onboarded template copy, and
+# unconditionally assumed a real Purview tenant was wired up. The
+# `preflight` job below tests the onboarding signal (a non-empty
+# secrets.AZURE_CLIENT_ID and vars.KEY_VAULT_NAME on the selected GitHub
+# Environment) from inside a running job -- `secrets` is not available in
+# ANY `if:` condition, only in env/run/with -- and emits a `configured`
+# output. The `apply` job below declares `needs: preflight` and `if:
+# needs.preflight.outputs.configured == 'true'` (`needs` IS available in
+# a job-level `if:`), so an un-onboarded copy SKIPS the apply job cleanly
+# instead of failing at azure/login. This also folds in the
+# KEY_VAULT_NAME throw guard that previously lived in the "Temporarily
+# allow Key Vault public access" step.
 
 on:
   workflow_dispatch:
@@ -186,8 +201,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Preflight (ADR 0054 onboarding signal)
+    runs-on: ubuntu-latest
+    # Binds the SAME selected environment as apply below (ADR 0057
+    # canonical expression, byte-identical), so the secret and variable
+    # it tests are the exact ones apply would use.
+    environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+    permissions:
+      contents: read
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    env:
+      # secrets/vars are legal in jobs.<job_id>.env (not in jobs.<job_id>.if
+      # or jobs.<job_id>.steps.if) -- see ADR 0054.
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+    steps:
+      - name: Check onboarding signal
+        id: check
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
+            Write-Host "::notice::secrets.AZURE_CLIENT_ID is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+          } elseif ([string]::IsNullOrEmpty($env:KEY_VAULT_NAME)) {
+            Write-Host "::notice::vars.KEY_VAULT_NAME is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=true"
+          }
+
   apply:
     name: Apply IRM policies
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
     permissions:
@@ -274,9 +322,9 @@ jobs:
         id: kv-open
         shell: pwsh
         run: |
-          if (-not $env:KEY_VAULT_NAME) {
-            throw "vars.KEY_VAULT_NAME is not set on the '$($env:ENVIRONMENT_NAME)' GitHub Environment. Set it before re-running."
-          }
+          # KEY_VAULT_NAME is guaranteed non-empty here: the preflight job
+          # (ADR 0054) already checked it and this job would have been
+          # skipped, not started, if it were absent.
           # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
           az keyvault update `
             --name $env:KEY_VAULT_NAME `
