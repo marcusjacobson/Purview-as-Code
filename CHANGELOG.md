@@ -16,6 +16,12 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself. Pure upstream mirror-sync PRs that carry only upstream CHANGELOG entries and no repo-local changes may omit a new bullet (the upstream entries already document the imported changes).
 
+## 2026-07-18
+
+### Documentation
+
+- **ci:** mark `pr-auto-merge.yml`'s "Close linked issues after merge" step as load-bearing, and retire the never-executed `pr-stacked-retarget.yml` (#99). GitHub's native linked-issue auto-close has now been confirmed to never fire in this repository across 16-for-16 consecutively observed, correctly-linked PRs — a consistent, reproducible property (root cause: `GITHUB_TOKEN`-merged PRs suppress the events GitHub's native closure and `pull_request: closed`/`push: main` triggers depend on), not an intermittent flake, so the explicit `gh issue close` step PR #77 added is the *only* mechanism closing issues here. The job now carries an explicit "load-bearing — do not remove" warning linking to #99's full evidence table, so it is not later deleted as apparently redundant by someone who sees `Closes #N` in a PR body and assumes GitHub already handles it. Separately, `pr-stacked-retarget.yml` fires on `pull_request: closed` — the same trigger confirmed above to never fire for a `GITHUB_TOKEN` merge — and a repo-history grep of every PR's `baseRefName` (`gh pr list --state all --json baseRefName`) confirms the stacked-PR pattern it exists to handle (a PR based on another open PR's branch) has never actually been used in this repo: every PR, merged or closed, based directly off `main`. It is therefore deleted outright rather than ported to the same explicit-step fallback pattern, following this repo's own precedent (ADR 0051, `deploy-data-plane.yml`) of removing a control that only looks like it works rather than leaving it as a false safety net. The deletion propagates to the downstream operations repo on its next `git merge --ff-only` template sync — an expected, harmless consequence, since that repo also merges via `GITHUB_TOKEN` and the workflow never fired for it either.
+
 ## 2026-07-17
 
 ### Added

@@ -183,6 +183,15 @@ jobs:
   # that actually executes for these merges. `gh pr merge --auto` merely *enables* auto-merge; the
   # merge itself lands later (once required checks pass), so this job waits for it rather than
   # assuming it has already happened.
+  #
+  # LOAD-BEARING — DO NOT REMOVE AS "REDUNDANT". This step is the ONLY mechanism that closes
+  # issues in this repository. GitHub's native linked-issue auto-close (the implicit behavior of a
+  # `Closes #N` reference) has been confirmed to NEVER fire here, on 16-for-16 consecutively
+  # observed, correctly-linked PRs — not intermittently, a consistent property of a repo whose PRs
+  # merge via `GITHUB_TOKEN`. If you are reading this because a PR body already contains
+  # `Closes #N` and this step looks superfluous: it is not. Removing it would silently stop all
+  # issue closure in this repo. Full evidence table and root-cause analysis:
+  # https://github.com/marcusjacobson/Purview-as-Code/issues/99
   close-linked-issues:
     name: Close linked issues after merge
     needs: auto-merge
