@@ -84,8 +84,32 @@
 #                `data-plane/administrative-units/administrative-units.yaml`
 #                per [ADR 0002](../../docs/adr/0002-administrative-units.md).
 #                Other scope shapes are rejected by the reconciler.
-#   members      (required, list of strings) Entra (Azure AD) **group**
-#                object IDs. One group OID per line. Each group must have
+#   members      (required, list) Each entry declares one Entra (Azure AD)
+#                **group** and must be one of two shapes (per
+#                [ADR 0023](../../docs/adr/0023-identifier-resolution.md)
+#                Category 3, issue #95):
+#
+#                  * RECOMMENDED for new entries — a mapping naming the
+#                    group by displayName:
+#                        - displayName: sg-purview-compliance-admins
+#                    The reconciler resolves this to an object ID at
+#                    deploy time via
+#                    `scripts/Get-EntraPrincipalIdByDisplayName.ps1`
+#                    (Kind=Group), so no real Entra object ID is ever
+#                    committed to this file. Resolution is fail-closed: a
+#                    display name that does not resolve, or that matches
+#                    more than one group, aborts the run before any
+#                    tenant write — it never silently drops the member.
+#
+#                  * Legacy-but-still-supported — a bare Entra group
+#                    object ID string:
+#                        - 00000000-0000-0000-0000-000000000000
+#                    Kept indefinitely for compatibility with existing
+#                    populated desired-state files (this is not a
+#                    transitional shim scheduled for removal); used
+#                    as-is, unchanged from prior behaviour.
+#
+#                Either shape must resolve to a group with
 #                `isAssignableToRole = true` per [Use Microsoft Entra
 #                groups to manage role assignments]
 #                (https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/groups-concept);
@@ -118,7 +142,7 @@
 #     description: Tenant-wide read + configure of compliance solutions.
 #     scope: /
 #     members:
-#       - 00000000-0000-0000-0000-000000000000   # Entra group OID for the Compliance Admins group (isAssignableToRole=true)
+#       - displayName: sg-purview-compliance-admins   # RECOMMENDED shape (ADR 0023 Category 3); resolved to an Entra group object ID at deploy time
 #
 #   - name: Compliance Data Administrator
 #     templateId: e6d1a23a-da11-4be4-9570-befc86d067a7
@@ -131,7 +155,7 @@
 #     description: Manage sensitivity labels and label policies.
 #     scope: /
 #     members:
-#       - 00000000-0000-0000-0000-000000000000   # Entra group OID for the IP Admins group (isAssignableToRole=true)
+#       - 00000000-0000-0000-0000-000000000000   # Legacy-but-still-supported shape: a raw Entra group OID (isAssignableToRole=true). Kept indefinitely for compatibility with existing populated desired-state files -- not scheduled for removal.
 
 # Default steady state is an empty list — the template ships it empty and it
 # is a total no-op: `Deploy-EntraDirectoryRoles.ps1` short-circuits before it

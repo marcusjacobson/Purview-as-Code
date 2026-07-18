@@ -48,6 +48,20 @@ BeforeAll {
     }
 
     $script:ScriptText = Get-Content -LiteralPath $script:ScriptPath -Raw
+
+    # AST-extract the ADR 0023 Category 3 (issue #95) dual-shape member
+    # functions so they can be exercised directly, without dot-sourcing
+    # the whole script (which would attempt Connect-IPPSSession /
+    # Key Vault / az calls at import time; forbidden per tests/README.md).
+    foreach ($fname in @('Test-IsGuid', 'Test-IsRoleMemberShapeValid', 'Resolve-DesiredRoleGroupMemberIds')) {
+        $fnAst = $script:Ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $fname
+            }, $true)
+        if (-not $fnAst) { throw "$fname not found in $script:ScriptPath" }
+        . ([ScriptBlock]::Create($fnAst.Extent.Text))
+    }
 }
 
 Describe 'Deploy-PurviewRoleGroups.ps1 -- read-phase / plan contract (issue #401)' {
@@ -214,5 +228,141 @@ Describe 'Deploy-PurviewRoleGroups.ps1 -- -WhatIf produces a real drift report (
         # Read phase must run, write phase must not. ShouldProcess
         # remains the gate.
         $script:ScriptText | Should -Match "ShouldProcess\(\s*\`$shouldProcessTarget\s*,\s*\`$shouldProcessAction\s*\)"
+    }
+}
+
+Describe 'Test-IsRoleMemberShapeValid dual-shape validation (ADR 0023 Category 3, issue #95)' {
+
+    It 'accepts a raw Entra group object ID (GUID) string' {
+        Test-IsRoleMemberShapeValid -Value '00000000-0000-0000-0000-000000000000' | Should -BeTrue
+    }
+
+    It 'rejects a non-GUID string' {
+        Test-IsRoleMemberShapeValid -Value 'sg-purview-compliance-administrators' | Should -BeFalse
+    }
+
+    It 'accepts a { displayName: <name> } mapping' {
+        Test-IsRoleMemberShapeValid -Value @{ displayName = 'sg-purview-compliance-administrators' } | Should -BeTrue
+    }
+
+    It 'rejects a mapping missing the displayName key' {
+        Test-IsRoleMemberShapeValid -Value @{ notDisplayName = 'sg-purview-compliance-administrators' } | Should -BeFalse
+    }
+
+    It 'rejects a mapping with a blank displayName' {
+        Test-IsRoleMemberShapeValid -Value @{ displayName = '   ' } | Should -BeFalse
+    }
+
+    It 'rejects a value that is neither a string nor a mapping' {
+        Test-IsRoleMemberShapeValid -Value 42 | Should -BeFalse
+    }
+}
+
+Describe 'Resolve-DesiredRoleGroupMemberIds dual-shape resolution (ADR 0023 Category 3, issue #95)' {
+
+    It 'passes a raw OID through unchanged and never invokes the resolver (back-compat regression)' {
+        $resolver = { param($displayName) throw 'resolver must not be invoked for a raw-OID entry' }
+        $result = Resolve-DesiredRoleGroupMemberIds -Members @('00000000-0000-0000-0000-000000000000') -Resolver $resolver
+        $result | Should -Be @('00000000-0000-0000-0000-000000000000')
+    }
+
+    It 'resolves a { displayName: } entry via the supplied resolver' {
+        $resolver = { param($displayName) return '11111111-1111-1111-1111-111111111111' }
+        $result = Resolve-DesiredRoleGroupMemberIds -Members @(@{ displayName = 'sg-purview-compliance-administrators' }) -Resolver $resolver
+        $result | Should -Be @('11111111-1111-1111-1111-111111111111')
+    }
+
+    It 'resolves a mixed list of raw OIDs and displayName entries in declared order' {
+        $resolver = { param($displayName) return '22222222-2222-2222-2222-222222222222' }
+        $result = Resolve-DesiredRoleGroupMemberIds `
+            -Members @('00000000-0000-0000-0000-000000000000', @{ displayName = 'sg-purview-ediscovery-managers' }) `
+            -Resolver $resolver
+        $result | Should -Be @('00000000-0000-0000-0000-000000000000', '22222222-2222-2222-2222-222222222222')
+    }
+
+    It 'throws when the resolver reports "no match" (not-found) -- fail-closed, per issue #95' {
+        $resolver = { param($displayName) throw "No Group found in Microsoft Entra with displayName '$displayName'. Create the principal or fix the YAML." }
+        { Resolve-DesiredRoleGroupMemberIds -Members @(@{ displayName = 'sg-does-not-exist' }) -Resolver $resolver } | Should -Throw
+    }
+
+    It 'throws when the resolver reports ambiguity (more than one match) -- hard error, never first-match-wins' {
+        $resolver = { param($displayName) throw "Multiple Groups found in Microsoft Entra with displayName '$displayName'. Display name must be unique for ADR 0023 resolution to succeed." }
+        { Resolve-DesiredRoleGroupMemberIds -Members @(@{ displayName = 'sg-ambiguous' }) -Resolver $resolver } | Should -Throw
+    }
+
+    It 'throws on a mapping entry missing the required displayName field' {
+        { Resolve-DesiredRoleGroupMemberIds -Members @(@{ notDisplayName = 'x' }) -Resolver { param($d) 'unused' } } | Should -Throw
+    }
+
+    It 'throws on an entry that is neither a string nor a mapping' {
+        { Resolve-DesiredRoleGroupMemberIds -Members @(42) -Resolver { param($d) 'unused' } } | Should -Throw
+    }
+
+    It 'THE LOAD-BEARING REGRESSION: a resolution failure never returns a shrunk/partial member list alongside earlier successes' {
+        # If the resolver's failure on the SECOND entry were caught and
+        # `continue`d past (instead of thrown), this call would return a
+        # one-element array containing only the first (successful)
+        # resolution -- silently shrinking the desired set exactly the
+        # way issue #95 forbids: under -PruneMissing, a shrunk desired
+        # set is read as "revoke every real member of this role group".
+        # Assert the whole call throws instead, so no partial array is
+        # ever produced or consumed by a caller.
+        $resolver = {
+            param($displayName)
+            if ($displayName -eq 'sg-ok') { return '55555555-5555-5555-5555-555555555555' }
+            throw "No Group found in Microsoft Entra with displayName '$displayName'."
+        }
+        { Resolve-DesiredRoleGroupMemberIds -Members @(@{ displayName = 'sg-ok' }, @{ displayName = 'sg-missing' }) -Resolver $resolver } | Should -Throw
+    }
+}
+
+Describe 'Deploy-PurviewRoleGroups.ps1 -- member-resolution failure aborts the run (issue #95 regression)' {
+
+    It 'wraps member resolution in try/catch that aborts via Write-Error + return, never continue' {
+        # Source-text guard: the Phase 1 call site must catch a
+        # Resolve-DesiredRoleGroupMemberIds failure and abort the WHOLE
+        # run before any write -- a future refactor that swaps `return`
+        # for `continue` here would silently reintroduce the
+        # empty-desired-set / revoke-everything hazard under
+        # -PruneMissing.
+        $script:ScriptText | Should -Match (
+            [regex]::Escape('catch {') + '\s*' +
+            [regex]::Escape('Write-Error ("Failed to resolve declared member(s) for role group ''{0}'': {1}" -f $rgName, $_.Exception.Message)') + '\s*' +
+            [regex]::Escape('return')
+        )
+    }
+
+    It 'calls Resolve-DesiredRoleGroupMemberIds with a resolver closing over Get-EntraPrincipalIdByDisplayName.ps1' {
+        $script:ScriptText | Should -Match 'Resolve-DesiredRoleGroupMemberIds\s+-Members\s+@\(\$rg\.members\)\s+-Resolver'
+        $script:ScriptText | Should -Match '&\s+\$resolvePrincipalScript\s+-DisplayName\s+\$displayName\s+-Kind\s+''Group'''
+    }
+
+    It 'resolves the Get-EntraPrincipalIdByDisplayName.ps1 helper path and fails loudly if it is missing' {
+        $script:ScriptText | Should -Match "Join-Path \`$scriptRoot 'Get-EntraPrincipalIdByDisplayName\.ps1'"
+        $script:ScriptText | Should -Match "Helper not found: '\{0\}'"
+    }
+
+    It 'validates the static members shape (GUID or displayName mapping) before any tenant call' {
+        $script:ScriptText | Should -Match 'Test-IsRoleMemberShapeValid -Value \$m'
+    }
+}
+
+Describe 'Deploy-PurviewRoleGroups.ps1 -- -ExportCurrentState emits the displayName shape (issue #95)' {
+
+    It 'captures each member''s displayName from Get-RoleGroupMember output without an extra round-trip' {
+        $script:ScriptText | Should -Match '\$memberDisplayName = \[string\]\$m\.Name'
+    }
+
+    It 'falls back to the legacy raw-OID shape with a warning when a displayName is blank' {
+        $script:ScriptText | Should -Match "Shape = 'oid'"
+        $script:ScriptText | Should -Match "a member's displayName was blank during export"
+    }
+
+    It 'serializes a displayName-shape member as a quoted YAML displayName mapping' {
+        $script:ScriptText | Should -Match ([regex]::Escape('$newBlock.Add(''      - displayName: "'' + $escapedName + ''"'')'))
+    }
+
+    It 'serializes a raw-OID-shape member as the bare dash-prefixed OID line, unchanged from prior behaviour' {
+        $script:ScriptText | Should -Match '\(\s*"      - \{0\}"\s*-f\s*\$member\.Value\s*\)'
     }
 }

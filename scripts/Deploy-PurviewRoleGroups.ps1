@@ -26,6 +26,18 @@
         signing helper that supplies the access token; same auth path as
         the Grant- primitive (ADR 0011 Decision #3 supersession).
 
+    Member resolution (ADR 0023 Category 3, issue #95): each `members:`
+    entry is EITHER a raw Entra group object ID string (legacy-but-
+    supported, used as-is) OR a mapping `{ displayName: <name> }`,
+    resolved to an objectId via `scripts/Get-EntraPrincipalIdByDisplayName.ps1`.
+    Resolution is FAIL-CLOSED: a not-found or ambiguous displayName aborts
+    the whole run before any tenant write -- it never silently drops the
+    member and shrinks the desired set (which is what would let
+    `-PruneMissing` mistake "resolution failed" for "revoke everything").
+    `-ExportCurrentState` always writes the displayName shape for a
+    freshly exported member, never a raw OID, so re-committing an export
+    can never re-introduce the disclosure #92 fixed.
+
     Drift contract (per
     `.github/instructions/powershell.instructions.md` "Drift report
     format"):
@@ -279,6 +291,82 @@ function Test-IsGuid {
     return [System.Guid]::TryParse($Value, [ref]([guid]::Empty))
 }
 
+function Test-IsRoleMemberShapeValid {
+    <#
+    .SYNOPSIS
+        Validate a single `members:` list entry against the ADR 0023
+        Category 3 dual-shape contract (issue #95): either a raw Entra
+        group object ID (GUID) string -- the legacy-but-still-supported
+        shape -- or a mapping `{ displayName: <name> }`. Pure shape
+        check; no Graph calls.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory = $true)][AllowNull()]$Value)
+    if ($Value -is [string]) {
+        return (Test-IsGuid -Value $Value)
+    }
+    if ($Value -is [hashtable] -or $Value -is [System.Collections.IDictionary]) {
+        return ($Value.Contains('displayName') -and -not [string]::IsNullOrWhiteSpace([string]$Value['displayName']))
+    }
+    return $false
+}
+
+function Resolve-DesiredRoleGroupMemberIds {
+    <#
+    .SYNOPSIS
+        Normalize a role group's `members:` list to a flat array of Entra
+        group object IDs, per the ADR 0023 Category 3 dual-shape contract
+        (issue #95).
+
+    .DESCRIPTION
+        A plain string entry is a raw Entra group object ID (legacy-but-
+        supported; used as-is, unchanged behaviour). A mapping entry
+        `{ displayName: <name> }` is resolved to an objectId now, via the
+        caller-supplied -Resolver script block (production callers pass a
+        closure over `scripts/Get-EntraPrincipalIdByDisplayName.ps1`).
+
+        FAIL-CLOSED CONTRACT (issue #95's single most important acceptance
+        criterion): a resolution failure -- not-found, ambiguous, or a
+        transport error -- THROWS. It is never caught-and-`continue`d
+        here, because swallowing it would silently shrink the returned
+        member list, and an emptied desired set is exactly what
+        `-PruneMissing` reads as "revoke every real member of this role
+        group". Callers MUST let this throw propagate to a run-aborting
+        `Write-Error; return` before any write -- never downgrade it to a
+        per-member skip.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Function returns an array of resolved objectIds; plural is the accurate return shape.')]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Members,
+        [Parameter(Mandatory = $true)][scriptblock]$Resolver
+    )
+    $result = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($m in @($Members)) {
+        if ($m -is [string]) {
+            $trimmed = $m.Trim()
+            if ($trimmed) { [void]$result.Add($trimmed) }
+            continue
+        }
+        if ($m -is [hashtable] -or $m -is [System.Collections.IDictionary]) {
+            $displayName = [string]$m['displayName']
+            if ([string]::IsNullOrWhiteSpace($displayName)) {
+                throw "Members entry is missing the required 'displayName' field."
+            }
+            $resolvedId = & $Resolver $displayName
+            if ([string]::IsNullOrWhiteSpace([string]$resolvedId)) {
+                throw ("Resolver returned an empty objectId for displayName '{0}'." -f $displayName)
+            }
+            [void]$result.Add([string]$resolvedId)
+            continue
+        }
+        throw ("Members entry '{0}' is not a valid shape. Expected a raw Entra group object ID (GUID) string or an object with 'displayName'." -f $m)
+    }
+    return , $result.ToArray()
+}
+
 #endregion
 
 #region Module dependencies
@@ -416,8 +504,8 @@ if ($mode -eq 'Apply') {
         $members = @()
         if ($rg.ContainsKey('members') -and $rg.members) { $members = @($rg.members) }
         foreach ($m in $members) {
-            if (-not (Test-IsGuid -Value ([string]$m))) {
-                Write-Error ("Role group '{0}' member '{1}' is not a valid Entra group object ID. Per role-groups.yaml header, only Entra security-group OIDs are accepted." -f $rg.name, $m)
+            if (-not (Test-IsRoleMemberShapeValid -Value $m)) {
+                Write-Error ("Role group '{0}' has a members entry that is neither a valid Entra group object ID (GUID) string (legacy-but-supported) nor an object shaped '{{ displayName: <name> }}' (ADR 0023 Category 3). Value: '{1}'" -f $rg.name, $m)
                 return
             }
         }
@@ -569,17 +657,34 @@ try {
                 $exportEntries.Add($entry)
                 continue
             }
-            $groupOids = @($members |
-                Where-Object { $_.RecipientTypeDetails -eq 'Group' -and $_.ExternalDirectoryObjectId } |
-                Select-Object -ExpandProperty ExternalDirectoryObjectId -Unique |
-                Sort-Object)
+            # ADR 0023 Category 3 (issue #95): a fresh export writes the
+            # displayName shape, never a raw OID, so re-committing an
+            # export can never re-introduce the #92 disclosure.
+            # Get-RoleGroupMember already returns the recipient's display
+            # name on `.Name` -- no extra Graph round-trip needed. A
+            # member with a blank `.Name` falls back to the legacy
+            # raw-OID shape with a warning rather than being dropped.
+            $seenOids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $memberEntries = New-Object 'System.Collections.Generic.List[hashtable]'
+            foreach ($m in ($members | Where-Object { $_.RecipientTypeDetails -eq 'Group' -and $_.ExternalDirectoryObjectId } | Sort-Object Name)) {
+                $oid = [string]$m.ExternalDirectoryObjectId
+                if (-not $seenOids.Add($oid)) { continue }
+                $memberDisplayName = [string]$m.Name
+                if ([string]::IsNullOrWhiteSpace($memberDisplayName)) {
+                    Write-Warning ("Role group '{0}': a member's displayName was blank during export; exporting the raw object ID instead (legacy-but-supported shape). Reference: docs/adr/0023-identifier-resolution.md." -f $rg.Name)
+                    $memberEntries.Add(@{ Shape = 'oid'; Value = $oid })
+                }
+                else {
+                    $memberEntries.Add(@{ Shape = 'displayName'; Value = $memberDisplayName })
+                }
+            }
             $userCount = @($members | Where-Object { $_.RecipientTypeDetails -ne 'Group' }).Count
             $entry = @{
                 name        = [string]$rg.Name
                 description = "Exported from $TenantDomain on $exportStamp."
-                members     = @($groupOids)
+                members     = @($memberEntries)
                 userCount   = [int]$userCount
-                groupCount  = [int]$groupOids.Count
+                groupCount  = [int]$memberEntries.Count
                 note        = $null
             }
             $exportEntries.Add($entry)
@@ -626,8 +731,14 @@ try {
                 }
                 else {
                     $newBlock.Add('    members:')
-                    foreach ($oid in $entry.members) {
-                        $newBlock.Add(("      - {0}" -f $oid))
+                    foreach ($member in $entry.members) {
+                        if ($member.Shape -eq 'displayName') {
+                            $escapedName = ([string]$member.Value).Replace('\', '\\').Replace('"', '\"')
+                            $newBlock.Add('      - displayName: "' + $escapedName + '"')
+                        }
+                        else {
+                            $newBlock.Add(("      - {0}" -f $member.Value))
+                        }
                     }
                 }
             }
@@ -672,13 +783,39 @@ try {
         return @()
     }
 
+    # Resolve the ADR 0023 Category 3 helper (issue #95) used to turn a
+    # displayName-shape `members:` entry into an objectId. Checked once,
+    # up front, so a missing helper fails loudly before any Phase 1 read.
+    $resolvePrincipalScript = Join-Path $scriptRoot 'Get-EntraPrincipalIdByDisplayName.ps1'
+    if (-not (Test-Path -LiteralPath $resolvePrincipalScript)) {
+        Write-Error ("Helper not found: '{0}'." -f $resolvePrincipalScript)
+        return
+    }
+
     # ---- Phase 1: Read + categorize ----
     $plan = New-Object 'System.Collections.Generic.List[object]'
     foreach ($rg in $desiredRoleGroups) {
         $rgName = [string]$rg.name
+        # Normalize `members:` to a flat objectId array (ADR 0023 Category
+        # 3, issue #95): a raw OID string is used as-is; a
+        # `{ displayName: }` entry is resolved now via
+        # Get-EntraPrincipalIdByDisplayName.ps1, which itself fails closed
+        # on not-found/ambiguous. A resolution failure here aborts the
+        # WHOLE run (return, before any write) -- it never degrades into
+        # an empty $desiredMembers that -PruneMissing would read as
+        # "revoke every real member of this role group".
         $desiredMembers = @()
         if ($rg.ContainsKey('members') -and $rg.members) {
-            $desiredMembers = @($rg.members | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+            try {
+                $desiredMembers = @(Resolve-DesiredRoleGroupMemberIds -Members @($rg.members) -Resolver {
+                        param($displayName)
+                        & $resolvePrincipalScript -DisplayName $displayName -Kind 'Group'
+                    })
+            }
+            catch {
+                Write-Error ("Failed to resolve declared member(s) for role group '{0}': {1}" -f $rgName, $_.Exception.Message)
+                return
+            }
         }
 
         # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/get-rolegroupmember
