@@ -116,10 +116,17 @@ jobs:
       - name: Test-IdentifierResidue
         shell: pwsh
         run: |
-          $rows = ./scripts/Test-IdentifierResidue.ps1
+          # -FailOnReview (#98, 2026-07-18): the reviewRequired quarantine is now
+          # empty (both prior entries' provenance was established and promoted to
+          # microsoftConstants), so the scan fails closed with no standing
+          # exceptions -- a future Review row (an identifier of unresolved
+          # provenance) blocks the build immediately instead of passing silently
+          # in report-mode.
+          $rows = ./scripts/Test-IdentifierResidue.ps1 -FailOnReview
           if ($rows) { $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host }
-          # The script exits 1 on any Finding and emits ::error:: annotations
-          # naming the file, the line, and the remediation. Surface its exit code.
+          # The script exits 1 on any Finding (or, with -FailOnReview, any Review
+          # row) and emits ::error:: annotations naming the file, the line, and
+          # the remediation. Surface its exit code.
           exit $LASTEXITCODE
 
   pester:
