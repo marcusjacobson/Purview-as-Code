@@ -32,6 +32,33 @@
     Delete AUs that exist in the tenant but are not declared in the YAML.
     Default: $false. Must be explicit per the drift-report contract.
 
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against
+        `administrativeUnits: []` would classify the entire live set as
+        orphaned.
+      * The prune must not exceed `-MaxPruneRatio` of the live
+        administrative units without `-AllowMajorityPrune`.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live administrative units is refused before any write. Supply it
+    when a large prune is genuinely intended (a deliberate
+    consolidation); the ratio is then reported as a warning and the run
+    proceeds. Has no effect on the empty-desired-set guard, which cannot
+    be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live administrative units `-PruneMissing` may
+    delete without `-AllowMajorityPrune`, as a fraction in (0, 1].
+    Default 0.5. A prune exactly at the threshold passes; only a
+    strictly larger share is refused. Set to 1 to disable the ratio
+    guard for a single run.
+
 .PARAMETER Force
     Suppress the safety guard on the operation you asked for (ADR 0052 section 6).
     Default: $false. Must be explicit per the drift-report contract.
@@ -81,6 +108,11 @@ param(
 
     [switch]$PruneMissing,
 
+    [switch]$AllowMajorityPrune,
+
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
+
     [switch]$Force
 )
 
@@ -102,6 +134,13 @@ Import-Module 'powershell-yaml' -ErrorAction Stop
 # entered unattended from a local terminal.
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 # ---------------------------------------------------------------------------
@@ -127,16 +166,13 @@ function Get-SignedInPrincipalId {
     return $raw.Trim()
 }
 
-$graphBase = 'https://graph.microsoft.com/v1.0'
-$token     = Get-GraphToken
-$headers   = @{
-    Authorization   = "Bearer $token"
-    'Content-Type'  = 'application/json'
-}
-$currentPrincipal = Get-SignedInPrincipalId
-
 # ---------------------------------------------------------------------------
 # Load desired state.
+#
+# Deliberately ordered BEFORE the Graph token acquisition below (issue #13):
+# the empty-desired-set guard needs the parsed count, and the guard must refuse
+# a destructive run before the tenant is contacted at all. Nothing in this
+# block depends on $token / $headers, so the move is behaviour-preserving.
 # ---------------------------------------------------------------------------
 if (-not (Test-Path -LiteralPath $Path)) {
     throw "Desired-state YAML not found at $Path."
@@ -146,6 +182,32 @@ $desired = @()
 if ($desiredRoot -and $desiredRoot.administrativeUnits) {
     $desired = @($desiredRoot.administrativeUnits)
 }
+
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# With zero desired entries every live administrative unit falls out of the
+# orphan match below, so the run would classify the entire set as orphans and
+# delete it. The rationale, the likely causes, and the 2026-07-19 production
+# hit are documented in scripts/modules/PruneGuard.psm1.
+#
+# This script has no Export mode, so the prune switch alone selects the
+# destructive branch. Placed above the Graph token acquisition so it fires
+# before the tenant is contacted at all.
+if ($PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desired.Count `
+        -ObjectTypeNoun 'administrative unit' `
+        -SourcePath     $Path `
+        -CollectionKey  'administrativeUnits'
+}
+
+$graphBase = 'https://graph.microsoft.com/v1.0'
+$token     = Get-GraphToken
+$headers   = @{
+    Authorization   = "Bearer $token"
+    'Content-Type'  = 'application/json'
+}
+$currentPrincipal = Get-SignedInPrincipalId
 
 # ---------------------------------------------------------------------------
 # Fetch current state.
@@ -213,6 +275,29 @@ foreach ($c in $current) {
 # Emit the drift report. Write-Information so callers can capture to files / step summaries.
 $report | Sort-Object Category, Name | Format-Table -AutoSize | Out-String | Write-Information -InformationAction Continue
 
+# ---- Issue #13, guard 2: prune sanity ratio ----
+# Guard 1 (desired-state load region) catches only the total wipe. This
+# catches the near-total one: an administrative-units.yaml that lost most of
+# its entries to a bad merge, or a -Path pointing at a smaller environment's
+# file, both of which leave a non-zero desired count and so clear guard 1.
+#
+# Keyed on the ORPHAN rows this run would actually delete against the live
+# tenant AU count. Fires before the ADR 0052 gate and before the write loop:
+# the last point at which nothing has been written. This script is Class B
+# with no -DirectionPolicy, so there is no audit mode to gate on; -WhatIf
+# still previews the plan because the guard only refuses when a prune is
+# actually requested and oversized.
+# Reference: scripts/modules/PruneGuard.psm1
+$orphans = @($report | Where-Object { $_.Category -eq 'Orphan' })
+if ($PruneMissing.IsPresent) {
+    Assert-PruneRatioWithinThreshold `
+        -PruneCount     $orphans.Count `
+        -LiveCount      @($current).Count `
+        -ObjectTypeNoun 'administrative unit' `
+        -MaxPruneRatio  $MaxPruneRatio `
+        -Allow:$AllowMajorityPrune
+}
+
 # ---- ADR 0052: destructive-operation confirmation gate ----
 # The last point before the write loop at which nothing has been written.
 # This script is Class B: it declares no -DirectionPolicy, so it has no
@@ -247,7 +332,6 @@ $gateArgs = @{
     ConfirmValue = $confirmValue
 }
 
-$orphans = @($report | Where-Object { $_.Category -eq 'Orphan' })
 if ($PruneMissing.IsPresent -and $orphans.Count -gt 0) {
     $orphanNames = @($orphans | ForEach-Object { [string]$_.Name })
     $pruneQuery = "-PruneMissing will DELETE {0} orphan administrative unit(s) from the tenant: {1}. This cannot be undone. Continue?" -f `
@@ -260,6 +344,16 @@ if ($PruneMissing.IsPresent -and $orphans.Count -gt 0) {
 # ---------------------------------------------------------------------------
 # Act on the report.
 # ---------------------------------------------------------------------------
+$pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+# Issue #13: in-loop prune failures are reported via Write-PruneFailure
+# (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+# '::error::' workflow command rather than Write-Error. This script runs with
+# $ErrorActionPreference = 'Stop', so an unhandled delete failure would
+# terminate the loop on the first orphan and the rest would never be
+# attempted. The aggregate `throw` below remains the terminal outcome, so a
+# failed prune still exits non-zero.
+
 foreach ($row in $report) {
     switch ($row.Category) {
         'Create' {
@@ -295,9 +389,15 @@ foreach ($row in $report) {
             }
             $match = $current | Where-Object { $_.displayName -eq $row.Name } | Select-Object -First 1
             if ($PSCmdlet.ShouldProcess("Administrative unit '$($row.Name)'", 'Delete')) {
-                # Reference: https://learn.microsoft.com/en-us/graph/api/administrativeunit-delete
-                Invoke-RestMethod -Method Delete -Uri "$graphBase/directory/administrativeUnits/$($match.id)" -Headers $headers | Out-Null
-                Write-Information "Deleted orphan AU '$($row.Name)'." -InformationAction Continue
+                try {
+                    # Reference: https://learn.microsoft.com/en-us/graph/api/administrativeunit-delete
+                    Invoke-RestMethod -Method Delete -Uri "$graphBase/directory/administrativeUnits/$($match.id)" -Headers $headers | Out-Null
+                    Write-Information "Deleted orphan AU '$($row.Name)'." -InformationAction Continue
+                } catch {
+                    Write-PruneFailure ("Delete of orphan AU '{0}' failed: {1}" -f $row.Name, $_.Exception.Message)
+                    $pruneFailures.Add([string]$row.Name)
+                    continue
+                }
             }
         }
         'Conflict' {
@@ -309,6 +409,10 @@ foreach ($row in $report) {
             # NoChange - nothing to do.
         }
     }
+}
+
+if ($pruneFailures.Count -gt 0) {
+    throw ("Reconciliation aborted: {0} orphan administrative unit(s) could not be deleted: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
 }
 
 # Suppress PSReviewUnusedParameter warnings for principal variable reserved for future Conflict detection.

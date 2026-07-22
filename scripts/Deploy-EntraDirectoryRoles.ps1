@@ -136,6 +136,36 @@
     YAML. Without this switch, orphan assignments are reported as `NoOp`
     rows and skipped. Destructive; defaults to `$false`.
 
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against an empty
+        `directoryRoles:` list would classify every live in-scope
+        assignment as orphaned and revoke it.
+      * The prune must not exceed `-MaxPruneRatio` of the live in-scope
+        assignments without `-AllowMajorityPrune`. The denominator is the
+        count of live assignments on the roles/scopes the YAML declares
+        (the only population this reconciler can revoke from), accumulated
+        during Phase 1.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would revoke more than `-MaxPruneRatio` of
+    the live in-scope directory-role assignments is refused before any
+    write. Supply it when a large prune is genuinely intended (a
+    deliberate consolidation); the ratio is then reported as a warning
+    and the run proceeds. Has no effect on the empty-desired-set guard,
+    which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live in-scope directory-role assignments
+    `-PruneMissing` may revoke without `-AllowMajorityPrune`, as a
+    fraction in (0, 1]. Default 0.5. A prune exactly at the threshold
+    passes; only a strictly larger share is refused. Set to 1 to disable
+    the ratio guard for a single run.
+
 .PARAMETER Force
     Two independent meanings, one per parameter set (ADR 0052 section 6 /
     ADR 0053 section 2): with `-ExportCurrentState`, permit overwriting a
@@ -240,6 +270,13 @@ param(
 
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -625,6 +662,13 @@ Import-Module 'powershell-yaml' -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -711,6 +755,24 @@ $desiredRoot = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Yaml
 $desiredEntries = @()
 if ($desiredRoot -and $desiredRoot.ContainsKey('directoryRoles') -and $desiredRoot.directoryRoles) {
     $desiredEntries = @($desiredRoot.directoryRoles)
+}
+
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# With zero desired entries every live tenant directory-role assignment falls
+# out of the orphan match below, so the run would classify the entire set as
+# orphans and remove it. The rationale, the likely causes, and the 2026-07-19
+# production hit are documented in scripts/modules/PruneGuard.psm1.
+#
+# Placed in the desired-state load region so it fires before the tenant is
+# contacted at all -- before `az account show`, before any Graph token
+# acquisition, and before any write phase.
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desiredEntries.Count `
+        -ObjectTypeNoun 'directory role assignment' `
+        -SourcePath     $Path `
+        -CollectionKey  'directoryRoles'
 }
 
 if ($mode -eq 'Apply') {
@@ -1035,6 +1097,18 @@ try {
 
     # ---- Phase 1: Read + categorize (no remote writes) ----
     $plan = New-Object 'System.Collections.Generic.List[object]'
+
+    # Issue #13, guard 2: live-assignment denominator accumulator. The
+    # sanity-ratio guard needs the count of live assignments this run could
+    # possibly revoke, and unlike the single-collection reconcilers this
+    # script never materializes that count in one place -- it reads
+    # assignments per (role, scope) row inside the loop below. Accumulate it
+    # here, adding each row's live-assignment count as $tenantMap is built, so
+    # the denominator is the union of live assignments on exactly the
+    # roles/scopes the YAML declares (the only population a -PruneMissing run
+    # can revoke from; assignments on undeclared roles are out of scope by
+    # design and never appear in the orphan/$revoke set).
+    $liveAssignmentCount = 0
     foreach ($row in $desiredEntries) {
         $rowName  = [string]$row.name
         $rowScope = if ($row.ContainsKey('scope') -and -not [string]::IsNullOrWhiteSpace([string]$row.scope)) {
@@ -1053,10 +1127,10 @@ try {
         $desiredMembers = @()
         if ($row.ContainsKey('members') -and $row.members) {
             try {
-                $desiredMembers = @(Resolve-DesiredRoleMemberIds -Members @($row.members) -Resolver {
-                        param($displayName)
-                        & $resolvePrincipalScript -DisplayName $displayName -Kind 'Group'
-                    })
+                $desiredMembers = Resolve-DesiredRoleMemberIds -Members @($row.members) -Resolver {
+                    param($displayName)
+                    & $resolvePrincipalScript -DisplayName $displayName -Kind 'Group'
+                }
             }
             catch {
                 Write-Error ("Failed to resolve declared member(s) for role '{0}': {1}" -f $rowName, $_.Exception.Message)
@@ -1127,6 +1201,12 @@ try {
                 $tenantMap[$principalOid] = [string]$a.id
             }
         }
+
+        # Issue #13, guard 2: accumulate this row's live-assignment count into
+        # the denominator. Counted here rather than as `$currentAssigns.Count`
+        # so it matches $tenantMap -- the deduplicated principal set the
+        # $toRevoke computation below actually draws orphans from.
+        $liveAssignmentCount += $tenantMap.Count
 
         $desiredSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($oid in $validatedMembers) { [void]$desiredSet.Add($oid) }
@@ -1246,6 +1326,30 @@ try {
     $revokes = @(foreach ($p in $plan) {
             foreach ($oid in $p.ToRevoke) { ("{0} @ {1}" -f $p.RowName, $p.RowScope) }
         })
+
+    # ---- Issue #13, guard 2: prune sanity ratio ----
+    # Guard 1 (desired-state load region) catches only the total wipe. This
+    # catches the near-total one: a role-assignments.yaml that lost most of its
+    # members to a bad merge, or a -Path pointing at a smaller environment's
+    # file, both of which leave a non-zero desired count and so clear guard 1.
+    #
+    # Keyed on $revokes -- the flattened set the Phase 3 revoke loop iterates --
+    # over $liveAssignmentCount, the Phase 1 accumulator (live assignments on
+    # the declared roles/scopes). Fires before the ADR 0052 gate and before
+    # Phase 3: the last point at which nothing has been written. This script is
+    # Class B with no -DirectionPolicy, so there is no audit mode to gate on;
+    # the Apply-mode -WhatIf short-circuit returns before Phase 1, so the guard
+    # is unreached under -WhatIf (same as the ADR 0052 gate below).
+    # Reference: scripts/modules/PruneGuard.psm1
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     $revokes.Count `
+            -LiveCount      $liveAssignmentCount `
+            -ObjectTypeNoun 'directory role assignment' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
+    }
+
     if ($PruneMissing.IsPresent -and $revokes.Count -gt 0) {
         $revokeSummary = @($revokes | Group-Object | Sort-Object Name |
                 ForEach-Object { '{0} ({1} assignment(s))' -f $_.Name, $_.Count })
@@ -1257,6 +1361,19 @@ try {
     }
 
     # ---- Phase 3: Write, over the SAME plan Phase 1 built ----
+    $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+    # Issue #13: in-loop revoke failures are reported via Write-PruneFailure
+    # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+    # '::error::' workflow command rather than Write-Error. The revoke catch
+    # previously did Write-Error + return, which under shell: pwsh's
+    # $ErrorActionPreference='stop' terminated the run on the first failed
+    # revoke so the rest were never attempted. The aggregate `throw` after the
+    # Phase 3 loop -- inside the enclosing try, so the finally still scrubs the
+    # access token -- is the terminal outcome, so a failed prune still exits
+    # non-zero. Principal object IDs are never named (the '<oid>' redaction the
+    # drift report and prompt already use): the reporter names role @ scope
+    # plus the tenant's own error text only.
     foreach ($entry in $plan) {
         $rowName   = $entry.RowName
         $rowScope  = $entry.RowScope
@@ -1331,11 +1448,18 @@ try {
                         Write-Information ("Role '{0}' did not have the assignment at '{1}'; treating as no-op." -f $rowName, $rowScope) -InformationAction Continue
                         continue
                     }
-                    Write-Error ("DELETE roleAssignments failed for role '{0}' at scope '{1}': {2}" -f $rowName, $rowScope, $_.Exception.Message)
-                    return
+                    $reportRow.Category = 'Failed'
+                    $reportRow.Reason   = ('Revoke failed: {0}' -f $_.Exception.Message)
+                    Write-PruneFailure ("DELETE roleAssignments for role '{0}' at scope '{1}' failed: {2}" -f $rowName, $rowScope, $_.Exception.Message)
+                    $pruneFailures.Add(("{0} @ {1}" -f $rowName, $rowScope))
+                    continue
                 }
             }
         }
+    }
+
+    if ($pruneFailures.Count -gt 0) {
+        throw ("Reconciliation aborted: {0} directory-role assignment revoke(s) failed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
     }
 
     #endregion

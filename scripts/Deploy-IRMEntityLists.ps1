@@ -80,6 +80,19 @@
     baseline carries `IRM-Lab-Priority-Users` per
     `docs/adr/0039-irm-entity-list-tracked-fields.md`).
 
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live IRM entity lists is refused before any tenant write. Supply it
+    when a large prune is genuinely intended (a deliberate consolidation);
+    the ratio is then reported as a warning and the run proceeds. Has no
+    effect on the empty-desired-set guard, which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live IRM entity lists `-PruneMissing` may delete
+    without `-AllowMajorityPrune`, as a fraction in (0, 1]. Default 0.5.
+    Reference: scripts/modules/PruneGuard.psm1 (issue #13, guard 2).
+
 .PARAMETER DirectionPolicy
     Source-of-truth direction for shared-property drift between the
     desired YAML and the live tenant. One of:
@@ -202,6 +215,12 @@ param(
     [string]$Path = (Join-Path $PSScriptRoot '..\data-plane\irm\entity-lists.yaml'),
 
     [switch]$PruneMissing,
+
+    # Issue #13, guard 2: the prune sanity-ratio override and threshold.
+    [switch]$AllowMajorityPrune,
+
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [ValidateSet('audit', 'portal-wins', 'repo-wins')]
     [string]$DirectionPolicy = 'portal-wins',
@@ -355,6 +374,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 # Connect-IPPSSession -AccessToken requires ExchangeOnlineManagement
 # v3.8.0-Preview1+ (install with -AllowPrerelease until GA).
 # Reference: https://learn.microsoft.com/en-us/powershell/exchange/exchange-online-powershell-v2
@@ -472,6 +498,25 @@ if ($desiredRoot -and $desiredRoot.ContainsKey('entityLists') -and $desiredRoot.
     $desiredEntries = @($desiredRoot.entityLists | ForEach-Object { ConvertTo-DesiredEntityListHash -Entry ([hashtable]$_) })
 }
 Write-Information ("Desired lists   : {0}" -f $desiredEntries.Count) -InformationAction Continue
+
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# With zero desired entries every live tenant IRM entity list falls out of the
+# orphan match below, so the run would classify the entire set as orphans and
+# delete it. The rationale, the likely causes, and the 2026-07-19 production
+# hit are documented in scripts/modules/PruneGuard.psm1.
+#
+# This script has no Export mode, so the prune switch alone selects the
+# destructive branch. Placed in the desired-state load region so it fires
+# before the tenant is contacted at all -- before `az account show`, before
+# Connect-IPPSSession, and before any write phase.
+if ($PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desiredEntries.Count `
+        -ObjectTypeNoun 'IRM entity list' `
+        -SourcePath     $Path `
+        -CollectionKey  'entityLists'
+}
 
 #endregion
 
@@ -645,6 +690,29 @@ try {
         }
     }
 
+    # ---- Issue #13, guard 2: prune sanity ratio ----
+    # Guard 1 (desired-state load region) catches only the total wipe. This
+    # catches the near-total one: an entity-lists.yaml that lost most of its
+    # entries to a bad merge, or a -Path pointing at a smaller environment's
+    # file, both of which leave a non-zero desired count and so clear guard 1.
+    #
+    # Keyed on the Orphan set this run would delete against the live entity-
+    # list count. Gated on $DirectionPolicy -ne 'audit': this script implements
+    # audit mode by flipping $WhatIfPreference (it does NOT empty the orphan
+    # rows), so a read-only `-DirectionPolicy audit -PruneMissing` run must not
+    # be refused by the ratio guard. Sits inside the enclosing try/finally and
+    # before the ADR 0052 gate, so a refusal still runs the finally that
+    # disconnects the S&C session.
+    # Reference: scripts/modules/PruneGuard.psm1
+    if ($PruneMissing.IsPresent -and $DirectionPolicy -ne 'audit') {
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     @($plan | Where-Object { $_.Action -eq 'Orphan' }).Count `
+            -LiveCount      @($tenantLists).Count `
+            -ObjectTypeNoun 'IRM entity list' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
+    }
+
     # ---- ADR 0052: destructive-operation confirmation gate ----
     # The last point before the write loop at which nothing has been written.
     # Both destructive branches are gated here, once per run, via
@@ -700,6 +768,13 @@ try {
 
     # Execute each plan row under ShouldProcess.
     # Reference: https://learn.microsoft.com/en-us/powershell/scripting/learn/deep-dives/everything-about-shouldprocess
+    # Issue #13: orphan prune failures are reported via Write-PruneFailure
+    # (Write-Warning plus an '::error::' annotation, not Write-Error, which
+    # shell: pwsh's $ErrorActionPreference='stop' would promote to terminating
+    # and abandon the remaining orphans) and collected here; a single aggregate
+    # throw after the loop names every failure so a failed prune exits non-zero.
+    $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
     foreach ($row in $plan) {
         $target = "IRM entity list '{0}'" -f $row.Name
         switch ($row.Action) {
@@ -754,6 +829,8 @@ try {
                             $report.Add([pscustomobject]@{ Category = 'Removed'; Name = $row.Name; Reason = $row.Reason })
                         } catch {
                             $report.Add([pscustomobject]@{ Category = 'Failed'; Name = $row.Name; Reason = ('Remove failed: {0}' -f $_.Exception.Message) })
+                            Write-PruneFailure ("Remove IRM entity list '{0}' failed: {1}" -f $row.Name, $_.Exception.Message)
+                            $pruneFailures.Add([string]$row.Name)
                         }
                     } else {
                         $report.Add([pscustomobject]@{ Category = 'Orphan'; Name = $row.Name; Reason = ('Would remove. {0}' -f $row.Reason) })
@@ -763,6 +840,13 @@ try {
                 }
             }
         }
+    }
+
+    # Issue #13: a failed prune now exits non-zero (behaviour change). The
+    # throw sits inside the try so the finally still disconnects the S&C
+    # session; it fires after every orphan has been attempted, naming them all.
+    if ($pruneFailures.Count -gt 0) {
+        throw ("Reconciliation aborted: {0} orphan IRM entity list(s) could not be removed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
     }
 }
 finally {

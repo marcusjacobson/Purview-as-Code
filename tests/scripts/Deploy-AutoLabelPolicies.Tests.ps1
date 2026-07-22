@@ -513,8 +513,148 @@ Describe 'Resolve-DesiredRuleWorkload — preserve human-authored workload on ex
             $script:ScriptText | Should -Match "\`$entry\['workload'\]\s*=\s*\`$desiredWorkloadByRuleName\[\`$rh\.name\]"
         }
 
-        It 'falls back to the tenant workload for rules new to the tenant' {
-            $script:ScriptText | Should -Match "else\s*\{\s*\r?\n\s*\`$entry\['workload'\]\s*=\s*\`$rh\.workload"
+        It 'emits the single default workload (not the tenant-expanded readback) for greenfield rules new to the tenant (issue #24)' {
+            # The greenfield else-branch must NOT write $rh.workload: that
+            # is the tenant-EXPANDED multi-workload set, which
+            # New-AutoSensitivityLabelRule -Workload rejects with
+            # MultipleWorkloadsNotAllowedException. It must write the single
+            # deployable default instead, and warn.
+            $script:ScriptText | Should -Match "else\s*\{[\s\S]*?\`$entry\['workload'\]\s*=\s*\`$script:DefaultExportRuleWorkload"
+            $script:ScriptText | Should -Not -Match "else\s*\{\s*\r?\n\s*\`$entry\['workload'\]\s*=\s*\`$rh\.workload"
+        }
+
+        It 'declares the single-workload export default as Exchange (issue #24)' {
+            $script:ScriptText | Should -Match "\`$script:DefaultExportRuleWorkload\s*=\s*'Exchange'"
+        }
+
+        It 'warns per rule when the greenfield workload is defaulted (issue #24)' {
+            $script:ScriptText | Should -Match 'defaulted the exported workload to the single value'
+        }
+    }
+}
+
+Describe 'Greenfield workload export cardinality (issue #24)' {
+
+    # WHY THIS REGION IS EXTRACTED AND EXECUTED
+    # -----------------------------------------
+    # The defect is behavioural: a source-text assertion cannot prove that a
+    # GREENFIELD export (no prior YAML workload) actually emits a single,
+    # deployable workload rather than the tenant-expanded multi-value set that
+    # New-AutoSensitivityLabelRule -Workload rejects. The script body cannot be
+    # dot-sourced (it loads ExchangeOnlineManagement at import time and would
+    # connect to a real tenant), so the specific if/else that decides the
+    # emitted workload is lifted from the REAL source by AST and executed
+    # against stubs. Lifting the real node (not a transcription) is the point:
+    # if the else-branch is reverted to $rh.workload, the greenfield case below
+    # emits the expanded pipe-set and the mutation-check assertion fails.
+
+    BeforeAll {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:ScriptPath, [ref]$tokens, [ref]$errors)
+
+        # Dot-source the REAL default-workload assignment so the extracted
+        # else-branch reads the script's actual convention, not a duplicate
+        # transcribed here.
+        $assignAst = $ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq '$script:DefaultExportRuleWorkload'
+            }, $true)
+        if (-not $assignAst) { throw '$script:DefaultExportRuleWorkload assignment not found in Deploy-AutoLabelPolicies.ps1' }
+        . ([ScriptBlock]::Create($assignAst.Extent.Text))
+
+        # Locate the if/else that chooses the emitted workload by its
+        # condition text and lift its full extent.
+        $ifAsts = $ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.IfStatementAst]
+            }, $true)
+        $workloadIf = $ifAsts | Where-Object {
+            $_.Clauses[0].Item1.Extent.Text -match '\$desiredWorkloadByRuleName\.ContainsKey\(\$rh\.name\)'
+        } | Select-Object -First 1
+        if (-not $workloadIf) { throw 'workload-emit if/else ($desiredWorkloadByRuleName.ContainsKey($rh.name)) not found in export block' }
+
+        # $entry is a mutable OrderedDictionary passed by reference, so the
+        # lifted branch mutates the instance the test holds. Warnings are
+        # captured off the warning stream (3>&1).
+        $script:WorkloadEmitBlock = [ScriptBlock]::Create(
+            'param($desiredWorkloadByRuleName, $rh, $entry) ' + $workloadIf.Extent.Text)
+    }
+
+    Context 'Greenfield rule (no prior YAML workload)' {
+
+        It 'emits the single default workload Exchange, not the tenant-expanded pipe-set' {
+            $map   = @{}   # no prior YAML workload for this rule
+            $entry = [ordered]@{}
+            $rh    = @{
+                name     = 'greenfield-rule'
+                policy   = 'Lab-AutoLabel-CreditCards'
+                # The tenant readback: the full EXPANDED workload set.
+                workload = 'Applications|AWS|Azure|Exchange|OneDriveForBusiness|PowerBI|SharePoint'
+            }
+            $null = & $script:WorkloadEmitBlock -desiredWorkloadByRuleName $map -rh $rh -entry $entry 3>&1
+
+            $entry['workload'] | Should -Be 'Exchange'
+            # Mutation-check: the pre-fix behaviour emitted the expanded set.
+            $entry['workload'] | Should -Not -Match '\|'
+        }
+
+        It 'emits a single deployable workload from the schema enum (no pipe, matches the apply cmdlet contract)' {
+            $map   = @{}
+            $entry = [ordered]@{}
+            $rh    = @{ name = 'g'; policy = 'p'; workload = 'Exchange|SharePoint' }
+            $null = & $script:WorkloadEmitBlock -desiredWorkloadByRuleName $map -rh $rh -entry $entry 3>&1
+            ($entry['workload'] -split '\|').Count | Should -Be 1
+        }
+
+        It 'emits a Write-Warning noting the workload was defaulted' {
+            $map   = @{}
+            $entry = [ordered]@{}
+            $rh    = @{ name = 'greenfield-rule'; policy = 'p'; workload = 'Exchange|SharePoint' }
+            $warnings = & $script:WorkloadEmitBlock -desiredWorkloadByRuleName $map -rh $rh -entry $entry 3>&1
+
+            $warningRecords = @($warnings | Where-Object { $_ -is [System.Management.Automation.WarningRecord] })
+            $warningRecords.Count | Should -Be 1
+            [string]$warningRecords[0] | Should -Match 'greenfield-rule'
+            [string]$warningRecords[0] | Should -Match 'Exchange'
+        }
+    }
+
+    Context 'Rule with a prior YAML workload (issue #499 preservation, unchanged)' {
+
+        It 'preserves the human-authored YAML workload verbatim' {
+            $map   = @{ 'kept-rule' = 'SharePoint' }
+            $entry = [ordered]@{}
+            $rh    = @{
+                name     = 'kept-rule'
+                policy   = 'p'
+                workload = 'Applications|AWS|Azure|Exchange|OneDriveForBusiness|PowerBI|SharePoint'
+            }
+            $null = & $script:WorkloadEmitBlock -desiredWorkloadByRuleName $map -rh $rh -entry $entry 3>&1
+
+            $entry['workload'] | Should -Be 'SharePoint'
+        }
+
+        It 'does not warn when a prior YAML workload is preserved' {
+            $map   = @{ 'kept-rule' = 'Exchange' }
+            $entry = [ordered]@{}
+            $rh    = @{ name = 'kept-rule'; policy = 'p'; workload = 'Exchange|SharePoint' }
+            $warnings = & $script:WorkloadEmitBlock -desiredWorkloadByRuleName $map -rh $rh -entry $entry 3>&1
+
+            @($warnings | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }).Count | Should -Be 0
+        }
+
+        It 'preserves a multi-workload YAML value byte-for-byte (does not force it to the single default)' {
+            # The preservation path must not clobber an operator who
+            # deliberately authored a comma-set; only the greenfield emit is
+            # forced to a single default.
+            $map   = @{ 'kept-rule' = 'Exchange, OneDriveForBusiness' }
+            $entry = [ordered]@{}
+            $rh    = @{ name = 'kept-rule'; policy = 'p'; workload = 'Exchange|OneDriveForBusiness|SharePoint' }
+            $null = & $script:WorkloadEmitBlock -desiredWorkloadByRuleName $map -rh $rh -entry $entry 3>&1
+            $entry['workload'] | Should -Be 'Exchange, OneDriveForBusiness'
         }
     }
 }
@@ -647,5 +787,353 @@ Describe 'Round-trip source-text guards (ADR 0016 §12)' {
             $script:ScriptText | Should -Match 'if \(@\(\$d\.exchangeLocation\)\.Count -eq 0\) \{'
             $script:ScriptText | Should -Match 'skipping the -ExchangeLocation write to avoid clearing the tenant scope'
         }
+    }
+}
+Describe 'Prune failure reporting (issue #13, part C)' {
+
+    # WHY THE PRUNE REGION IS EXTRACTED AND EXECUTED
+    # ----------------------------------------------
+    # The properties under test are behavioural -- "the loop CONTINUES past a
+    # failure" and "the aggregate throw fires" -- and source-text assertions
+    # cannot distinguish a `continue` that is reached from one that is dead
+    # code after an early `return`. The script body cannot be dot-sourced (it
+    # loads ExchangeOnlineManagement at import time and would connect to a
+    # real tenant), so the `if ($PruneMissing.IsPresent)` region is lifted out
+    # of the source by brace matching and executed against stubbed cmdlets.
+    #
+    # Lifting the REAL source rather than a transcription of it is the point:
+    # a transcription would keep passing after the script regressed. If the
+    # region is restructured such that the anchor no longer matches, the
+    # BeforeAll throws rather than silently testing nothing.
+    #
+    # Reference: issue #13
+    # Reference: scripts/modules/PruneGuard.psm1
+
+    BeforeAll {
+        $script:PruneLines = @(Get-Content -LiteralPath $script:ScriptPath)
+
+        # Anchor: the multi-line prune region opener. The other two
+        # `$PruneMissing.IsPresent` sites are a compound condition (the ADR
+        # 0052 gate) and a single-line write-count bump, so neither matches.
+        $startIdx = -1
+        for ($i = 0; $i -lt $script:PruneLines.Count; $i++) {
+            if ($script:PruneLines[$i] -match '^\s*if \(\$PruneMissing\.IsPresent\) \{\s*$') { $startIdx = $i; break }
+        }
+        if ($startIdx -lt 0) {
+            throw 'Could not locate the -PruneMissing region in Deploy-AutoLabelPolicies.ps1; update the anchor in this test.'
+        }
+
+        # Brace-match to the end of the region.
+        $depth  = 0
+        $endIdx = -1
+        for ($i = $startIdx; $i -lt $script:PruneLines.Count; $i++) {
+            $line = $script:PruneLines[$i]
+            $depth += ([regex]::Matches($line, '\{')).Count
+            $depth -= ([regex]::Matches($line, '\}')).Count
+            if ($depth -le 0) { $endIdx = $i; break }
+        }
+        if ($endIdx -lt 0) { throw 'Unbalanced braces while extracting the -PruneMissing region.' }
+
+        $script:PruneRegionSource = ($script:PruneLines[$startIdx..$endIdx] -join [Environment]::NewLine)
+
+        # $PSCmdlet is a typed automatic variable and cannot be assigned a
+        # stub, so the ONLY edit made to the lifted source is to redirect the
+        # two ShouldProcess calls at an assignable stub object. The count is
+        # asserted below so a restructure that drops a gate cannot make this
+        # substitution silently vacuous. Everything else -- the loops, the
+        # catch blocks, the continues, the aggregate throw -- runs verbatim.
+        $script:PruneRegionShouldProcessCount =
+            ([regex]::Matches($script:PruneRegionSource, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:PruneRegionRunnable = $script:PruneRegionSource -replace
+            '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        # Runs the extracted region with stub cmdlets. -FailRules / -FailPolicies
+        # name the objects whose Remove-* should throw, mimicking a tenant
+        # delete-blocker (for example LabelIsReferencedByPoliciesException).
+        function Invoke-PruneRegion {
+            param(
+                [string[]]$RuleNames    = @(),
+                [string[]]$PolicyNames  = @(),
+                [string[]]$FailRules    = @(),
+                [string[]]$FailPolicies = @()
+            )
+
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+
+            # Stubs shadow the real cmdlets for the extracted region's scope.
+            function Remove-AutoSensitivityLabelRule {
+                [CmdletBinding(SupportsShouldProcess)] param([string]$Identity)
+                $attempted.Add("rule:$Identity")
+                if ($FailRules -contains $Identity) { throw "LabelIsReferencedByPoliciesException: rule $Identity" }
+            }
+            function Remove-AutoSensitivityLabelPolicy {
+                [CmdletBinding(SupportsShouldProcess)] param([string]$Identity)
+                $attempted.Add("policy:$Identity")
+                if ($FailPolicies -contains $Identity) { throw "LabelIsPublishedException: policy $Identity" }
+            }
+            # Stands in for the module's reporter so the test can assert that
+            # every individual failure was still surfaced with its tenant text.
+            function Write-PruneFailure {
+                param([Parameter(Position = 0)][string]$Message)
+                $reported.Add($Message)
+            }
+
+            # These three are read by the extracted region through dynamic
+            # scoping, so PSScriptAnalyzer reports them as assigned-but-unused.
+            $PruneMissing   = [switch]$true
+            $orphanRules    = @($RuleNames   | ForEach-Object { [pscustomobject]@{ Name = $_ } })
+            $orphanPolicies = @($PolicyNames | ForEach-Object { [pscustomobject]@{ Name = $_ } })
+
+            # Always-consent ShouldProcess stub: the gate stays wired, but this
+            # is a prune-failure test, not a -WhatIf test.
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+
+            $thrown = $null
+            try {
+                & ([scriptblock]::Create($script:PruneRegionRunnable)) 6>$null 3>$null
+            }
+            catch { $thrown = $_.Exception.Message }
+
+            [pscustomobject]@{
+                Attempted = $attempted.ToArray()
+                Reported  = $reported.ToArray()
+                Thrown    = $thrown
+            }
+        }
+    }
+
+    It 'attempts every remaining rule after one rule fails' {
+        $r = Invoke-PruneRegion -RuleNames @('r1', 'r2', 'r3') -FailRules @('r1')
+        $r.Attempted | Should -Be @('rule:r1', 'rule:r2', 'rule:r3')
+    }
+
+    It 'still attempts the orphan policies after a rule fails' {
+        # The regression that motivated part C: a `return` in the rules loop
+        # meant no policy was ever attempted, so a whole class of blockers
+        # stayed invisible until a later dispatch.
+        $r = Invoke-PruneRegion -RuleNames @('r1') -PolicyNames @('p1', 'p2') -FailRules @('r1')
+        $r.Attempted | Should -Contain 'policy:p1'
+        $r.Attempted | Should -Contain 'policy:p2'
+    }
+
+    It 'attempts every remaining policy after one policy fails' {
+        $r = Invoke-PruneRegion -PolicyNames @('p1', 'p2', 'p3') -FailPolicies @('p2')
+        $r.Attempted | Should -Be @('policy:p1', 'policy:p2', 'policy:p3')
+    }
+
+    It 'keeps the rules-before-policies ordering that empties a parent policy first' {
+        $r = Invoke-PruneRegion -RuleNames @('r1') -PolicyNames @('p1')
+        $r.Attempted | Should -Be @('rule:r1', 'policy:p1')
+    }
+
+    It 'reports each individual failure with the tenant error message' {
+        $r = Invoke-PruneRegion -RuleNames @('r1') -PolicyNames @('p1') -FailRules @('r1') -FailPolicies @('p1')
+        $r.Reported.Count | Should -Be 2
+        ($r.Reported -join '; ') | Should -Match 'LabelIsReferencedByPoliciesException'
+        ($r.Reported -join '; ') | Should -Match 'LabelIsPublishedException'
+    }
+
+    It 'throws one aggregate naming every failure, so the run exits non-zero' {
+        $r = Invoke-PruneRegion -RuleNames @('r1', 'r2') -PolicyNames @('p1') -FailRules @('r2') -FailPolicies @('p1')
+        $r.Thrown | Should -Not -BeNullOrEmpty
+        $r.Thrown | Should -Match 'Reconciliation aborted'
+        $r.Thrown | Should -Match "rule 'r2'"
+        $r.Thrown | Should -Match "policy 'p1'"
+        $r.Thrown | Should -Not -Match "rule 'r1'"
+    }
+
+    It 'throws nothing when every prune succeeds' {
+        $r = Invoke-PruneRegion -RuleNames @('r1', 'r2') -PolicyNames @('p1')
+        $r.Thrown   | Should -BeNullOrEmpty
+        $r.Reported | Should -BeNullOrEmpty
+    }
+
+    It 'keeps both prune loops behind their own ShouldProcess gate' {
+        # Also proves the ShouldProcess substitution above is not vacuous.
+        $script:PruneRegionShouldProcessCount | Should -Be 2
+    }
+
+    It 'no longer carries a bare return or a Write-Error in either prune loop' {
+        $script:PruneRegionSource | Should -Not -Match '(?m)^\s*return\s*$'
+        $script:PruneRegionSource | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}
+Describe 'Create-rule workload round-trip (issue #20)' {
+
+    # WHY THE CREATE-RULE REGION IS EXTRACTED AND EXECUTED
+    # ----------------------------------------------------
+    # ConvertTo-TenantRuleHash normalizes a rule's `Workload` to a
+    # sorted-unique PIPE-joined string on export (the on-disk drift-comparison
+    # contract). New-AutoSensitivityLabelRule -Workload is a multi-valued flags
+    # enum that rejects that pipe-joined string, so the apply path must split it
+    # back into a `string[]` before the call. The property under test is
+    # behavioural -- "the value the cmdlet RECEIVES is a multi-element array,
+    # not the raw pipe-joined string" -- so a source-text assertion cannot prove
+    # it: only capturing the actual `-Workload` argument a stubbed cmdlet binds
+    # can. The script body cannot be dot-sourced (it loads
+    # ExchangeOnlineManagement at import time and would connect to a real
+    # tenant), so the `'Create' {` switch-case region is lifted out of the
+    # source by brace matching and executed against a stub that records the
+    # bound `-Workload`.
+    #
+    # Lifting the REAL source (not a transcription) is the point: this is the
+    # mutation guard. Against the pre-fix line (`Workload = $d.workload`) the
+    # stub would receive the raw pipe-joined [string] and every array/type
+    # assertion below fails; against the fix it receives a trimmed `string[]`.
+    #
+    # Reference: issue #20
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-autosensitivitylabelrule
+
+    BeforeAll {
+        $script:CreateLines = @(Get-Content -LiteralPath $script:ScriptPath)
+
+        # Anchor: the RULE-plan 'Create' clause. Both the policy-plan and the
+        # rule-plan switches carry a `'Create' {` line, so we walk every opener,
+        # brace-match its clause, and keep the one whose body actually calls
+        # New-AutoSensitivityLabelRule (the rule create).
+        $startIdx = -1
+        $endIdx   = -1
+        for ($i = 0; $i -lt $script:CreateLines.Count; $i++) {
+            if ($script:CreateLines[$i] -notmatch "^\s*'Create' \{\s*$") { continue }
+
+            $depth = 0
+            $close = -1
+            for ($j = $i; $j -lt $script:CreateLines.Count; $j++) {
+                $line = $script:CreateLines[$j]
+                $depth += ([regex]::Matches($line, '\{')).Count
+                $depth -= ([regex]::Matches($line, '\}')).Count
+                if ($depth -le 0) { $close = $j; break }
+            }
+            if ($close -lt 0) { throw 'Unbalanced braces while extracting a Create region.' }
+
+            $body = ($script:CreateLines[$i..$close] -join [Environment]::NewLine)
+            if ($body -match 'New-AutoSensitivityLabelRule') {
+                $startIdx = $i
+                $endIdx   = $close
+                break
+            }
+        }
+        if ($startIdx -lt 0 -or $endIdx -lt 0) {
+            throw "Could not locate the rule-plan 'Create' region in Deploy-AutoLabelPolicies.ps1; update the anchor in this test."
+        }
+
+        # Lift the INNER body of the clause (between the `'Create' {` opener and
+        # its matching `}`): the clause itself is switch syntax, not a valid
+        # standalone statement, but its body is a plain statement sequence.
+        $script:CreateRegionSource = ($script:CreateLines[($startIdx + 1)..($endIdx - 1)] -join [Environment]::NewLine)
+
+        # $PSCmdlet is a typed automatic variable and cannot be assigned a stub,
+        # so the ONLY edit made to the lifted source is to redirect the single
+        # ShouldProcess call at an assignable stub object. The count is asserted
+        # below so a restructure that drops the gate cannot make this
+        # substitution silently vacuous. Everything else -- the workload split,
+        # the splat, the try/catch -- runs verbatim.
+        $script:CreateRegionShouldProcessCount =
+            ([regex]::Matches($script:CreateRegionSource, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:CreateRegionRunnable = $script:CreateRegionSource -replace
+            '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        # Executes the lifted 'Create' region against a stub that records the
+        # `-Workload` value the cmdlet actually binds. -Workload is the raw YAML
+        # value under test (the pipe-joined on-disk form).
+        function Invoke-CreateRegion {
+            param([Parameter(Mandatory)][AllowEmptyString()][string]$Workload)
+
+            $script:CapturedWorkload = 'UNSET'
+
+            # Stub shadows the real cmdlet for the extracted region's scope and
+            # records the bound -Workload. Typed [string[]] to model the real
+            # cmdlet's multi-valued flags-enum parameter: an array binds
+            # element-for-element, whereas the pre-fix raw pipe-joined scalar
+            # binds as a SINGLE element -- so the multi-workload count assertion
+            # below is the mutation guard (3 tokens post-fix vs 1 pre-fix).
+            function New-AutoSensitivityLabelRule {
+                [CmdletBinding(SupportsShouldProcess)]
+                param(
+                    [string]$Name,
+                    [string]$Policy,
+                    [string[]]$Workload,
+                    $ContentContainsSensitiveInformation
+                )
+                $script:CapturedWorkload = $Workload
+            }
+
+            # Desired rule hash as the plan builds it: workload is the
+            # pipe-joined export form.
+            $d = @{
+                name     = 'rule-under-test'
+                policy   = 'policy-under-test'
+                workload = $Workload
+            }
+            $ccsiArray = @(
+                @{ Name = 'Credit Card Number'; id = '00000000-0000-0000-0000-000000000001'; mincount = '1'; minconfidence = '75' }
+            )
+            $shouldProcessTarget = "Auto-label rule '{0}'" -f $d.name
+
+            # Always-consent ShouldProcess stub: the gate stays wired, but this
+            # is not a -WhatIf test.
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+
+            & ([scriptblock]::Create($script:CreateRegionRunnable)) 6>$null | Out-Null
+
+            # Unary comma so a one-element or empty captured array survives the
+            # pipeline/return unwrap and reaches the caller with its shape intact.
+            return , $script:CapturedWorkload
+        }
+    }
+
+    It 'keeps the ShouldProcess gate wired (substitution is not vacuous)' {
+        $script:CreateRegionShouldProcessCount | Should -Be 1
+    }
+
+    It 'passes a multi-workload pipe-joined value as a multi-element string array' {
+        $captured = Invoke-CreateRegion -Workload 'Applications|Exchange|SharePoint'
+        # Mutation guard: pre-fix (`Workload = $d.workload`) this is the raw
+        # [string], so -is [array] is False and @().Count is 1 -- both fail.
+        ($captured -is [array])   | Should -BeTrue
+        @($captured).Count        | Should -Be 3
+        ($captured[0] -is [string]) | Should -BeTrue
+        $captured[0]              | Should -Be 'Applications'
+        $captured[1]              | Should -Be 'Exchange'
+        $captured[2]              | Should -Be 'SharePoint'
+    }
+
+    It 'binds the multi-workload value as an array, not the raw pipe-joined string' {
+        $captured = Invoke-CreateRegion -Workload 'Applications|Exchange|SharePoint'
+        # The whole defect: a single pipe-joined scalar reaching the cmdlet.
+        ($captured -is [array]) | Should -BeTrue
+        foreach ($token in $captured) { $token | Should -Not -Match '\|' }
+    }
+
+    It 'passes a single-workload value (no pipe) as a one-element array' {
+        $captured = Invoke-CreateRegion -Workload 'Exchange'
+        ($captured -is [array]) | Should -BeTrue
+        @($captured).Count      | Should -Be 1
+        $captured[0]            | Should -Be 'Exchange'
+    }
+
+    It 'trims incidental whitespace around each workload token' {
+        $captured = Invoke-CreateRegion -Workload ' Applications | Exchange | SharePoint '
+        ($captured -is [array]) | Should -BeTrue
+        @($captured).Count      | Should -Be 3
+        $captured[0]            | Should -Be 'Applications'
+        $captured[1]            | Should -Be 'Exchange'
+        $captured[2]            | Should -Be 'SharePoint'
+    }
+
+    It 'drops empty tokens from a malformed value (leading/trailing/double pipe)' {
+        $captured = Invoke-CreateRegion -Workload '|Exchange||SharePoint|'
+        @($captured).Count | Should -Be 2
+        $captured[0]       | Should -Be 'Exchange'
+        $captured[1]       | Should -Be 'SharePoint'
+    }
+
+    It 'yields an empty array for an empty workload value' {
+        $captured = Invoke-CreateRegion -Workload ''
+        ($captured -is [array]) | Should -BeTrue
+        @($captured).Count      | Should -Be 0
     }
 }

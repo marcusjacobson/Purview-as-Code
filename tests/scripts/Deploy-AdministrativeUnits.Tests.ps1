@@ -232,3 +232,172 @@ Describe 'ADR 0053 -- Deploy-AdministrativeUnits.ps1 documents no capability it 
         $cmd.Parameters.Keys | Should -Not -Contain 'OverwriteForeignAuthor'
     }
 }
+
+# ---------------------------------------------------------------------------
+# Issue #13, part C batch 3: guard 2 (prune sanity ratio) and the failure
+# reporter. This script's apply phase is a mixed Create/Update/Delete switch
+# that had NO try/catch: under $ErrorActionPreference = 'Stop', the first
+# failed orphan delete terminated the run and the remaining orphans were
+# never attempted. The regions below are lifted from the REAL script source
+# (not transcribed) and executed against stubs, so the tests cannot keep
+# passing after the script regresses.
+# ---------------------------------------------------------------------------
+Describe 'Prune guard 2 and failure reporter wiring (issue #13, batch 3)' {
+
+    BeforeAll {
+        $script:AuSource = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:AuSource | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+    It 'still calls guard 1 (empty-desired-set) -- earlier rollout not regressed' {
+        $script:AuSource | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+    It 'calls the sanity-ratio guard with the administrative-unit noun' {
+        $script:AuSource | Should -Match 'Assert-PruneRatioWithinThreshold'
+        $script:AuSource | Should -Match ([regex]::Escape("-ObjectTypeNoun 'administrative unit'"))
+    }
+    It 'keys guard 2 on the live tenant AU count' {
+        $script:AuSource | Should -Match ([regex]::Escape('@($current).Count'))
+    }
+    It 'surfaces the ratio override and threshold parameters' {
+        $script:AuSource | Should -Match '\[switch\]\$AllowMajorityPrune'
+        $script:AuSource | Should -Match '\[double\]\$MaxPruneRatio\s*=\s*0\.5'
+    }
+    It 'places guard 2 before the ADR 0052 confirmation gate' {
+        $ratioIdx = $script:AuSource.IndexOf('Assert-PruneRatioWithinThreshold')
+        $gateIdx  = $script:AuSource.IndexOf('Assert-DestructiveOperationConfirmed @gateArgs')
+        $ratioIdx | Should -BeGreaterThan 0
+        $gateIdx  | Should -BeGreaterThan 0
+        $ratioIdx | Should -BeLessThan $gateIdx
+    }
+}
+
+Describe 'Prune sanity-ratio guard executed through the script wiring (issue #13, batch 3)' {
+
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'PruneGuard.psm1') -Force -ErrorAction Stop
+        $lines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $start = -1; $end = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*if \(\$PruneMissing\.IsPresent') {
+                $depth = 0; $e = -1
+                for ($j = $i; $j -lt $lines.Count; $j++) {
+                    $depth += ([regex]::Matches($lines[$j], '\{')).Count
+                    $depth -= ([regex]::Matches($lines[$j], '\}')).Count
+                    if ($depth -le 0) { $e = $j; break }
+                }
+                $cand = ($lines[$i..$e] -join [Environment]::NewLine)
+                if ($cand -match 'Assert-PruneRatioWithinThreshold') { $start = $i; $end = $e; break }
+            }
+        }
+        if ($start -lt 0) { throw 'Could not locate the guard-2 region in Deploy-AdministrativeUnits.ps1; update the anchor in this test.' }
+        $script:Guard2Region = ($lines[$start..$end] -join [Environment]::NewLine)
+
+        function Invoke-Guard2 {
+            param([int]$Prune, [int]$Live, [double]$Max = 0.5, [switch]$Allow)
+            $PruneMissing = [switch]$true
+            $MaxPruneRatio = $Max
+            $AllowMajorityPrune = [switch]$Allow
+            $orphans = @(for ($i = 0; $i -lt $Prune; $i++) { [pscustomobject]@{ Category = 'Orphan'; Name = "orphan-$i" } })
+            $current = @(for ($i = 0; $i -lt $Live; $i++) { [pscustomobject]@{ displayName = "live-$i"; id = "live-$i" } })
+            $null = $PruneMissing, $MaxPruneRatio, $AllowMajorityPrune, $orphans, $current
+            & ([scriptblock]::Create($script:Guard2Region)) 3>$null
+        }
+    }
+
+    It 'passes below the threshold (2 of 10 live)' { { Invoke-Guard2 -Prune 2 -Live 10 } | Should -Not -Throw }
+    It 'passes exactly at the threshold (5 of 10 live)' { { Invoke-Guard2 -Prune 5 -Live 10 } | Should -Not -Throw }
+    It 'throws above the threshold (6 of 10 live)' { { Invoke-Guard2 -Prune 6 -Live 10 } | Should -Throw }
+    It 'permits an over-threshold prune when -AllowMajorityPrune is supplied' { { Invoke-Guard2 -Prune 10 -Live 10 -Allow } | Should -Not -Throw }
+    It 'honours a caller-supplied -MaxPruneRatio' { { Invoke-Guard2 -Prune 6 -Live 10 -Max 0.7 } | Should -Not -Throw }
+}
+
+Describe 'Prune failure reporting executed through the script wiring (issue #13, batch 3)' {
+
+    BeforeAll {
+        $script:RepLines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $s = -1
+        for ($i = 0; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*\$pruneFailures = New-Object') { $s = $i; break }
+        }
+        if ($s -lt 0) { throw 'Could not locate the $pruneFailures declaration in Deploy-AdministrativeUnits.ps1; update the anchor in this test.' }
+        $ifStart = -1
+        for ($i = $s; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*if \(\$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
+        }
+        if ($ifStart -lt 0) { throw 'Could not locate the aggregate-throw block in Deploy-AdministrativeUnits.ps1; update the anchor in this test.' }
+        $depth = 0; $e = -1
+        for ($j = $ifStart; $j -lt $script:RepLines.Count; $j++) {
+            $depth += ([regex]::Matches($script:RepLines[$j], '\{')).Count
+            $depth -= ([regex]::Matches($script:RepLines[$j], '\}')).Count
+            if ($depth -le 0) { $e = $j; break }
+        }
+        $script:ReporterRegion = ($script:RepLines[$s..$e] -join [Environment]::NewLine)
+        $script:ReporterShouldProcessCount = ([regex]::Matches($script:ReporterRegion, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:ReporterRunnable = $script:ReporterRegion -replace '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        function Invoke-PruneRegion {
+            param([string[]]$Names = @(), [string[]]$Fail = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            # Stub shadows the real cmdlet inside the lifted region. Deletes are
+            # identified by the trailing URI segment, which the harness sets to
+            # the AU's display name (id == displayName in the stub tenant).
+            function Invoke-RestMethod {
+                param($Method, $Uri, $Headers, $Body)
+                $null = $Headers, $Body
+                if ($Method -ne 'Delete') { throw "Unexpected non-Delete call in orphan-only run: $Method $Uri" }
+                $name = ($Uri -split '/')[-1]
+                $attempted.Add($name)
+                if ($Fail -contains $name) { throw "TenantBlockerException: $name" }
+            }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            $PruneMissing = [switch]$true
+            $graphBase = 'https://graph.unit.test/v1.0'
+            $headers = @{}
+            $desired = @()
+            $current = @($Names | ForEach-Object { [pscustomobject]@{ displayName = $_; id = $_ } })
+            $report = @($Names | ForEach-Object { [pscustomobject]@{ Category = 'Orphan'; Kind = 'AdministrativeUnit'; Name = $_; Reason = 'test' } })
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+            $null = $PruneMissing, $graphBase, $headers, $desired, $current, $report, $ShouldProcessStub
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = $attempted.ToArray(); Reported = $reported.ToArray(); Thrown = $thrown }
+        }
+    }
+
+    It 'attempts every orphan after a failure (no first-failure abort)' {
+        $r = Invoke-PruneRegion -Names @('a', 'b', 'c') -Fail @('a')
+        $r.Attempted | Should -Be @('a', 'b', 'c')
+    }
+    It 'reports each failure with the tenant''s own error text' {
+        $r = Invoke-PruneRegion -Names @('a', 'b') -Fail @('b')
+        $r.Reported.Count | Should -Be 1
+        $r.Reported[0] | Should -Match 'TenantBlockerException: b'
+    }
+    It 'throws one aggregate naming every failure (non-zero exit preserved)' {
+        $r = Invoke-PruneRegion -Names @('a', 'b', 'c') -Fail @('a', 'c')
+        $r.Thrown | Should -Match 'a, c'
+        $r.Thrown | Should -Match '2 orphan administrative unit'
+    }
+    It 'throws nothing when every prune succeeds' {
+        $r = Invoke-PruneRegion -Names @('a', 'b')
+        $r.Thrown   | Should -BeNullOrEmpty
+        $r.Reported | Should -BeNullOrEmpty
+    }
+    It 'keeps the delete behind a ShouldProcess gate (substitution non-vacuous)' {
+        $script:ReporterShouldProcessCount | Should -BeGreaterThan 0
+    }
+    It 'carries try/catch, the reporter, and the aggregate throw in the lifted region (mutation check vs pre-batch first-failure abort)' {
+        # Non-vacuous: the lift anchors on the $pruneFailures declaration,
+        # which the pre-change file lacked entirely (no try/catch around the
+        # delete, no collection, no aggregate throw).
+        $script:ReporterRegion | Should -Match 'try \{'
+        $script:ReporterRegion | Should -Match 'Write-PruneFailure'
+        $script:ReporterRegion | Should -Match 'throw'
+        $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}

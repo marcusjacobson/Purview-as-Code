@@ -53,6 +53,7 @@ Canonical examples for this repo:
 - **Classifications** (`data-plane/classifications/classifications.yaml`): `name` uses Purview's dotted convention — `Custom.<Domain>.<Concept>` (Title Case segments), e.g. `Custom.HR.EmployeeId`.
 - **Data sources** (`data-plane/data-sources/data-sources.yaml`): `name` follows the Azure resource convention above (hyphenated, lowercase) because it typically mirrors the underlying resource name.
 - **Scans** (`data-plane/scans/scans.yaml`): `name` is `scan-<datasource>-<purpose>`, e.g. `scan-contosolabsrc01-full`.
+- **Tenant-wide Information Protection objects** (`data-plane/information-protection/**`) — sensitivity labels, label (publishing) policies, auto-labeling policies and their rules: names carry **no `<env>` token**. These are tenant-wide constructs, not per-environment Azure resources, and this repo keeps them identical across every environment so the same manifest deploys unchanged to each tenant. Use a descriptive PascalCase name, and suffix a rule with `-Rule` after its parent policy's name — e.g. the policy `AutoLabel-CreditCards` owns the rule `AutoLabel-CreditCards-Rule`. Never write `Lab-AutoLabel-CreditCards`: an `<env>`-prefixed name makes the object un-portable and forces a create-then-prune migration in every other tenant, because `name` is Purview's identity key and there is no rename operation. This is the deliberate exception to the `<env>` token that `infra/**` Azure resource names carry.
 
 ## Rules for the agent
 

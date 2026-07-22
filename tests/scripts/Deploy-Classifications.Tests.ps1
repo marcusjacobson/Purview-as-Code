@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.4
+#Requires -Version 7.4
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.5.0' }
 <#
 .SYNOPSIS
@@ -623,5 +623,183 @@ Describe 'ADR 0053 -- -OverwriteForeignAuthor (Deploy-Classifications.ps1)' {
                     }, $true))
             $assignments.Count | Should -Be 0
         }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Issue #13, part C batch 4: guard 2 (PER-TIER prune sanity ratio) and the
+# failure reporter. The prune catches previously added a 'Failed' report row
+# and moved on -- a failed prune exited 0. The regions below are lifted from
+# the REAL script source (not transcribed) and executed against stubs, so the
+# tests cannot keep passing after the script regresses.
+# ---------------------------------------------------------------------------
+Describe 'Prune guard 2 and failure reporter wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        $script:B4Source = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:B4Source | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+    It 'still calls guard 1 (empty-desired-set) -- earlier rollout not regressed' {
+        $script:B4Source | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+    It 'calls the sanity-ratio guard once PER TIER with tier-specific nouns' {
+        ([regex]::Matches($script:B4Source, 'Assert-PruneRatioWithinThreshold\s+`')).Count | Should -Be 2
+        $script:B4Source | Should -Match ([regex]::Escape("-ObjectTypeNoun 'classification rule'"))
+        $script:B4Source | Should -Match ([regex]::Escape("-ObjectTypeNoun 'user-authored classification type'"))
+    }
+    It 'keys each tier on its own live denominator' {
+        $script:B4Source | Should -Match ([regex]::Escape('@($tenantRulesRaw).Count'))
+        $script:B4Source | Should -Match ([regex]::Escape('@($tenantTypesUserAuthored).Count'))
+    }
+    It 'surfaces the ratio override and threshold parameters on the Apply parameter set' {
+        $script:B4Source | Should -Match '\[switch\]\$AllowMajorityPrune'
+        $script:B4Source | Should -Match '\[double\]\$MaxPruneRatio\s*=\s*0\.5'
+        $cmd = Get-Command -Name $script:ScriptPath -CommandType ExternalScript
+        $cmd.Parameters['AllowMajorityPrune'].ParameterSets.Keys | Should -Not -Contain 'Export'
+        $cmd.Parameters['MaxPruneRatio'].ParameterSets.Keys | Should -Not -Contain 'Export'
+    }
+    It 'places guard 2 before the ADR 0052 confirmation gate' {
+        $ratioIdx = $script:B4Source.IndexOf('Assert-PruneRatioWithinThreshold')
+        $gateIdx  = $script:B4Source.IndexOf('Assert-DestructiveOperationConfirmed @gateArgs')
+        $ratioIdx | Should -BeGreaterThan 0
+        $gateIdx  | Should -BeGreaterThan 0
+        $ratioIdx | Should -BeLessThan $gateIdx
+    }
+}
+
+Describe 'Per-tier prune sanity-ratio guard executed through the script wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'PruneGuard.psm1') -Force -ErrorAction Stop
+        $lines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $start = -1; $end = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*if \(\$PruneMissing\.IsPresent') {
+                $depth = 0; $e = -1
+                for ($j = $i; $j -lt $lines.Count; $j++) {
+                    $depth += ([regex]::Matches($lines[$j], '\{')).Count
+                    $depth -= ([regex]::Matches($lines[$j], '\}')).Count
+                    if ($depth -le 0) { $e = $j; break }
+                }
+                $cand = ($lines[$i..$e] -join [Environment]::NewLine)
+                if ($cand -match 'Assert-PruneRatioWithinThreshold') { $start = $i; $end = $e; break }
+            }
+        }
+        if ($start -lt 0) { throw 'Could not locate the guard-2 region in Deploy-Classifications.ps1; update the anchor in this test.' }
+        $script:Guard2Region = ($lines[$start..$end] -join [Environment]::NewLine)
+
+        function Invoke-Guard2 {
+            param([int]$RuleOrphans, [int]$LiveRules, [int]$TypeOrphans, [int]$LiveTypes, [double]$Max = 0.5, [switch]$Allow)
+            $PruneMissing = [switch]$true
+            $MaxPruneRatio = $Max
+            $AllowMajorityPrune = [switch]$Allow
+            $orphans = @(
+                @(for ($i = 0; $i -lt $RuleOrphans; $i++) { [pscustomobject]@{ Kind = 'Rule'; Action = 'Orphan'; Name = "rule-$i" } }) +
+                @(for ($i = 0; $i -lt $TypeOrphans; $i++) { [pscustomobject]@{ Kind = 'Type'; Action = 'Orphan'; Name = "type-$i" } })
+            )
+            $tenantRulesRaw          = @(for ($i = 0; $i -lt $LiveRules; $i++) { [pscustomobject]@{ name = "live-rule-$i" } })
+            $tenantTypesUserAuthored = @(for ($i = 0; $i -lt $LiveTypes; $i++) { [pscustomobject]@{ name = "live-type-$i" } })
+            $null = $PruneMissing, $MaxPruneRatio, $AllowMajorityPrune, $orphans, $tenantRulesRaw, $tenantTypesUserAuthored
+            & ([scriptblock]::Create($script:Guard2Region)) 3>$null
+        }
+    }
+
+    It 'passes when both tiers sit at or below the threshold' {
+        { Invoke-Guard2 -RuleOrphans 2 -LiveRules 10 -TypeOrphans 1 -LiveTypes 10 } | Should -Not -Throw
+    }
+    It 'throws when the RULE tier exceeds the threshold even though the blended ratio would pass (the per-tier point)' {
+        # 4 of 4 rules pruned but 0 of 16 types: blended 4/20 = 20%, rules tier 100%.
+        { Invoke-Guard2 -RuleOrphans 4 -LiveRules 4 -TypeOrphans 0 -LiveTypes 16 } | Should -Throw
+    }
+    It 'throws when the TYPE tier exceeds the threshold' {
+        { Invoke-Guard2 -RuleOrphans 0 -LiveRules 16 -TypeOrphans 4 -LiveTypes 4 } | Should -Throw
+    }
+    It 'permits an over-threshold prune when -AllowMajorityPrune is supplied' {
+        { Invoke-Guard2 -RuleOrphans 4 -LiveRules 4 -TypeOrphans 4 -LiveTypes 4 -Allow } | Should -Not -Throw
+    }
+    It 'honours a caller-supplied -MaxPruneRatio' {
+        { Invoke-Guard2 -RuleOrphans 6 -LiveRules 10 -TypeOrphans 0 -LiveTypes 5 -Max 0.7 } | Should -Not -Throw
+    }
+}
+
+Describe 'Prune failure reporting executed through the script wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        $script:RepLines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $s = -1
+        for ($i = 0; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*\$pruneFailures = New-Object') { $s = $i; break }
+        }
+        if ($s -lt 0) { throw 'Could not locate the $pruneFailures declaration in Deploy-Classifications.ps1; update the anchor in this test.' }
+        $ifStart = -1
+        for ($i = $s; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*if \(\$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
+        }
+        if ($ifStart -lt 0) { throw 'Could not locate the aggregate-throw block in Deploy-Classifications.ps1; update the anchor in this test.' }
+        $depth = 0; $e = -1
+        for ($j = $ifStart; $j -lt $script:RepLines.Count; $j++) {
+            $depth += ([regex]::Matches($script:RepLines[$j], '\{')).Count
+            $depth -= ([regex]::Matches($script:RepLines[$j], '\}')).Count
+            if ($depth -le 0) { $e = $j; break }
+        }
+        $script:ReporterRegion = ($script:RepLines[$s..$e] -join [Environment]::NewLine)
+        $script:ReporterShouldProcessCount = ([regex]::Matches($script:ReporterRegion, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:ReporterRunnable = $script:ReporterRegion -replace '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        function Invoke-PruneRegion {
+            param([string[]]$RuleNames = @(), [string[]]$TypeNames = @(), [string[]]$Fail = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            function Invoke-RuleDelete { param([string]$Name) $attempted.Add("rule:$Name"); if ($Fail -contains $Name) { throw "TenantBlockerException: $Name" } }
+            function Invoke-TypeDelete { param([string]$Name) $attempted.Add("type:$Name"); if ($Fail -contains $Name) { throw "TenantBlockerException: $Name" } }
+            function Add-Report { param([string]$Category, [string]$Kind, [string]$Name, [string]$Reason) $null = $Category, $Kind, $Name, $Reason }
+            function Format-PurviewRestError { param($ErrorRecord) [string]$ErrorRecord.Exception.Message }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            $PruneMissing = [switch]$true
+            $plan = @(
+                @($RuleNames | ForEach-Object { [pscustomobject]@{ Kind = 'Rule'; Action = 'Orphan'; Name = $_; Reason = 'test' } }) +
+                @($TypeNames | ForEach-Object { [pscustomobject]@{ Kind = 'Type'; Action = 'Orphan'; Name = $_; Reason = 'test' } })
+            )
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+            $null = $PruneMissing, $plan, $ShouldProcessStub
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = $attempted.ToArray(); Reported = $reported.ToArray(); Thrown = $thrown }
+        }
+    }
+
+    It 'attempts every orphan in both tiers after a failure, rules before types (FK order preserved)' {
+        $r = Invoke-PruneRegion -RuleNames @('r1', 'r2') -TypeNames @('t1') -Fail @('r1')
+        $r.Attempted | Should -Be @('rule:r1', 'rule:r2', 'type:t1')
+    }
+    It 'reports each failure with the tenant''s own error text' {
+        $r = Invoke-PruneRegion -RuleNames @('r1') -TypeNames @('t1') -Fail @('t1')
+        $r.Reported.Count | Should -Be 1
+        $r.Reported[0] | Should -Match 'TenantBlockerException: t1'
+    }
+    It 'throws one aggregate naming every failure across both tiers (non-zero exit restored)' {
+        $r = Invoke-PruneRegion -RuleNames @('r1', 'r2') -TypeNames @('t1') -Fail @('r1', 't1')
+        $r.Thrown | Should -Match "rule 'r1'"
+        $r.Thrown | Should -Match "type 't1'"
+        $r.Thrown | Should -Match '2 orphan classification object'
+    }
+    It 'throws nothing when every prune succeeds' {
+        $r = Invoke-PruneRegion -RuleNames @('r1') -TypeNames @('t1')
+        $r.Thrown   | Should -BeNullOrEmpty
+        $r.Reported | Should -BeNullOrEmpty
+    }
+    It 'keeps the deletes behind a ShouldProcess gate (substitution non-vacuous)' {
+        $script:ReporterShouldProcessCount | Should -BeGreaterThan 0
+    }
+    It 'carries the reporter and the aggregate throw in the lifted region (mutation check vs pre-batch exit-0)' {
+        # Non-vacuous: the lift anchors on the $pruneFailures declaration,
+        # which the pre-change file lacked entirely.
+        $script:ReporterRegion | Should -Match 'Write-PruneFailure'
+        $script:ReporterRegion | Should -Match 'throw'
+        $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
     }
 }

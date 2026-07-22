@@ -56,6 +56,33 @@
     contract. Destructive; subject to the destructive-change rule in
     .github/instructions/pre-commit.instructions.md.
 
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against
+        `roleGroups: []` would classify every live sg-purview-* group
+        as orphaned and revoke every permission they confer.
+      * The prune must not exceed `-MaxPruneRatio` of the live
+        sg-purview-* groups without `-AllowMajorityPrune`.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live sg-purview-* backing groups is refused before any write.
+    Supply it when a large prune is genuinely intended (a deliberate
+    consolidation); the ratio is then reported as a warning and the run
+    proceeds. Has no effect on the empty-desired-set guard, which cannot
+    be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live sg-purview-* backing groups
+    `-PruneMissing` may delete without `-AllowMajorityPrune`, as a
+    fraction in (0, 1]. Default 0.5. A prune exactly at the threshold
+    passes; only a strictly larger share is refused. Set to 1 to disable
+    the ratio guard for a single run.
+
 .PARAMETER Force
     Overwrite a tenant group whose securityEnabled / mailEnabled /
     groupTypes do not match the contract (Conflict rows). Default:
@@ -117,6 +144,13 @@ param(
     [switch]$PruneMissing,
 
     [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
+
+    [Parameter(ParameterSetName = 'Apply')]
     [switch]$Force,
 
     [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
@@ -147,6 +181,13 @@ Import-Module 'powershell-yaml' -ErrorAction Stop
 # entered unattended from a local terminal.
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 # ---------------------------------------------------------------------------
@@ -185,15 +226,14 @@ function ConvertTo-BackingGroupSlug {
     return ($script:NamePrefix + $slug)
 }
 
-$graphBase = 'https://graph.microsoft.com/v1.0'
-$token     = Get-GraphToken
-$headers   = @{
-    Authorization   = "Bearer $token"
-    'Content-Type'  = 'application/json'
-}
-
 # ---------------------------------------------------------------------------
 # Load desired state.
+#
+# Deliberately ordered BEFORE the Graph token acquisition below (issue #13):
+# the empty-desired-set guard needs the projected count, and the guard must
+# refuse a destructive run before the tenant is contacted at all. Nothing in
+# this block depends on $token / $headers, and ConvertTo-BackingGroupSlug is
+# defined above, so the move is behaviour-preserving.
 # ---------------------------------------------------------------------------
 if (-not (Test-Path -LiteralPath $Path)) {
     throw "Desired-state YAML not found at $Path."
@@ -211,6 +251,36 @@ $desired = foreach ($rg in $roleGroups) {
         DisplayName   = (ConvertTo-BackingGroupSlug -RoleGroupName ([string]$rg.name))
         Description   = ($script:DescriptionShape -f [string]$rg.name)
     }
+}
+
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# The orphan match below compares live sg-purview-* groups against $desired --
+# the PROJECTION of roleGroups, which drops nameless entries -- so $desired is
+# the set the guard must key on, not the raw $roleGroups. It is an unrolled
+# pipeline result, hence the @() before .Count.
+#
+# With zero desired entries every live backing security group falls out of that
+# match and the run would delete all of them, revoking every permission they
+# conferred. The rationale, the likely causes, and the 2026-07-19 production hit
+# are documented in scripts/modules/PruneGuard.psm1.
+#
+# -ExportCurrentState returns before the prune branch is ever reached, so it is
+# excluded here rather than refused. Placed above the Graph token acquisition so
+# the guard fires before the tenant is contacted at all.
+if ($PruneMissing.IsPresent -and -not $ExportCurrentState.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   @($desired).Count `
+        -ObjectTypeNoun 'backing Entra security group' `
+        -SourcePath     $Path `
+        -CollectionKey  'roleGroups'
+}
+
+$graphBase = 'https://graph.microsoft.com/v1.0'
+$token     = Get-GraphToken
+$headers   = @{
+    Authorization   = "Bearer $token"
+    'Content-Type'  = 'application/json'
 }
 
 # ---------------------------------------------------------------------------
@@ -339,6 +409,30 @@ foreach ($c in $current) {
 # Emit the drift report.
 $report | Sort-Object Category, Name | Format-Table -AutoSize | Out-String | Write-Information -InformationAction Continue
 
+# ---- Issue #13, guard 2: prune sanity ratio ----
+# Guard 1 (desired-state load region) catches only the total wipe. This
+# catches the near-total one: a role-groups.yaml that lost most of its
+# entries to a bad merge, or a -Path pointing at a smaller environment's
+# file, both of which leave a non-zero desired count and so clear guard 1.
+# The stakes here are the ADR 0052 gate's own warning: deleting a backing
+# group revokes every permission it conferred, tenant-wide.
+#
+# Keyed on the ORPHAN rows this run would actually delete against the live
+# sg-purview-* group count. Fires before the ADR 0052 gate and before the
+# write loop: the last point at which nothing has been written. This script
+# is Class B with no -DirectionPolicy, so there is no audit mode to gate on;
+# -ExportCurrentState returned above and never reaches this guard.
+# Reference: scripts/modules/PruneGuard.psm1
+$orphans = @($report | Where-Object { $_.Category -eq 'Orphan' })
+if ($PruneMissing.IsPresent) {
+    Assert-PruneRatioWithinThreshold `
+        -PruneCount     $orphans.Count `
+        -LiveCount      @($current).Count `
+        -ObjectTypeNoun 'backing Entra security group' `
+        -MaxPruneRatio  $MaxPruneRatio `
+        -Allow:$AllowMajorityPrune
+}
+
 # ---- ADR 0052: destructive-operation confirmation gate ----
 # The last point before the write loop at which nothing has been written.
 # This script is Class B: it declares no -DirectionPolicy, so it has no
@@ -380,7 +474,6 @@ $gateArgs = @{
     ConfirmValue = $confirmValue
 }
 
-$orphans = @($report | Where-Object { $_.Category -eq 'Orphan' })
 if ($PruneMissing.IsPresent -and $orphans.Count -gt 0) {
     $orphanNames = @($orphans | ForEach-Object { [string]$_.Name })
     $pruneQuery = "-PruneMissing will DELETE {0} orphan Entra security group(s) that back Purview role groups: {1}. Deleting the group revokes every permission it conferred, and this cannot be undone. Continue?" -f `
@@ -393,6 +486,16 @@ if ($PruneMissing.IsPresent -and $orphans.Count -gt 0) {
 # ---------------------------------------------------------------------------
 # Act on the report.
 # ---------------------------------------------------------------------------
+$pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+# Issue #13: in-loop prune failures are reported via Write-PruneFailure
+# (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+# '::error::' workflow command rather than Write-Error. This script runs with
+# $ErrorActionPreference = 'Stop', so an unhandled delete failure would
+# terminate the loop on the first orphan and the rest would never be
+# attempted. The aggregate `throw` below remains the terminal outcome, so a
+# failed prune still exits non-zero.
+
 foreach ($row in $report) {
     switch ($row.Category) {
         'Create' {
@@ -434,9 +537,15 @@ foreach ($row in $report) {
                 continue
             }
             if ($PSCmdlet.ShouldProcess("Entra security group '$($row.Name)'", 'Delete')) {
-                # Reference: https://learn.microsoft.com/en-us/graph/api/group-delete
-                Invoke-RestMethod -Method Delete -Uri "$graphBase/groups/$($row.ObjectId)" -Headers $headers | Out-Null
-                Write-Information "Deleted orphan Entra security group '$($row.Name)'." -InformationAction Continue
+                try {
+                    # Reference: https://learn.microsoft.com/en-us/graph/api/group-delete
+                    Invoke-RestMethod -Method Delete -Uri "$graphBase/groups/$($row.ObjectId)" -Headers $headers | Out-Null
+                    Write-Information "Deleted orphan Entra security group '$($row.Name)'." -InformationAction Continue
+                } catch {
+                    Write-PruneFailure ("Delete of orphan Entra security group '{0}' failed: {1}" -f $row.Name, $_.Exception.Message)
+                    $pruneFailures.Add([string]$row.Name)
+                    continue
+                }
             }
         }
         'Conflict' {
@@ -454,6 +563,10 @@ foreach ($row in $report) {
             # NoChange - nothing to do.
         }
     }
+}
+
+if ($pruneFailures.Count -gt 0) {
+    throw ("Reconciliation aborted: {0} orphan backing Entra security group(s) could not be deleted: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
 }
 
 # Return the report for pipeline capture.

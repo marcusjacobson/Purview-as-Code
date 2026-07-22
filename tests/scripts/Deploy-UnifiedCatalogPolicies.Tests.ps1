@@ -853,3 +853,195 @@ Describe 'ADR 0052 gate on Deploy-UnifiedCatalogPolicies: the write boundary is 
         }
     }
 }
+
+# ---------------------------------------------------------------------------
+# Issue #13 part C batch 6: guard 2 (prune sanity ratio) and the failure
+# reporter at POLICY granularity. Revokes are folded into a per-policy PUT, so
+# the reporting unit is the policy PUT, not an individual assignment. The
+# regions below are lifted from the REAL script source and executed against
+# stubs.
+# ---------------------------------------------------------------------------
+Describe 'Prune guard 2 and failure reporter wiring (issue #13, batch 6) -- Deploy-UnifiedCatalogPolicies.ps1' {
+
+    BeforeAll {
+        $script:B6Source = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:B6Source | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+    It 'still calls guard 1 (empty-desired-set) -- earlier rollout not regressed' {
+        $script:B6Source | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+    It 'calls the sanity-ratio guard with the role-assignment noun' {
+        $script:B6Source | Should -Match 'Assert-PruneRatioWithinThreshold'
+        $script:B6Source | Should -Match ([regex]::Escape("-ObjectTypeNoun 'Unified Catalog role assignment'"))
+    }
+    It 'keys guard 2 on the prune plan over the live assignment set' {
+        $script:B6Source | Should -Match ([regex]::Escape('@($prunePlan).Count'))
+        $script:B6Source | Should -Match ([regex]::Escape('@($tenantAssignments).Count'))
+    }
+    It 'needs no audit conjunct: the plan is cleared upstream under audit (documented in the guard comment)' {
+        # Invoke-DirectionPolicyPlan clears $plan under audit, so $prunePlan is
+        # empty and guard 2 returns early. Pin that the guard does NOT carry a
+        # -DirectionPolicy audit conjunct (it relies on the emptied plan) and
+        # that the upstream clear exists.
+        $script:B6Source | Should -Match ([regex]::Escape('$Plan.Clear()'))
+    }
+    It 'surfaces the ratio override and threshold parameters on the Apply parameter set' {
+        $script:B6Source | Should -Match '\[switch\]\$AllowMajorityPrune'
+        $script:B6Source | Should -Match '\[double\]\$MaxPruneRatio\s*=\s*0\.5'
+        $cmd = Get-Command -Name $script:ScriptPath -CommandType ExternalScript
+        $cmd.Parameters['AllowMajorityPrune'].ParameterSets.Keys | Should -Not -Contain 'Export'
+        $cmd.Parameters['MaxPruneRatio'].ParameterSets.Keys | Should -Not -Contain 'Export'
+    }
+    It 'places guard 2 before the ADR 0052 confirmation gates' {
+        $ratioIdx = $script:B6Source.IndexOf('Assert-PruneRatioWithinThreshold')
+        $gateIdx  = $script:B6Source.IndexOf('Assert-DestructiveOperationConfirmed @gateArgs')
+        $ratioIdx | Should -BeGreaterThan 0
+        $gateIdx  | Should -BeGreaterThan 0
+        $ratioIdx | Should -BeLessThan $gateIdx
+    }
+    It 'builds the policy PUT URI with a brace-delimited ${policyId} (regression: bare $policyId?api-version mis-parses)' {
+        # Unbraced, PowerShell reads `?` as part of the variable name, so
+        # `$policyId?api-version` becomes the undefined `${policyId?api}` and the
+        # URI collapses to `.../policies/-version=...` with no id and no `?`.
+        $script:B6Source | Should -Match ([regex]::Escape('policies/${policyId}?api-version='))
+        $script:B6Source | Should -Not -Match ([regex]::Escape('policies/$policyId?api-version'))
+    }
+}
+
+Describe 'Prune sanity-ratio guard executed through the script wiring (issue #13, batch 6) -- UCP' {
+
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'PruneGuard.psm1') -Force -ErrorAction Stop
+        $lines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $start = -1; $end = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*if \(\$PruneMissing\.IsPresent\) \{') {
+                $depth = 0; $e = -1
+                for ($j = $i; $j -lt $lines.Count; $j++) {
+                    $depth += ([regex]::Matches($lines[$j], '\{')).Count
+                    $depth -= ([regex]::Matches($lines[$j], '\}')).Count
+                    if ($depth -le 0) { $e = $j; break }
+                }
+                $cand = ($lines[$i..$e] -join [Environment]::NewLine)
+                if ($cand -match 'Assert-PruneRatioWithinThreshold') { $start = $i; $end = $e; break }
+            }
+        }
+        if ($start -lt 0) { throw 'Could not locate the guard-2 region in Deploy-UnifiedCatalogPolicies.ps1; update the anchor in this test.' }
+        $script:Guard2Region = ($lines[$start..$end] -join [Environment]::NewLine)
+
+        function Invoke-Guard2 {
+            param([int]$Prune, [int]$Live, [double]$Max = 0.5, [switch]$Allow)
+            $PruneMissing = [switch]$true
+            $MaxPruneRatio = $Max
+            $AllowMajorityPrune = [switch]$Allow
+            $prunePlan = @(for ($i = 0; $i -lt $Prune; $i++) { [pscustomobject]@{ Action = 'Remove'; Name = "orphan-$i" } })
+            $tenantAssignments = @(for ($i = 0; $i -lt $Live; $i++) { [pscustomobject]@{ PolicyId = "p-$i" } })
+            $null = $PruneMissing, $MaxPruneRatio, $AllowMajorityPrune, $prunePlan, $tenantAssignments
+            & ([scriptblock]::Create($script:Guard2Region)) 3>$null
+        }
+    }
+
+    It 'passes below the threshold (2 of 10 live)' { { Invoke-Guard2 -Prune 2 -Live 10 } | Should -Not -Throw }
+    It 'passes exactly at the threshold (5 of 10 live)' { { Invoke-Guard2 -Prune 5 -Live 10 } | Should -Not -Throw }
+    It 'throws above the threshold (6 of 10 live)' { { Invoke-Guard2 -Prune 6 -Live 10 } | Should -Throw }
+    It 'permits an over-threshold prune when -AllowMajorityPrune is supplied' { { Invoke-Guard2 -Prune 10 -Live 10 -Allow } | Should -Not -Throw }
+    It 'passes trivially when the plan is empty (the audit case: plan cleared upstream)' { { Invoke-Guard2 -Prune 0 -Live 10 } | Should -Not -Throw }
+    It 'honours a caller-supplied -MaxPruneRatio' { { Invoke-Guard2 -Prune 6 -Live 10 -Max 0.7 } | Should -Not -Throw }
+}
+
+Describe 'Policy-level PUT failure reporting executed through the script wiring (issue #13, batch 6)' {
+
+    BeforeAll {
+        $script:RepLines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $s = -1
+        for ($i = 0; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*\$pruneFailures = New-Object') { $s = $i; break }
+        }
+        if ($s -lt 0) { throw 'Could not locate the $pruneFailures declaration in Deploy-UnifiedCatalogPolicies.ps1; update the anchor in this test.' }
+        $ifStart = -1
+        for ($i = $s; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*if \(\$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
+        }
+        if ($ifStart -lt 0) { throw 'Could not locate the aggregate-throw block in Deploy-UnifiedCatalogPolicies.ps1; update the anchor in this test.' }
+        $depth = 0; $e = -1
+        for ($j = $ifStart; $j -lt $script:RepLines.Count; $j++) {
+            $depth += ([regex]::Matches($script:RepLines[$j], '\{')).Count
+            $depth -= ([regex]::Matches($script:RepLines[$j], '\}')).Count
+            if ($depth -le 0) { $e = $j; break }
+        }
+        $script:ReporterRegion = ($script:RepLines[$s..$e] -join [Environment]::NewLine)
+        $script:ReporterShouldProcessCount = ([regex]::Matches($script:ReporterRegion, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:ReporterRunnable = $script:ReporterRegion -replace '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        function Invoke-PutRegion {
+            # Each policy id in $Policies gets one plan entry -> one PUT. $Fail lists
+            # the policy ids whose PUT throws.
+            param([string[]]$Policies = @(), [string[]]$Fail = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            function ConvertTo-PolicyUpdatePayload { param($Policy, $TenantAssignments, $RoleAssignmentsBySlug) $null = $Policy, $TenantAssignments, $RoleAssignmentsBySlug; '{}' }
+            function Invoke-UnifiedCatalogRestMethod {
+                param($Method, $Uri, $Headers, $Body)
+                $null = $Headers, $Body
+                if ($Method -ne 'PUT') { throw "Unexpected non-PUT call: $Method $Uri" }
+                # URI shape: .../policies/<policyId>?api-version=<v>
+                $policyIdFromUri = if ($Uri -match '/policies/([^?]+)') { $matches[1] } else { $Uri }
+                $attempted.Add($policyIdFromUri)
+                if ($Fail -contains $policyIdFromUri) { throw "PolicyUpdateException on $policyIdFromUri" }
+            }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            $script:UnifiedCatalogApiVersion = '2026-03-20-preview'
+            $context = [pscustomobject]@{ Endpoint = 'https://api.unit.test'; Headers = @{} }
+            $tenantAssignments = @()
+            $finalAssignmentsByPolicy = @{}
+            foreach ($p in $Policies) { $finalAssignmentsByPolicy[$p] = @() }
+            $stubPlan = @($Policies | ForEach-Object {
+                    [pscustomobject]@{
+                        Name    = "assign-$_"
+                        Reason  = 'test'
+                        Desired = [pscustomobject]@{ PolicyId = $_; Policy = [pscustomobject]@{ name = $_ } }
+                        Tenant  = $null
+                    }
+                })
+            $planByPolicy = @($stubPlan | Group-Object { [string]$_.Desired.PolicyId })
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+            $null = $context, $tenantAssignments, $finalAssignmentsByPolicy, $planByPolicy, $ShouldProcessStub
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null | Out-Null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = @($attempted); Reported = @($reported); Thrown = $thrown }
+        }
+    }
+
+    It 'attempts every policy PUT after a failure (no first-failure abort)' {
+        $r = Invoke-PutRegion -Policies @('p1', 'p2', 'p3') -Fail @('p1')
+        @($r.Attempted) | Should -Be @('p1', 'p2', 'p3')
+    }
+    It 'reports each failed policy with the tenant''s own error text' {
+        $r = Invoke-PutRegion -Policies @('p1', 'p2') -Fail @('p2')
+        @($r.Reported).Count | Should -Be 1
+        $r.Reported[0] | Should -Match 'PolicyUpdateException on p2'
+    }
+    It 'throws one aggregate naming every failed policy (non-zero exit preserved)' {
+        $r = Invoke-PutRegion -Policies @('p1', 'p2', 'p3') -Fail @('p1', 'p3')
+        $r.Thrown | Should -Match "policy 'p1'"
+        $r.Thrown | Should -Match "policy 'p3'"
+        $r.Thrown | Should -Match '2 Unified Catalog policy update'
+    }
+    It 'throws nothing when every PUT succeeds' {
+        $r = Invoke-PutRegion -Policies @('p1', 'p2')
+        $r.Thrown   | Should -BeNullOrEmpty
+        @($r.Reported).Count | Should -Be 0
+    }
+    It 'keeps the PUT behind a ShouldProcess gate (substitution non-vacuous)' {
+        $script:ReporterShouldProcessCount | Should -BeGreaterThan 0
+    }
+    It 'carries the reporter and the aggregate throw in the lifted region (mutation check vs pre-batch first-failure abort)' {
+        $script:ReporterRegion | Should -Match 'Write-PruneFailure'
+        $script:ReporterRegion | Should -Match 'throw'
+        $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}

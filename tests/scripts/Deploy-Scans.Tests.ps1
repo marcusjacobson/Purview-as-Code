@@ -718,3 +718,115 @@ Describe 'ADR 0053 -- -OverwriteForeignAuthor (Deploy-Scans.ps1)' {
         }
     }
 }
+
+Describe 'Prune failure reporter wiring, guard 2 deliberately absent (issue #13, batch 2)' {
+
+    # Deploy-Scans is REPORTER-ONLY. A scan/trigger teardown legitimately prunes
+    # a majority (deleting a data source's whole scan set), so the sanity-ratio
+    # guard does not fit and is intentionally NOT wired (owner decision). This
+    # Describe pins both the reporter's presence and guard 2's absence.
+    # Reference: issue #13
+
+    BeforeAll {
+        $script:ScSource = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:ScSource | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+    It 'still calls guard 1 (empty-desired-set) -- earlier rollout not regressed' {
+        $script:ScSource | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+    It 'wires the failure reporter' {
+        $script:ScSource | Should -Match 'Write-PruneFailure'
+    }
+    It 'does NOT wire the sanity-ratio guard (majority prune is legitimate here)' {
+        # Anchored on the call site (name + line-continuation), so the
+        # explanatory mention of the cmdlet in the script comment does not
+        # trip this -- only an actual invocation would.
+        $script:ScSource | Should -Not -Match 'Assert-PruneRatioWithinThreshold\s+`'
+    }
+    It 'does NOT surface -AllowMajorityPrune or -MaxPruneRatio' {
+        $script:ScSource | Should -Not -Match '\$AllowMajorityPrune'
+        $script:ScSource | Should -Not -Match '\$MaxPruneRatio'
+    }
+}
+
+Describe 'Prune failure reporting executed through the script wiring (issue #13, batch 2)' {
+
+    BeforeAll {
+        $script:RepLines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $s = -1
+        for ($i = 0; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*\$pruneFailures = New-Object') { $s = $i; break }
+        }
+        if ($s -lt 0) { throw 'Could not locate the $pruneFailures declaration in Deploy-Scans.ps1; update the anchor in this test.' }
+        $ifStart = -1
+        for ($i = $s; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*if \(\$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
+        }
+        if ($ifStart -lt 0) { throw 'Could not locate the aggregate-throw block in Deploy-Scans.ps1; update the anchor in this test.' }
+        $depth = 0; $e = -1
+        for ($j = $ifStart; $j -lt $script:RepLines.Count; $j++) {
+            $depth += ([regex]::Matches($script:RepLines[$j], '\{')).Count
+            $depth -= ([regex]::Matches($script:RepLines[$j], '\}')).Count
+            if ($depth -le 0) { $e = $j; break }
+        }
+        $script:ReporterRegion = ($script:RepLines[$s..$e] -join [Environment]::NewLine)
+        $script:ReporterShouldProcessCount = ([regex]::Matches($script:ReporterRegion, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:ReporterRunnable = $script:ReporterRegion -replace '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        function Invoke-PruneRegion {
+            param([string[]]$Names = @(), [string[]]$Fail = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            function Invoke-ScanRulesetDelete {
+                param([string]$Name)
+                $attempted.Add($Name)
+                if ($Fail -contains $Name) { throw "TenantBlockerException: $Name" }
+            }
+            function Format-PurviewRestError { param($ErrorRecord) $ErrorRecord.Exception.Message }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            $PruneMissing = [switch]$true
+            $report = New-Object 'System.Collections.Generic.List[object]'
+            $plan = @($Names | ForEach-Object { [pscustomobject]@{ Kind = 'ScanRuleset'; Action = 'Orphan'; Name = $_ } })
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+            $null = $PruneMissing, $report, $plan, $ShouldProcessStub
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = $attempted.ToArray(); Reported = $reported.ToArray(); Thrown = $thrown }
+        }
+    }
+
+    It 'attempts every remaining orphan after one fails (loop no longer aborts)' {
+        $r = Invoke-PruneRegion -Names @('a', 'b', 'c') -Fail @('a')
+        $r.Attempted | Should -Be @('a', 'b', 'c')
+    }
+    It 'reports each individual failure with the tenant error message' {
+        $r = Invoke-PruneRegion -Names @('a', 'b') -Fail @('a', 'b')
+        $r.Reported.Count | Should -Be 2
+        ($r.Reported -join '; ') | Should -Match 'TenantBlockerException: a'
+        ($r.Reported -join '; ') | Should -Match 'TenantBlockerException: b'
+    }
+    It 'throws one aggregate naming every failure (the fix: exit-0 -> non-zero)' {
+        $r = Invoke-PruneRegion -Names @('a', 'b', 'c') -Fail @('b', 'c')
+        $r.Thrown | Should -Not -BeNullOrEmpty
+        $r.Thrown | Should -Match 'Reconciliation aborted'
+        $r.Thrown | Should -Match 'b'
+        $r.Thrown | Should -Match 'c'
+    }
+    It 'throws nothing when every prune succeeds' {
+        $r = Invoke-PruneRegion -Names @('a', 'b')
+        $r.Thrown   | Should -BeNullOrEmpty
+        $r.Reported | Should -BeNullOrEmpty
+    }
+    It 'keeps the prune loop behind a ShouldProcess gate (substitution non-vacuous)' {
+        $script:ReporterShouldProcessCount | Should -BeGreaterThan 0
+    }
+    It 'carries the aggregate throw and reporter in the lifted region (mutation check vs pre-batch exit-0)' {
+        $script:ReporterRegion | Should -Match 'throw'
+        $script:ReporterRegion | Should -Match 'Write-PruneFailure'
+        $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}

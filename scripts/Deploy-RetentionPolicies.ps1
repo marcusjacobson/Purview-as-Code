@@ -89,6 +89,38 @@
     Allow removal of tenant retention policies and rules that are not
     declared in the YAML. Default $false.
 
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against
+        `policies: []` would classify the entire live set as orphaned.
+      * The prune must not exceed `-MaxPruneRatio` of the live objects
+        without `-AllowMajorityPrune`. The ratio is checked PER TIER --
+        the full rule blast radius (orphan rules under desired policies
+        PLUS every rule removed with an orphan parent) against live
+        rules, and orphan policies against live policies -- because a
+        blended ratio can mask a single-collection wipe. Not enforced
+        under `-DirectionPolicy audit`, which never writes.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live retention rules (including rules removed with an orphan
+    parent policy), or of the live retention policies, is refused before
+    any write. Supply it when a large prune is genuinely intended (a
+    deliberate consolidation); the ratio is then reported as a warning
+    and the run proceeds. Has no effect on the empty-desired-set guard,
+    which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest per-tier share of the live objects `-PruneMissing` may
+    delete without `-AllowMajorityPrune`, as a fraction in (0, 1].
+    Default 0.5. A prune exactly at the threshold passes; only a
+    strictly larger share is refused. Set to 1 to disable the ratio
+    guard for a single run.
+
 .PARAMETER Force
     With -ExportCurrentState: allow overwriting a `policies:` block that
     already contains entries.
@@ -215,6 +247,13 @@ param(
 
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -713,6 +752,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -823,6 +869,25 @@ if ($mode -eq 'Apply') {
         $desiredEntries = @($desiredRoot.policies | ForEach-Object { ConvertTo-DesiredRetentionPolicyHash -Entry ([hashtable]$_) })
     }
     Write-Information ("Desired policies: {0}" -f $desiredEntries.Count) -InformationAction Continue
+
+    # Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+    #
+    # With zero desired entries every live tenant retention policy falls out of
+    # the orphan match below, so the run would classify the entire set as
+    # orphans and delete it. The rationale, the likely causes, and the
+    # 2026-07-19 production hit are documented in scripts/modules/PruneGuard.psm1.
+    #
+    # This whole block is Apply-only, so reaching it already implies Apply mode.
+    # Placed in the desired-state load region so it fires before the tenant is
+    # contacted at all -- before `az account show`, before Connect-IPPSSession,
+    # and before any write phase.
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneDesiredSetNotEmpty `
+            -DesiredCount   $desiredEntries.Count `
+            -ObjectTypeNoun 'retention policy' `
+            -SourcePath     $Path `
+            -CollectionKey  'policies'
+    }
 }
 
 #endregion
@@ -1160,6 +1225,41 @@ try {
             $pruneTargets += ("rule '{0}\{1}'" -f $row.Name, [string]$cr.Name)
         }
     }
+    # ---- Issue #13, guard 2: prune sanity ratio (per tier) ----
+    # Guard 1 (desired-state load region) catches only the total wipe. This
+    # catches the near-total one: a retention-policies.yaml that lost most of
+    # its entries to a bad merge, or a -Path pointing at a smaller
+    # environment's file, both of which leave a non-zero desired count and so
+    # clear guard 1.
+    #
+    # The ratio is checked PER TIER -- the full rule blast radius (derived
+    # from the SAME $pruneTargets the ADR 0052 prompt reads, so the guard and
+    # the prompt cannot disagree: orphan rules under desired policies PLUS
+    # every rule removed with an orphan parent) against the live rules, and
+    # orphan policies against the live policies -- because a blended ratio
+    # can mask a single-collection wipe. Fires before the ADR 0052 gate: the
+    # last point at which nothing has been written.
+    #
+    # AUDIT TRAP: this script implements audit by flipping $WhatIfPreference;
+    # the prune targets stay populated, so without the explicit audit gate a
+    # read-only `-DirectionPolicy audit -PruneMissing` run would be refused
+    # for a delete it can never perform.
+    # Reference: scripts/modules/PruneGuard.psm1
+    if ($PruneMissing.IsPresent -and $DirectionPolicy -ne 'audit') {
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     @($pruneTargets | Where-Object { $_ -like "rule '*" }).Count `
+            -LiveCount      @($tenantRules).Count `
+            -ObjectTypeNoun 'retention rule' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     @($policyPlan | Where-Object { $_.Action -eq 'Orphan' }).Count `
+            -LiveCount      @($tenantPolicies).Count `
+            -ObjectTypeNoun 'retention policy' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
+    }
+
     if ($PruneMissing.IsPresent -and $pruneTargets.Count -gt 0) {
         $pruneNames = @($pruneTargets | Sort-Object -Unique)
         $pruneQuery = "-PruneMissing will DELETE {0} orphan retention object(s) from the tenant: {1}. This cannot be undone. Continue?" -f `
@@ -1266,6 +1366,17 @@ try {
     # $desiredRuleKeys is computed once, above the ADR 0052 prune gate, which
     # names these same rules to the operator. One definition, so the prompt and
     # the deletes cannot disagree.
+    $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+    # Issue #13: in-loop prune failures keep their 'Failed' report row AND are
+    # reported via Write-PruneFailure (scripts/modules/PruneGuard.psm1), which
+    # uses Write-Warning plus an '::error::' workflow command rather than
+    # Write-Error. Previously the catch added the row and moved on, so a
+    # failed prune exited 0. The aggregate `throw` after the policy orphan
+    # loop -- inside this try, so the finally still disconnects -- is the
+    # terminal outcome, so a failed prune now exits non-zero after every
+    # orphan has been attempted.
+
     foreach ($key in $tenantRuleByKey.Keys) {
         if ($desiredRuleKeys -contains $key) { continue }
         $tr = $tenantRuleByKey[$key]
@@ -1284,6 +1395,9 @@ try {
                         $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Rule'; Name = $key; Reason = 'Tenant-only; removed (-PruneMissing).' }) | Out-Null
                     } catch {
                         $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Rule'; Name = $key; Reason = ('Remove failed: {0}' -f $_.Exception.Message) }) | Out-Null
+                        Write-PruneFailure ("Remove-RetentionComplianceRule '{0}' failed: {1}" -f $key, $_.Exception.Message)
+                        $pruneFailures.Add(("rule '{0}'" -f $key))
+                        continue
                     }
                 } else {
                     $report.Add([pscustomobject]@{ Category = 'WhatIf'; Kind = 'Rule'; Name = $key; Reason = 'Would remove: tenant-only orphan.' }) | Out-Null
@@ -1309,6 +1423,9 @@ try {
                         $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Rule'; Name = $ruleKey; Reason = 'Removed as part of orphan parent policy.' }) | Out-Null
                     } catch {
                         $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Rule'; Name = $ruleKey; Reason = ('Remove failed: {0}' -f $_.Exception.Message) }) | Out-Null
+                        Write-PruneFailure ("Remove-RetentionComplianceRule '{0}' (orphan parent) failed: {1}" -f $ruleKey, $_.Exception.Message)
+                        $pruneFailures.Add(("rule '{0}'" -f $ruleKey))
+                        continue
                     }
                 } else {
                     $report.Add([pscustomobject]@{ Category = 'WhatIf'; Kind = 'Rule'; Name = $ruleKey; Reason = 'Would remove with parent.' }) | Out-Null
@@ -1321,6 +1438,9 @@ try {
                     $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Policy'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
                 } catch {
                     $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Policy'; Name = $row.Name; Reason = ('Remove failed: {0}' -f $_.Exception.Message) }) | Out-Null
+                    Write-PruneFailure ("Remove-RetentionCompliancePolicy '{0}' failed: {1}" -f $row.Name, $_.Exception.Message)
+                    $pruneFailures.Add(("policy '{0}'" -f $row.Name))
+                    continue
                 }
             } else {
                 $report.Add([pscustomobject]@{ Category = 'WhatIf'; Kind = 'Policy'; Name = $row.Name; Reason = 'Would remove: tenant-only orphan.' }) | Out-Null
@@ -1328,6 +1448,10 @@ try {
         } else {
             $report.Add([pscustomobject]@{ Category = 'Orphan'; Kind = 'Policy'; Name = $row.Name; Reason = $row.Reason }) | Out-Null
         }
+    }
+
+    if ($pruneFailures.Count -gt 0) {
+        throw ("Reconciliation aborted: {0} orphan retention object(s) could not be removed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
     }
 }
 finally {

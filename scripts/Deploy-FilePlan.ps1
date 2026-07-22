@@ -652,6 +652,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -827,6 +834,36 @@ if ($mode -eq 'Apply') {
     $desiredCounts = ($script:PropertyKinds | ForEach-Object { "{0}={1}" -f $_.Yaml, @($desiredPropertiesByKind[$_.Yaml]).Count }) -join ', '
     Write-Information ("Desired props   : {0}" -f $desiredCounts) -InformationAction Continue
     Write-Information ("Desired labels  : {0}" -f $desiredLabels.Count) -InformationAction Continue
+
+    # Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+    #
+    # This reconciler manages several collections -- one file plan property
+    # collection per kind in $script:PropertyKinds (categories, subCategories,
+    # citations, departments, authorities) plus retentionLabels -- so the guard
+    # is keyed on their TOTAL. A prune is only catastrophic when NOTHING at all
+    # is declared; a file that legitimately declares labels but no properties
+    # (or only some property kinds) must still be prunable.
+    #
+    # With a zero total, every live file plan property and retention label falls
+    # out of the orphan match below and the run would delete the whole set. The
+    # rationale, the likely causes, and the 2026-07-19 production hit are
+    # documented in scripts/modules/PruneGuard.psm1.
+    #
+    # This whole block is Apply-only, so reaching it already implies Apply mode.
+    # Placed in the desired-state load region so it fires before the tenant is
+    # contacted at all -- before `az account show`, before Connect-IPPSSession,
+    # and before any write phase.
+    if ($PruneMissing.IsPresent) {
+        $desiredTotal = $desiredLabels.Count
+        foreach ($kind in $script:PropertyKinds) {
+            $desiredTotal += @($desiredPropertiesByKind[$kind.Yaml]).Count
+        }
+        Assert-PruneDesiredSetNotEmpty `
+            -DesiredCount   $desiredTotal `
+            -ObjectTypeNoun 'file plan property or retention label' `
+            -SourcePath     $Path `
+            -CollectionKey  'filePlanProperties/retentionLabels'
+    }
 }
 
 #endregion
@@ -1222,6 +1259,19 @@ try {
     }
 
     # ---- Prune (labels first, then properties; subCategories before categories) --
+    $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+    # Issue #13: in-loop prune failures keep their 'Failed' report row AND are
+    # reported via Write-PruneFailure (scripts/modules/PruneGuard.psm1), which
+    # uses Write-Warning plus an '::error::' workflow command rather than
+    # Write-Error. Previously the catch added the row and moved on, so a
+    # failed prune exited 0. The aggregate `throw` after the prune region --
+    # inside this try, so the finally still disconnects -- is the terminal
+    # outcome, so a failed prune now exits non-zero after every orphan has
+    # been attempted. The issue #13 ratio guard (guard 2) is deliberately NOT
+    # wired here: a file-plan teardown legitimately prunes a majority of the
+    # property buckets (owner decision), so only guard 1 and this reporter
+    # protect the prune path.
     if ($PruneMissing.IsPresent) {
         foreach ($row in ($labelPlan | Where-Object { $_.Action -eq 'Orphan' })) {
             $target = "Retention label '{0}'" -f $row.Name
@@ -1233,6 +1283,9 @@ try {
                     $report.Add([pscustomobject]@{ Category='Removed'; Kind='Label'; Name=$row.Name; Reason='Pruned tenant-only label.' }) | Out-Null
                 } catch {
                     $report.Add([pscustomobject]@{ Category='Failed'; Kind='Label'; Name=$row.Name; Reason=("Remove failed: {0}" -f $_.Exception.Message) }) | Out-Null
+                    Write-PruneFailure ("Remove-ComplianceTag '{0}' failed: {1}" -f $row.Name, $_.Exception.Message)
+                    $pruneFailures.Add(("label '{0}'" -f $row.Name))
+                    continue
                 }
             } else {
                 $report.Add([pscustomobject]@{ Category='WhatIf'; Kind='Label'; Name=$row.Name; Reason=("Would remove: {0}" -f $opDesc) }) | Out-Null
@@ -1252,6 +1305,9 @@ try {
                         $report.Add([pscustomobject]@{ Category='Removed'; Kind=$kind.Display; Name=$row.Name; Reason='Pruned tenant-only property.' }) | Out-Null
                     } catch {
                         $report.Add([pscustomobject]@{ Category='Failed'; Kind=$kind.Display; Name=$row.Name; Reason=("{0} failed: {1}" -f $removeCmd, $_.Exception.Message) }) | Out-Null
+                        Write-PruneFailure ("{0} '{1}' failed: {2}" -f $removeCmd, $row.Name, $_.Exception.Message)
+                        $pruneFailures.Add(("{0} '{1}'" -f $kind.Display, $row.Name))
+                        continue
                     }
                 } else {
                     $report.Add([pscustomobject]@{ Category='WhatIf'; Kind=$kind.Display; Name=$row.Name; Reason=("Would remove: {0}" -f $opDesc) }) | Out-Null
@@ -1265,6 +1321,10 @@ try {
         foreach ($row in ($propertyPlan | Where-Object { $_.Action -eq 'Orphan' })) {
             $report.Add([pscustomobject]@{ Category='Orphan'; Kind=$row.Kind.Display; Name=$row.Name; Reason=$row.Reason }) | Out-Null
         }
+    }
+
+    if ($pruneFailures.Count -gt 0) {
+        throw ("Reconciliation aborted: {0} orphan file plan object(s) could not be removed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
     }
 }
 finally {

@@ -64,9 +64,14 @@
       * Role groups NOT listed in the YAML are left untouched. The
         reconciler does not attempt to enumerate every tenant role group.
       * Within a listed role group, only members whose
-        `ExternalDirectoryObjectId` matches an Entra group OID are
-        considered. User members, on-prem recipients (no Entra OID), and
-        non-group principals are ignored on read and never written.
+        `RecipientTypeDetails` is `MailNonUniversalGroup` or
+        `MailUniversalSecurityGroup` (the documented Entra-security-group
+        values -- issue #57; `'Group'` is not a real value in this enum
+        under any auth mode) are considered a group member. The Entra
+        objectId is read from `ExternalDirectoryObjectId` when populated,
+        otherwise resolved via the same displayName-resolution helper
+        used for `members:` entries (ADR 0023 Category 3). User members
+        and non-group principals are ignored on read and never written.
         Enforces security instruction rule #4 (least privilege -- assign
         to groups, not users).
       * `-PruneMissing` is required to revoke Entra-group members that are
@@ -397,6 +402,13 @@ Import-Module $module -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -490,6 +502,25 @@ $desiredRoot = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Yaml
 $desiredRoleGroups = @()
 if ($desiredRoot -and $desiredRoot.ContainsKey('roleGroups') -and $desiredRoot.roleGroups) {
     $desiredRoleGroups = @($desiredRoot.roleGroups)
+}
+
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# With zero desired entries every live custom Purview role group falls out of
+# the orphan match below, so the run would classify the entire set as orphans
+# and delete it -- revoking every permission those groups conferred. The
+# rationale, the likely causes, and the 2026-07-19 production hit are
+# documented in scripts/modules/PruneGuard.psm1.
+#
+# Placed in the desired-state load region so it fires before the tenant is
+# contacted at all -- before `az account show`, before Connect-IPPSSession,
+# and before any write phase.
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desiredRoleGroups.Count `
+        -ObjectTypeNoun 'role group' `
+        -SourcePath     $Path `
+        -CollectionKey  'roleGroups'
 }
 
 # Validate desired state: every member must be a parseable GUID. User
@@ -619,6 +650,17 @@ try {
         Write-Information ("Connected to Security & Compliance PowerShell as app '{0}'." -f $DataPlaneAppDisplayName) -InformationAction Continue
     }
 
+    # Resolve the ADR 0023 Category 3 helper (issue #95) used to turn a
+    # displayName-shape `members:` entry -- and, per issue #57, a tenant
+    # member row whose `ExternalDirectoryObjectId` is blank -- into an
+    # Entra objectId. Checked once, up front, shared by both -Export and
+    # -Apply below, so a missing helper fails loudly before any read.
+    $resolvePrincipalScript = Join-Path $scriptRoot 'Get-EntraPrincipalIdByDisplayName.ps1'
+    if (-not (Test-Path -LiteralPath $resolvePrincipalScript)) {
+        Write-Error ("Helper not found: '{0}'." -f $resolvePrincipalScript)
+        return
+    }
+
     if ($mode -eq 'Export') {
 
         #region -ExportCurrentState
@@ -666,10 +708,38 @@ try {
             # raw-OID shape with a warning rather than being dropped.
             $seenOids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $memberEntries = New-Object 'System.Collections.Generic.List[hashtable]'
-            foreach ($m in ($members | Where-Object { $_.RecipientTypeDetails -eq 'Group' -and $_.ExternalDirectoryObjectId } | Sort-Object Name)) {
-                $oid = [string]$m.ExternalDirectoryObjectId
-                if (-not $seenOids.Add($oid)) { continue }
+            # Issue #57: `RecipientTypeDetails -eq 'Group'` is not a real
+            # value in Microsoft's documented enum (Get-Recipient /
+            # Get-RoleGroupMember) under any auth mode -- this filter has
+            # never matched a real Entra security group. The documented
+            # values are 'MailNonUniversalGroup' and
+            # 'MailUniversalSecurityGroup'.
+            # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-recipient?view=exchange-ps
+            foreach ($m in ($members | Where-Object { $_.RecipientTypeDetails -in @('MailNonUniversalGroup', 'MailUniversalSecurityGroup') } | Sort-Object Name)) {
                 $memberDisplayName = [string]$m.Name
+                $oid = [string]$m.ExternalDirectoryObjectId
+                if ([string]::IsNullOrWhiteSpace($oid)) {
+                    # Issue #57: `ExternalDirectoryObjectId` is empirically
+                    # blank for `MailNonUniversalGroup` rows -- Microsoft's
+                    # docs do not document population rules for this
+                    # property on Get-RoleGroupMember output, so it cannot
+                    # be trusted directly. Resolve the real Entra objectId
+                    # via the same displayName-resolution helper every
+                    # other reconciler in this repo uses (ADR 0023
+                    # Category 3), rather than inventing a new mechanism.
+                    if ([string]::IsNullOrWhiteSpace($memberDisplayName)) {
+                        Write-Warning ("Role group '{0}': a member had both a blank displayName and a blank ExternalDirectoryObjectId during export; skipping (cannot identify the principal). Reference: docs/adr/0023-identifier-resolution.md." -f $rg.Name)
+                        continue
+                    }
+                    try {
+                        $oid = & $resolvePrincipalScript -DisplayName $memberDisplayName -Kind 'Group'
+                    }
+                    catch {
+                        Write-Warning ("Role group '{0}': failed to resolve member '{1}' to an Entra group objectId during export: {2}. Skipping this member." -f $rg.Name, $memberDisplayName, $_.Exception.Message)
+                        continue
+                    }
+                }
+                if (-not $seenOids.Add($oid)) { continue }
                 if ([string]::IsNullOrWhiteSpace($memberDisplayName)) {
                     Write-Warning ("Role group '{0}': a member's displayName was blank during export; exporting the raw object ID instead (legacy-but-supported shape). Reference: docs/adr/0023-identifier-resolution.md." -f $rg.Name)
                     $memberEntries.Add(@{ Shape = 'oid'; Value = $oid })
@@ -678,7 +748,7 @@ try {
                     $memberEntries.Add(@{ Shape = 'displayName'; Value = $memberDisplayName })
                 }
             }
-            $userCount = @($members | Where-Object { $_.RecipientTypeDetails -ne 'Group' }).Count
+            $userCount = @($members | Where-Object { $_.RecipientTypeDetails -notin @('MailNonUniversalGroup', 'MailUniversalSecurityGroup') }).Count
             $entry = @{
                 name        = [string]$rg.Name
                 description = "Exported from $TenantDomain on $exportStamp."
@@ -783,15 +853,6 @@ try {
         return @()
     }
 
-    # Resolve the ADR 0023 Category 3 helper (issue #95) used to turn a
-    # displayName-shape `members:` entry into an objectId. Checked once,
-    # up front, so a missing helper fails loudly before any Phase 1 read.
-    $resolvePrincipalScript = Join-Path $scriptRoot 'Get-EntraPrincipalIdByDisplayName.ps1'
-    if (-not (Test-Path -LiteralPath $resolvePrincipalScript)) {
-        Write-Error ("Helper not found: '{0}'." -f $resolvePrincipalScript)
-        return
-    }
-
     # ---- Phase 1: Read + categorize ----
     $plan = New-Object 'System.Collections.Generic.List[object]'
     foreach ($rg in $desiredRoleGroups) {
@@ -807,10 +868,10 @@ try {
         $desiredMembers = @()
         if ($rg.ContainsKey('members') -and $rg.members) {
             try {
-                $desiredMembers = @(Resolve-DesiredRoleGroupMemberIds -Members @($rg.members) -Resolver {
-                        param($displayName)
-                        & $resolvePrincipalScript -DisplayName $displayName -Kind 'Group'
-                    })
+                $desiredMembers = Resolve-DesiredRoleGroupMemberIds -Members @($rg.members) -Resolver {
+                    param($displayName)
+                    & $resolvePrincipalScript -DisplayName $displayName -Kind 'Group'
+                }
             }
             catch {
                 Write-Error ("Failed to resolve declared member(s) for role group '{0}': {1}" -f $rgName, $_.Exception.Message)
@@ -827,26 +888,62 @@ try {
             return
         }
 
-        # Read-phase diagnostic (issue #401): when the app-only IPPS session
-        # returns membership with stripped RecipientTypeDetails or null
-        # ExternalDirectoryObjectId, the filter below silently drops every
-        # row and the empty $tenantGroupOids breaks both Revoke detection
-        # (empty $desiredSet ∩ empty $tenantSet = no plan row) and Create
+        # Read-phase diagnostic: the '#401' reference this comment
+        # previously carried was a dead issue number (never existed in
+        # this repo or upstream). The real, confirmed root cause was
+        # issue #57 -- the `RecipientTypeDetails -eq 'Group'` filter
+        # below never matched any real Entra group, so $tenantGroupOids
+        # was always empty, which broke both Revoke detection (empty
+        # $desiredSet ∩ empty $tenantSet = no plan row) and Create
         # accounting (everything reported as Create then downgraded to
-        # NoChange via MemberAlreadyExistsException). Visible with -Verbose
-        # or ACTIONS_STEP_DEBUG=true in CI.
+        # NoChange via MemberAlreadyExistsException). Fixed per issue #57;
+        # this raw-row dump remains useful for diagnosing any future
+        # classification drift. Visible with -Verbose or
+        # ACTIONS_STEP_DEBUG=true in CI.
         Write-Verbose ("[read] '{0}': Get-RoleGroupMember returned {1} raw member(s)." -f $rgName, $tenantMembers.Count)
         foreach ($m in $tenantMembers) {
             Write-Verbose ("[read] '{0}': member Name='{1}' RecipientTypeDetails='{2}' ExternalDirectoryObjectId='{3}'" -f $rgName, $m.Name, $m.RecipientTypeDetails, $m.ExternalDirectoryObjectId)
         }
 
         # Match domain: only tenant members that are Entra security
-        # groups with a non-null ExternalDirectoryObjectId. Anything else
-        # (users, on-prem recipients) is ignored on read and never
-        # written.
-        $tenantGroupOids = @($tenantMembers |
-            Where-Object { $_.RecipientTypeDetails -eq 'Group' -and $_.ExternalDirectoryObjectId } |
-            Select-Object -ExpandProperty ExternalDirectoryObjectId -Unique)
+        # groups. Anything else (users, on-prem recipients) is ignored on
+        # read and never written.
+        #
+        # Issue #57: `RecipientTypeDetails -eq 'Group'` is not a real
+        # value in Microsoft's documented enum (Get-Recipient /
+        # Get-RoleGroupMember) under any auth mode -- the documented
+        # values are 'MailNonUniversalGroup' and
+        # 'MailUniversalSecurityGroup'. This filter has never matched a
+        # real Entra group, permanently defeating idempotency. Also,
+        # `ExternalDirectoryObjectId` is empirically blank for
+        # `MailNonUniversalGroup` rows and its population rules are not
+        # documented for Get-RoleGroupMember output, so it cannot be
+        # trusted directly: fall back to the same displayName-resolution
+        # helper used for desired members above (only when
+        # ExternalDirectoryObjectId is genuinely populated do we skip the
+        # extra Graph round-trip).
+        # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-recipient?view=exchange-ps
+        $tenantGroupMemberRows = @($tenantMembers | Where-Object { $_.RecipientTypeDetails -in @('MailNonUniversalGroup', 'MailUniversalSecurityGroup') })
+        $tenantOidSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($gm in $tenantGroupMemberRows) {
+            $gmOid = [string]$gm.ExternalDirectoryObjectId
+            if ([string]::IsNullOrWhiteSpace($gmOid)) {
+                $gmDisplayName = [string]$gm.Name
+                if ([string]::IsNullOrWhiteSpace($gmDisplayName)) {
+                    Write-Warning ("[read] '{0}': a tenant group member had both a blank ExternalDirectoryObjectId and a blank Name; cannot resolve, skipping." -f $rgName)
+                    continue
+                }
+                try {
+                    $gmOid = & $resolvePrincipalScript -DisplayName $gmDisplayName -Kind 'Group'
+                }
+                catch {
+                    Write-Error ("Failed to resolve tenant role-group member '{0}' (role group '{1}') to an Entra group objectId: {2}" -f $gmDisplayName, $rgName, $_.Exception.Message)
+                    return
+                }
+            }
+            [void]$tenantOidSet.Add($gmOid)
+        }
+        $tenantGroupOids = @($tenantOidSet)
         Write-Verbose ("[read] '{0}': after filter, {1} Entra group OID(s) remain." -f $rgName, $tenantGroupOids.Count)
 
         $desiredSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1006,6 +1103,23 @@ try {
     }
 
     # ---- Phase 3: Write ----
+    $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+    # Issue #13: in-loop revoke failures are reported via Write-PruneFailure
+    # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+    # '::error::' workflow command rather than Write-Error. The revoke catch
+    # previously did Write-Error + return, which under shell: pwsh's
+    # $ErrorActionPreference='stop' terminated the run on the first failed
+    # revoke so the rest were never attempted. The aggregate `throw` after the
+    # Phase 3 loop -- inside the enclosing try, so the finally still
+    # disconnects the IPPS session -- is the terminal outcome, so a failed
+    # prune still exits non-zero. Principal object IDs are never named (the
+    # '<oid>' redaction the drift report already uses): the reporter names the
+    # role group plus the tenant's own error text only. The issue #13 ratio
+    # guard (guard 2) is deliberately NOT wired here: role-group membership
+    # churn is legitimately high-ratio and this reconciler does not capture a
+    # single live-member denominator (owner decision), so only guard 1 and
+    # this reporter protect the revoke path.
     foreach ($entry in $plan) {
         $rgName = $entry.RoleGroup
 
@@ -1090,11 +1204,18 @@ try {
                         Write-Information ("Role group '{0}' did not contain the member; treating as no-op." -f $rgName) -InformationAction Continue
                         continue
                     }
-                    Write-Error ("Remove-RoleGroupMember -Identity '{0}' failed: {1}" -f $rgName, $_.Exception.Message)
-                    return
+                    $reportRow.Category = 'Failed'
+                    $reportRow.Reason   = ('Revoke failed: {0}' -f $_.Exception.Message)
+                    Write-PruneFailure ("Remove-RoleGroupMember -Identity '{0}' failed: {1}" -f $rgName, $_.Exception.Message)
+                    $pruneFailures.Add(("{0} :: <oid>" -f $rgName))
+                    continue
                 }
             }
         }
+    }
+
+    if ($pruneFailures.Count -gt 0) {
+        throw ("Reconciliation aborted: {0} role-group member revoke(s) failed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
     }
 
     #endregion

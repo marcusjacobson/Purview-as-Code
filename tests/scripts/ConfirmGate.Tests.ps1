@@ -251,7 +251,7 @@ BeforeAll {
     # already declared here. A script gated without an entry here FAILS -- you
     # must state its class, not infer it.
     $script:DestructiveBranchCount = @{
-        # ---- Class A (16) : overwrite + prune ----
+        # ---- Class A (17) : overwrite + prune ----
         'Deploy-AdaptiveScopes.ps1'               = 2
         'Deploy-AutoLabelPolicies.ps1'            = 2
         'Deploy-Collections.ps1'                  = 2
@@ -264,6 +264,7 @@ BeforeAll {
         'Deploy-LabelPolicies.ps1'                = 2
         'Deploy-Labels.ps1'                       = 2
         'Deploy-RetentionPolicies.ps1'            = 2
+        'Deploy-SITRulePackages.ps1'              = 2
         'Deploy-Scans.ps1'                        = 2
         'Deploy-UnifiedCatalog.ps1'               = 2
         'Deploy-UnifiedCatalogPolicies.ps1'       = 2
@@ -2240,11 +2241,12 @@ Describe 'ADR 0052: CI cannot hang -- every workflow invocation of a GATED scrip
         $script:CiGated.Count | Should -BeGreaterThan 0 -Because 'the gated set is derived from the AST; zero means the derivation broke and every assertion below is vacuous'
         # The gated set is derived twice in this file (here and in the AST-contract
         # BeforeDiscovery). The completion Describe pins that they agree.
-        $script:CiGated.Count | Should -Be 22 -Because (
-            'all twenty-two destructive-capable reconcilers are gated -- #108 widened the population from a ' +
+        $script:CiGated.Count | Should -Be 23 -Because (
+            'all twenty-three destructive-capable reconcilers are gated -- #108 widened the population from a ' +
             'Deploy-*.ps1 filename glob to every script declaring -PruneMissing, adding Set-AuditRetentionPolicy.ps1 as the ' +
             '22nd; #105 then closed the last declared exception, Deploy-EntraDirectoryRoles.ps1, by restructuring it to a ' +
-            'two-phase (plan-then-apply) shape so its ADR 0052 gate can see the full revoke plan before any tenant write. ' +
+            'two-phase (plan-then-apply) shape so its ADR 0052 gate can see the full revoke plan before any tenant write; ' +
+            'issue #48 added Deploy-SITRulePackages.ps1 (custom SIT rule packages, ADR 0061) as the 23rd. ' +
             "Found: $($script:CiGated.Count) -- [$($script:CiGated -join ', ')]."
         )
     }

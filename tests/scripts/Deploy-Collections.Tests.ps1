@@ -594,3 +594,129 @@ Describe 'ADR 0029 direction-policy integration (issue #614)' {
         }
     }
 }
+
+# ---------------------------------------------------------------------------
+# Issue #13 part C batch 7 (final): the failure reporter ONLY. The ratio guard
+# (guard 2) is deliberately NOT wired -- a collection subtree teardown
+# legitimately prunes a majority (owner decision) -- and its absence is pinned
+# below. The Orphan catch previously added a 'Failed' report row and moved on,
+# so a failed prune exited 0. The reporter region is lifted from the REAL
+# script source and executed against stubs.
+# ---------------------------------------------------------------------------
+Describe 'Prune failure reporter wiring -- reporter only, guard 2 pinned absent (issue #13, batch 7)' {
+
+    BeforeAll {
+        $script:B7Source = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:B7Source | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+    It 'still calls guard 1 (empty-desired-set) -- earlier rollout not regressed' {
+        $script:B7Source | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+    It 'calls the failure reporter in the Orphan delete catch' {
+        $script:B7Source | Should -Match 'Write-PruneFailure'
+        $script:B7Source | Should -Match '\$pruneFailures'
+    }
+    It 'does NOT wire guard 2 (owner decision: subtree teardown legitimately prunes a majority)' {
+        $script:B7Source | Should -Not -Match 'Assert-PruneRatioWithinThreshold'
+    }
+    It 'does NOT acquire -AllowMajorityPrune / -MaxPruneRatio (no guard 2, no override surface)' {
+        $cmd = Get-Command -Name $script:ScriptPath -CommandType ExternalScript
+        $cmd.Parameters.Keys | Should -Not -Contain 'AllowMajorityPrune'
+        $cmd.Parameters.Keys | Should -Not -Contain 'MaxPruneRatio'
+    }
+}
+
+Describe 'Prune failure reporting executed through the script wiring (issue #13, batch 7)' {
+
+    BeforeAll {
+        $script:RepLines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $s = -1
+        for ($i = 0; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*\$pruneFailures = New-Object') { $s = $i; break }
+        }
+        if ($s -lt 0) { throw 'Could not locate the $pruneFailures declaration in Deploy-Collections.ps1; update the anchor in this test.' }
+        $ifStart = -1
+        for ($i = $s; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*if \(\$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
+        }
+        if ($ifStart -lt 0) { throw 'Could not locate the aggregate-throw block in Deploy-Collections.ps1; update the anchor in this test.' }
+        $depth = 0; $e = -1
+        for ($j = $ifStart; $j -lt $script:RepLines.Count; $j++) {
+            $depth += ([regex]::Matches($script:RepLines[$j], '\{')).Count
+            $depth -= ([regex]::Matches($script:RepLines[$j], '\}')).Count
+            if ($depth -le 0) { $e = $j; break }
+        }
+        $script:ReporterRegion = ($script:RepLines[$s..$e] -join [Environment]::NewLine)
+
+        function Invoke-PruneRegion {
+            # $Names: orphan collections (already sorted deepest-first upstream, so
+            # the plan order IS the delete order). $Fail: names whose DELETE throws.
+            # The lifted region keeps its real $PSCmdlet.ShouldProcess call; it is
+            # wrapped in a [CmdletBinding(SupportsShouldProcess)] function and run
+            # with -Confirm:$false so ShouldProcess returns $true and the deletes
+            # proceed. (A bare `& ([scriptblock]::Create ...)` runs in the module's
+            # script scope and would not see these local stubs / $plan.)
+            param([string[]]$Names = @(), [string[]]$Fail = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            function Invoke-RestMethod {
+                param($Method, $Uri, $Headers, $ErrorAction)
+                $null = $Headers, $ErrorAction
+                if ($Method -ne 'DELETE') { throw "Unexpected non-DELETE call in orphan-only run: $Method $Uri" }
+                $name = if ($Uri -match '/collections/([^?]+)') { [uri]::UnescapeDataString($matches[1]) } else { $Uri }
+                $attempted.Add($name)
+                if ($Fail -contains $name) { throw "CollectionDeleteException on $name" }
+            }
+            function Format-PurviewRestError { param($ErrorRecord, $MaxMessageLength) $null = $MaxMessageLength; [string]$ErrorRecord.Exception.Message }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            $PruneMissing = [switch]$true
+            $baseUri = 'https://unit.test/catalog/api/collections-parent'
+            $ctx = [pscustomobject]@{ DataHeaders = @{} }
+            $script:CollectionsApiVersion = '2019-11-01-preview'
+            $report = New-Object 'System.Collections.Generic.List[object]'
+            $plan = @($Names | ForEach-Object { [pscustomobject]@{ Action = 'Orphan'; Name = $_; Desired = $null; Reason = 'Tenant-only; will be removed (-PruneMissing).' } })
+            $null = $PruneMissing, $baseUri, $ctx, $report, $plan
+            $fnText = "function Invoke-CollReplay {`n[CmdletBinding(SupportsShouldProcess = `$true, ConfirmImpact = 'High')]`nparam()`n$script:ReporterRegion`n}"
+            . ([scriptblock]::Create($fnText))
+            $thrown = $null
+            try { Invoke-CollReplay -Confirm:$false 6>$null 3>$null | Out-Null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = $attempted.ToArray(); Reported = $reported.ToArray(); Thrown = $thrown; Report = $report.ToArray() }
+        }
+    }
+
+    It 'attempts every orphan delete after a failure (no first-failure abort)' {
+        $r = Invoke-PruneRegion -Names @('c1', 'c2', 'c3') -Fail @('c1')
+        @($r.Attempted) | Should -Be @('c1', 'c2', 'c3')
+    }
+    It 'still records the Failed report row for a failed delete (preserved behaviour)' {
+        $r = Invoke-PruneRegion -Names @('c1') -Fail @('c1')
+        @($r.Report | Where-Object { $_.Category -eq 'Failed' -and $_.Name -eq 'c1' }).Count | Should -Be 1
+    }
+    It 'reports each failure with the tenant''s own error text' {
+        $r = Invoke-PruneRegion -Names @('c1', 'c2') -Fail @('c2')
+        @($r.Reported).Count | Should -Be 1
+        $r.Reported[0] | Should -Match 'CollectionDeleteException on c2'
+    }
+    It 'throws one aggregate naming every failed collection (exit-0 defect fixed)' {
+        $r = Invoke-PruneRegion -Names @('c1', 'c2', 'c3') -Fail @('c1', 'c3')
+        $r.Thrown | Should -Match "collection 'c1'"
+        $r.Thrown | Should -Match "collection 'c3'"
+        $r.Thrown | Should -Match '2 orphan collection'
+    }
+    It 'throws nothing when every delete succeeds' {
+        $r = Invoke-PruneRegion -Names @('c1', 'c2')
+        $r.Thrown   | Should -BeNullOrEmpty
+        @($r.Reported).Count | Should -Be 0
+    }
+    It 'keeps the delete behind a ShouldProcess gate (the lifted region still calls it)' {
+        ([regex]::Matches($script:ReporterRegion, '\$PSCmdlet\.ShouldProcess\(')).Count | Should -BeGreaterThan 0
+    }
+    It 'carries the reporter and the aggregate throw in the lifted region (mutation check vs pre-batch exit-0)' {
+        $script:ReporterRegion | Should -Match 'Write-PruneFailure'
+        $script:ReporterRegion | Should -Match 'throw'
+        $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}

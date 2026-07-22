@@ -423,6 +423,14 @@ identifierScan:
     - path: data-plane/information-protection/labels.autoApplicationOf.fixture.yaml
       keys: [sitId]
       note: Built-in SIT IDs in the label auto-application fixture (ADR 0017).
+    - path: data-plane/classifications/sit-rule-packages.yaml
+      keys: [rulePackId, id]
+      note: >-
+        Custom SIT rule-package + entity IDs (ADR 0061). Ships an EMPTY root list per ADR 0056,
+        so it currently contributes NOTHING to the value set. Repo-authored packs use the reserved
+        synthetic namespace 00000000-0000-0000-0000-<counter>, already acquitted by syntheticShapes;
+        this (file, key) entry is future-proofing for a spin-off that ever populates real-random
+        rule-pack / entity GUIDs (the cross-tenant join key), same reasoning as dlp/policies.yaml.
     # --- examples/** (ADR 0056) ---------------------------------------------------
     # The worked examples moved OUT of data-plane/** and into examples/**, a tree no
     # workflow, script, or schema reads. They carry the same Microsoft built-in SIT and
@@ -508,6 +516,22 @@ identifierScan:
       name: File Plan property seed `Finance` department Guid (Microsoft File Plan Manager seed content)
     - value: c25c0d36-48f0-45d8-babe-521127b3fa96
       name: File Plan property seed Policy GUID (shared by all 10 Microsoft File Plan Manager seed departments)
+    # Microsoft.SCCManaged.CustomRulePack — the rule package Microsoft auto-provisions in every
+    # tenant to hold portal-created custom Sensitive Information Types. Its RulePack id is a fixed
+    # Microsoft constant, not a tenant-generated value (docs/adr/0061-custom-sit-rule-package-shape.md,
+    # issue #48). Provenance is established by the same EMPIRICAL CROSS-TENANT VERIFICATION bar as the
+    # File Plan seed GUIDs above (a stronger evidentiary standard than a bare Learn URL): on 2026-07-22,
+    # Get-DlpSensitiveInformationTypeRulePackage was run against TWO independently provisioned tenants
+    # (the operator lab and dev tenants). The RuleCollectionName `Microsoft.SCCManaged.CustomRulePack`
+    # resolved to the IDENTICAL RulePack id below in BOTH tenants, while holding DIFFERENT
+    # tenant-authored contents in each (lab: "ABA Routing Number copy"; dev: a hand-authored "Retail
+    # Loyalty ID" + "U.S. ITIN copy") — the signature of a Microsoft-provisioned fixed CONTAINER whose
+    # GUID is uniform across tenants but whose contents are tenant-local. The Learn page below documents
+    # the container by name (the target of the portal's "create a custom SIT" flow) though not the
+    # literal GUID; the cross-tenant identity is the primary provenance.
+    # https://learn.microsoft.com/en-us/purview/sit-create-a-custom-sensitive-information-type
+    - value: 5DA58D7A-25F1-4205-93D0-BEB10054C503
+      name: Microsoft.SCCManaged.CustomRulePack RulePack id (fixed portal custom-SIT container, uniform across tenants)
 
   # --- Rule 4 — REVIEW REQUIRED (quarantine) ------------------------------------
   # Identifiers of UNRESOLVED provenance. Reported as `Review` rows (loud

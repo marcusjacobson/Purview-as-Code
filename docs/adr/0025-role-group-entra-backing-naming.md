@@ -37,6 +37,8 @@ We will:
 
    The slug is also the `mailNickname`. All groups are `securityEnabled: true`, `mailEnabled: false` (security groups, not Microsoft 365 groups).
 
+   **Extended by [ADR 0062](0062-directory-role-entra-backing-naming.md)** (2026-07-22): this mechanical slug-derivation rule now also governs Entra security groups that back **Microsoft Entra directory-role** assignments in [`data-plane/entra-directory-roles/role-assignments.yaml`](../../data-plane/entra-directory-roles/role-assignments.yaml) — a different RBAC surface than this ADR's portal role groups — under the disambiguated prefix `sg-purview-directory-role-<slug>`. The `directory-role` segment exists because the bare `sg-purview-<slug>` form defined here collided live with two directory-role backing groups during [#53](../../issues/53). This ADR's own naming space and decision are unchanged.
+
 3. **Group description (mandatory):** `Backs the Microsoft Purview portal role group '<RoleGroupName>'. Managed by scripts/Deploy-RoleGroupBackingEntraGroups.ps1. See docs/adr/0025-role-group-entra-backing-naming.md.`
 
 4. **Ownership:** the automation identity (`gh-oidc-purview-data-plane` per [ADR 0010](0010-automation-identity-subject-model.md)) plus the lab-owner principal. The script accepts a `-OwnerObjectId` parameter for the lab-owner co-owner; the automation identity is added by the script's runtime context.

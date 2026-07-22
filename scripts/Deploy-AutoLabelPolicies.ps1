@@ -396,6 +396,19 @@ $script:TrackedPolicyScalarFields = @('mode', 'applyLabel')
 # the read-back value.
 $script:TrackedRuleScalarFields   = @('policy')
 
+# Default single-workload value emitted on a greenfield -ExportCurrentState
+# (no prior YAML `workload:` to preserve via Resolve-DesiredRuleWorkload).
+# `New-AutoSensitivityLabelRule -Workload` accepts only a SINGLE workload and
+# rejects the tenant-expanded multi-value readback with
+# MultipleWorkloadsNotAllowedException, and the tenant never reports the
+# operator's original single-workload input (it always expands on read). So
+# the exporter must pick a deployable convention: `Exchange` matches the
+# example manifest, the common `exchangeLocation` case, and the PR #23 lab
+# correction. Operators may adjust it post-export.
+# Issue: #24. Reference:
+# https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-autosensitivitylabelrule
+$script:DefaultExportRuleWorkload = 'Exchange'
+
 function Resolve-DesiredRuleWorkload {
     # Build a `(rule-name -> human-authored workload string)` lookup
     # from the desired-state YAML rules list, so the -ExportCurrentState
@@ -830,6 +843,15 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guards (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan, plus Write-PruneFailure,
+# the $ErrorActionPreference-safe reporter the prune loops below use so one
+# failing orphan does not hide the status of the rest. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -943,6 +965,30 @@ if ($desiredRoot) {
     if ($desiredRoot.ContainsKey('rules') -and $desiredRoot.rules) {
         $desiredRuleEntries = @($desiredRoot.rules)
     }
+}
+
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# This reconciler manages two collections -- auto-labeling policies and their
+# rules -- so the guard is keyed on their TOTAL. A prune is only catastrophic
+# when NOTHING at all is declared; a file that legitimately declares policies
+# but no rules must still be prunable.
+#
+# With a zero total, every live auto-labeling policy and rule falls out of the
+# orphan match below and the run would delete the whole set. The rationale, the
+# likely causes, and the 2026-07-19 production hit are documented in
+# scripts/modules/PruneGuard.psm1.
+#
+# Keyed on Apply specifically: this script also has a Verify mode, which does
+# not write. Placed in the desired-state load region so it fires before the
+# tenant is contacted at all -- before `az account show`, before
+# Connect-IPPSSession, and before any write phase.
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   ($desiredPolicyEntries.Count + $desiredRuleEntries.Count) `
+        -ObjectTypeNoun 'auto-labeling policy or rule' `
+        -SourcePath     $Path `
+        -CollectionKey  'policies/rules'
 }
 
 $desiredPolicyHashes = @()
@@ -1279,10 +1325,21 @@ try {
             $entry['name']     = $rh.name
             $entry['policy']   = $rh.policy
             if ($desiredWorkloadByRuleName.ContainsKey($rh.name)) {
+                # Prior YAML value exists: preserve the human-authored
+                # single workload on round-trip (issue #499). Never emit the
+                # tenant-expanded readback ($rh.workload) here.
                 $entry['workload'] = $desiredWorkloadByRuleName[$rh.name]
             }
             else {
-                $entry['workload'] = $rh.workload
+                # Greenfield: no prior YAML workload to preserve. The tenant
+                # readback ($rh.workload) is the EXPANDED multi-workload set
+                # (e.g. 'Applications|AWS|Azure|Exchange|...'), which
+                # New-AutoSensitivityLabelRule -Workload rejects with
+                # MultipleWorkloadsNotAllowedException. Emit a single
+                # deployable default instead so export -> apply (the
+                # first-run bootstrap) works. Issue #24.
+                $entry['workload'] = $script:DefaultExportRuleWorkload
+                Write-Warning ("Auto-label rule '{0}' (policy '{1}') had no prior YAML workload; defaulted the exported workload to the single value '{2}' so the export is deployable (New-AutoSensitivityLabelRule accepts only a single workload). The tenant does not report the operator's original single-workload input (it always expands on read), so review and adjust this value if a different workload was intended. Issue #24." -f $rh.name, $rh.policy, $script:DefaultExportRuleWorkload)
             }
             $ccsiList = New-Object 'System.Collections.Generic.List[System.Collections.Specialized.OrderedDictionary]'
             foreach ($triplet in $rh.ccsi) {
@@ -2005,11 +2062,30 @@ try {
         switch ($entry.Action) {
 
             'Create' {
+                # Issue #20: ConvertTo-TenantRuleHash normalizes a rule's
+                # workload to a sorted-unique PIPE-joined string (e.g.
+                # 'Applications|Exchange|SharePoint') -- that is the on-disk
+                # drift-comparison contract and must not change. But
+                # New-AutoSensitivityLabelRule -Workload is a multi-valued
+                # flags enum that accepts an array / comma-separated list and
+                # REJECTS the pipe-joined string ("Cannot convert value
+                # 'A|B|C' ... Unable to match the identifier name ... to a
+                # valid enumerator name"), so passing $d.workload raw aborts
+                # every multi-workload rule. Split the pipe-joined value back
+                # into a trimmed, non-empty string[] before the call; a
+                # single-workload value (no '|') yields a one-element array and
+                # incidental whitespace is dropped. Mirrors how $ccsiArray is
+                # pre-built above.
+                $workloadArray = @(
+                    ([string]$d.workload -split '\|') |
+                        ForEach-Object { $_.Trim() } |
+                        Where-Object { $_ }
+                )
                 # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-autosensitivitylabelrule
                 $newArgs = @{
                     Name                                = $d.name
                     Policy                              = $d.policy
-                    Workload                            = $d.workload
+                    Workload                            = $workloadArray
                     ContentContainsSensitiveInformation = $ccsiArray
                 }
                 $shouldProcessAction = 'New-AutoSensitivityLabelRule'
@@ -2089,6 +2165,20 @@ try {
     }
 
     if ($PruneMissing.IsPresent) {
+        # Issue #13: attempt EVERY orphan, collect the failures, and throw one
+        # aggregate below. In-loop failures are reported via Write-PruneFailure
+        # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+        # '::error::' workflow command rather than Write-Error. Under GitHub
+        # Actions, `shell: pwsh` sets $ErrorActionPreference='stop', so a
+        # Write-Error here would terminate on the first orphan and the rest --
+        # including every orphan POLICY -- would never be attempted, so the
+        # operator would learn about exactly one blocker per dispatch. Microsoft
+        # Purview enforces auto-label delete-blockers in layers, so multiple
+        # distinct blockers are the norm. The aggregate `throw` below remains
+        # the terminal outcome, so a failed prune still exits non-zero: only
+        # the reporting changed, not the verdict.
+        $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
         # Rules first so the parent policy is empty before its own
         # Remove call.
         foreach ($r in $orphanRules) {
@@ -2100,8 +2190,9 @@ try {
                     Write-Information ("Removed orphan auto-label rule '{0}'." -f $r.Name) -InformationAction Continue
                 }
                 catch {
-                    Write-Error ("Remove-AutoSensitivityLabelRule '{0}' failed: {1}" -f $r.Name, $_.Exception.Message)
-                    return
+                    Write-PruneFailure ("Remove-AutoSensitivityLabelRule '{0}' failed: {1}" -f $r.Name, $_.Exception.Message)
+                    $pruneFailures.Add(("rule '{0}'" -f $r.Name))
+                    continue
                 }
             }
         }
@@ -2114,10 +2205,15 @@ try {
                     Write-Information ("Removed orphan auto-label policy '{0}'." -f $p.Name) -InformationAction Continue
                 }
                 catch {
-                    Write-Error ("Remove-AutoSensitivityLabelPolicy '{0}' failed: {1}" -f $p.Name, $_.Exception.Message)
-                    return
+                    Write-PruneFailure ("Remove-AutoSensitivityLabelPolicy '{0}' failed: {1}" -f $p.Name, $_.Exception.Message)
+                    $pruneFailures.Add(("policy '{0}'" -f $p.Name))
+                    continue
                 }
             }
+        }
+
+        if ($pruneFailures.Count -gt 0) {
+            throw ("Reconciliation aborted: {0} orphan auto-label object(s) could not be removed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
         }
     }
 

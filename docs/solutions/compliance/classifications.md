@@ -6,17 +6,18 @@ Operational guide for the classification surfaces in this repo: [`scripts/Sync-S
 
 This page covers three related but distinct operations:
 
-- `Sync-SITCatalog.ps1` exports the Microsoft Purview Sensitive Information Type catalog through Security & Compliance PowerShell. It is an export-only catalog view for downstream Data Loss Prevention (DLP), label, and auto-label references.
-- `Deploy-Classifications.ps1` reconciles custom Data Map classification typedefs and scanning classification rules through Microsoft Purview REST APIs. It plans `Create`, `Update`, `NoChange`, `Orphan`, and `Conflict` rows.
+- `Sync-SITCatalog.ps1` exports the Microsoft Purview Sensitive Information Type catalog through Security & Compliance PowerShell for downstream Data Loss Prevention (DLP), label, and auto-label references. The catalog is read-only reference data (ADR 0056 carve-out 1) — built-in SITs cannot be created, edited, or deleted per-tenant, so there is no apply path. `-CompareWithTenant` adds a read-only parity check (catalog vs. live tenant by GUID: `NameDrift` / `MissingFromTenant` / `NotInCatalog`).
+- `Deploy-SITRulePackages.ps1` reconciles **custom** (tenant-authored, pattern/regex) SITs as rule packages through the `*-DlpSensitiveInformationTypeRulePackage` cmdlets, from [`data-plane/classifications/sit-rule-packages.yaml`](../../../data-plane/classifications/sit-rule-packages.yaml) + verbatim XML under `rule-packages/`. See [ADR 0061](../../adr/0061-custom-sit-rule-package-shape.md). It plans `Create` / `Update` / `NoChange` / `Orphan` / `Skip` / `Blocked`; Microsoft-managed packs (built-in, fingerprint, EDM, and the portal `Microsoft.SCCManaged.CustomRulePack` container) are out of scope.
+- `Deploy-Classifications.ps1` reconciles custom Data Map classification typedefs and scanning classification rules through Microsoft Purview REST APIs (a **different** surface from M365 compliance SITs). It plans `Create`, `Update`, `NoChange`, `Orphan`, and `Conflict` rows.
 - `Invoke-SITConfidenceAnalysis.ps1` is local-only. It reads Content Explorer export artifacts and the SIT catalog, then writes a Markdown and CSV signal-volume report.
 
 Regex classification rules must stay anchored, bounded, and synthetic. Do not paste real sample values or real data rows into YAML, docs, issues, or PR descriptions.
 
 ## Default state
 
-[`classifications.yaml`](../../../data-plane/classifications/classifications.yaml) ships with a synthetic custom classification and a regex rule for `EMP-####` employee identifiers. The pattern is anchored with word boundaries, uses bounded repetition, and includes a bounded column-name pattern.
+[`classifications.yaml`](../../../data-plane/classifications/classifications.yaml) ships **empty** (`classifications: []` / `rules: []`) per [ADR 0056](../../adr/0056-template-ships-empty-desired-state.md); its former `EMP-####` sample now lives under [`examples/data-plane/classifications/`](../../../examples/data-plane/classifications/classifications.yaml). [`sit-rule-packages.yaml`](../../../data-plane/classifications/sit-rule-packages.yaml) (custom SIT rule packages) likewise ships `rulePackages: []`, with a worked example under `examples/data-plane/classifications/`.
 
-[`sit-catalog.yaml`](../../../data-plane/classifications/sit-catalog.yaml) is the exported SIT catalog. Microsoft built-in identifiers are public catalog references; tenant-real publisher, tenant, subscription, and object identifiers are redacted to `00000000-0000-0000-0000-000000000000`.
+[`sit-catalog.yaml`](../../../data-plane/classifications/sit-catalog.yaml) is the exported SIT catalog and is the one classification file that ships **populated** (ADR 0056 carve-out 1): 327 Microsoft built-in SITs, every entry `publisher: Microsoft Corporation`. Microsoft built-in identifiers are public catalog references; tenant-real publisher, tenant, subscription, and object identifiers are redacted to `00000000-0000-0000-0000-000000000000`.
 
 ## Authentication
 
@@ -47,6 +48,7 @@ The confidence analyzer is local-only because it reads files already exported to
 | `-Path` | `data-plane/classifications/sit-catalog.yaml` |
 | `-Force` | With `-ExportCurrentState`, allows overwriting a non-empty `sits:` block. |
 | `-ExportCurrentState` | Mandatory for export; writes every visible SIT to YAML and exits. |
+| `-CompareWithTenant` | Read-only parity check; reports `NameDrift` / `MissingFromTenant` / `NotInCatalog` and exits non-zero on any name drift. No writes. |
 | `-ParametersFile` | `infra/parameters/lab.yaml` resolved from repo root. |
 | `-VaultName` | Key Vault containing the automation certificate; resolved from `-ParametersFile` when omitted. |
 | `-CertificateName` | Key Vault certificate and key object; resolved from `-ParametersFile` when omitted. |
@@ -81,7 +83,7 @@ The confidence analyzer is local-only because it reads files already exported to
      -Force
    ```
 
-1. Edit [`classifications.yaml`](../../../data-plane/classifications/classifications.yaml) for custom classifications and regex rules. Keep SIT catalog changes export-driven unless a follow-up PR implements custom SIT write-back.
+1. Edit [`classifications.yaml`](../../../data-plane/classifications/classifications.yaml) for custom Data Map classifications and regex rules. Keep `sit-catalog.yaml` changes export-driven — it is read-only reference data. To manage a **custom M365 SIT** as code, author a rule package under `data-plane/classifications/rule-packages/` and index it in [`sit-rule-packages.yaml`](../../../data-plane/classifications/sit-rule-packages.yaml), then reconcile with `Deploy-SITRulePackages.ps1` (see [ADR 0061](../../adr/0061-custom-sit-rule-package-shape.md)).
 
    ```yaml
    classifications:

@@ -6,26 +6,32 @@
     (desired state).
 
 .DESCRIPTION
-    Wave 1 declarative reconciler. The YAML is the central source of truth
-    for the SIT inventory in this repo: downstream artifacts (sensitivity
-    labels, auto-label policies, DLP policies) refer to SITs by name or
-    GUID and depend on this catalog being current.
+    Reference-catalog exporter and parity checker. The YAML is a READ-ONLY
+    reference catalog (ADR 0056 carve-out 1) of every SIT visible to the
+    connected admin, so downstream artifacts (sensitivity labels, auto-label
+    policies, DLP policies) can refer to SITs by name or GUID and depend on the
+    catalog being current. Microsoft built-in SITs cannot be created, edited, or
+    deleted per-tenant, so the catalog has no apply path by design.
 
-    The current pass implements the **pull / -ExportCurrentState** path
-    only. It connects to Security & Compliance PowerShell as the
-    data-plane Entra app via `Get-PurviewIPPSAccessToken.ps1` (Key Vault
-    PS256 sign, no stored secret), enumerates every SIT visible to that
-    workload identity via `Get-DlpSensitiveInformationType`, and writes
-    the result to the YAML. Both Microsoft built-ins and tenant-custom
-    SITs are recorded; tenant-custom SITs become candidates for
-    write-back in a follow-up PR.
+    Three modes:
+      * -ExportCurrentState  Connect to Security & Compliance PowerShell as the
+        data-plane Entra app via `Get-PurviewIPPSAccessToken.ps1` (local cert or
+        Key Vault PS256 sign, no stored secret), enumerate every SIT via
+        `Get-DlpSensitiveInformationType`, and write the result to the YAML. Both
+        Microsoft built-ins and any tenant-custom SITs are recorded.
+      * -CompareWithTenant   Read-only parity check: diff the committed catalog
+        against the live tenant by GUID and report MissingFromTenant /
+        NotInCatalog / NameDrift. Throws on NameDrift (a stable-GUID name change
+        the catalog must be refreshed for); the count deltas are reported, not
+        fatal (benign Microsoft rollout lag between tenants). No writes anywhere.
+      * (default) Apply      No-op with guidance -- the catalog is read-only.
 
-    Two pieces are deliberately deferred to a follow-up PR:
-      1. Apply path (`New-/Set-/Remove-DlpSensitiveInformationType` with
-         a categorized drift report mirroring
-         `scripts/Deploy-PurviewRoleGroups.ps1`).
-      2. Promotion of read-only built-in SIT references into label /
-         DLP / auto-label policy YAMLs (Wave 1 #65, #66, #67).
+    CUSTOM (tenant-authored, pattern/regex) SITs are managed AS CODE separately,
+    by `scripts/Deploy-SITRulePackages.ps1` via the rule-package cmdlet family
+    (docs/adr/0061-custom-sit-rule-package-shape.md). That supersedes this
+    script's earlier deferred-apply plan, which pointed at the fingerprint-only
+    `New-/Set-/Remove-DlpSensitiveInformationType` cmdlets -- verified live
+    (#48 Phase 2.1) to be the wrong family for custom pattern SITs.
 
     Auth path -- identical to `scripts/Deploy-PurviewRoleGroups.ps1`:
       1. `az account show` (CLI is the JWT signing transport).
@@ -86,6 +92,14 @@
     `Get-DlpSensitiveInformationType`, write the inventory to the YAML's
     `sits:` block, and exit. Makes no writes to the tenant.
 
+.PARAMETER CompareWithTenant
+    Read-only parity check (issue #48). Join the committed `sits:` catalog and
+    the live tenant by GUID and emit a report of `NameDrift`,
+    `MissingFromTenant`, and `NotInCatalog` rows. Throws on any `NameDrift` (a
+    stable-GUID name change the catalog must be refreshed for via
+    `-ExportCurrentState`); the count deltas are reported but non-fatal (benign
+    Microsoft built-in rollout lag between tenants). Makes no writes anywhere.
+
 .PARAMETER ParametersFile
     Path to the environment parameters YAML (ADR 0012). Defaults to
     `infra/parameters/lab.yaml` resolved relative to the repo root.
@@ -121,6 +135,12 @@
 
     Print the planned auth path and target file. No remote calls.
 
+.EXAMPLE
+    ./scripts/Sync-SITCatalog.ps1 -CompareWithTenant
+
+    Read-only parity check of the committed catalog against the live tenant.
+    Exits non-zero on any stable-GUID name drift; reports count deltas.
+
 .NOTES
     Caller role requirements (the local principal running this script):
       * Active `az login` session (CLI is the JWT signing transport).
@@ -135,6 +155,7 @@
 param(
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
+    [Parameter(ParameterSetName = 'Compare')]
     [ValidateNotNullOrEmpty()]
     [string]$Path = (Join-Path $PSScriptRoot '..\data-plane\classifications\sit-catalog.yaml'),
 
@@ -145,28 +166,41 @@ param(
     [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
     [switch]$ExportCurrentState,
 
+    # Read-only parity check: compare the committed catalog against the live tenant
+    # by GUID and report MissingFromTenant / NotInCatalog / NameDrift. Throws on
+    # NameDrift (a stable-GUID name change the catalog must be refreshed for);
+    # MissingFromTenant / NotInCatalog are reported, not fatal (benign Microsoft
+    # built-in rollout lag between tenants). Makes no writes anywhere. Issue #48.
+    [Parameter(ParameterSetName = 'Compare', Mandatory = $true)]
+    [switch]$CompareWithTenant,
+
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
+    [Parameter(ParameterSetName = 'Compare')]
     [ValidateNotNullOrEmpty()]
     [string]$ParametersFile,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
+    [Parameter(ParameterSetName = 'Compare')]
     [ValidatePattern('^[A-Za-z][A-Za-z0-9-]{1,22}[A-Za-z0-9]$')]
     [string]$VaultName,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
+    [Parameter(ParameterSetName = 'Compare')]
     [ValidatePattern('^[a-zA-Z0-9\-]{1,127}$')]
     [string]$CertificateName,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
+    [Parameter(ParameterSetName = 'Compare')]
     [ValidatePattern('^[A-Za-z][A-Za-z0-9\-]{1,62}[A-Za-z0-9]$')]
     [string]$DataPlaneAppDisplayName,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
+    [Parameter(ParameterSetName = 'Compare')]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.\-]{0,253}[A-Za-z0-9]$')]
     [string]$TenantDomain
 )
@@ -253,7 +287,9 @@ if (-not $CertificateName)         { $CertificateName         = [string]$paramet
 if (-not $DataPlaneAppDisplayName) { $DataPlaneAppDisplayName = [string]$parameters.automation.apps.dataPlane.displayName }
 if (-not $TenantDomain)            { $TenantDomain            = [string]$parameters.automation.tenantDomain }
 
-$mode = if ($ExportCurrentState.IsPresent) { 'Export' } else { 'Apply' }
+$mode = if ($ExportCurrentState.IsPresent) { 'Export' }
+        elseif ($CompareWithTenant.IsPresent) { 'Compare' }
+        else { 'Apply' }
 
 Write-Information ("Mode            : {0}" -f $mode) -InformationAction Continue
 Write-Information ("Parameters file : {0}" -f $ParametersFile) -InformationAction Continue
@@ -285,12 +321,12 @@ if ($mode -eq 'Export' -and $desiredSits.Count -gt 0 -and -not $Force.IsPresent)
 
 #endregion
 
-#region Apply mode -- deferred to follow-up PR
+#region Apply mode -- the catalog has no apply path by design
 
 if ($mode -eq 'Apply') {
-    Write-Information 'Apply path is not implemented in this revision.' -InformationAction Continue
-    Write-Information 'Use -ExportCurrentState to hydrate the YAML from the live tenant.' -InformationAction Continue
-    Write-Information 'Apply path (New-/Set-/Remove-DlpSensitiveInformationType, drift report, -PruneMissing) lands in a follow-up PR; tracked on the Wave 1 row of docs/project-plan.md.' -InformationAction Continue
+    Write-Information 'sit-catalog.yaml has no apply path: it is a READ-ONLY reference catalog (ADR 0056 carve-out 1), and Microsoft built-in SITs cannot be created, edited, or deleted per-tenant.' -InformationAction Continue
+    Write-Information 'Use -ExportCurrentState to refresh the catalog from the live tenant, or -CompareWithTenant for a read-only parity check.' -InformationAction Continue
+    Write-Information 'CUSTOM (tenant-authored) SITs are managed as rule packages by scripts/Deploy-SITRulePackages.ps1 (docs/adr/0061-custom-sit-rule-package-shape.md) -- NOT by this script. This supersedes the earlier in-header plan that pointed at the fingerprint-only New-/Set-/Remove-DlpSensitiveInformationType cmdlets.' -InformationAction Continue
     return
 }
 
@@ -316,7 +352,9 @@ Write-Information ("Subscription    : {0}" -f $account.name) -InformationAction 
 
 #region -WhatIf short-circuit (no remote calls)
 
-if ($WhatIfPreference) {
+# Export is the only writing mode; scope the dry-run preview to it. Compare is
+# read-only, so it runs normally under -WhatIf (it makes no writes anyway).
+if ($WhatIfPreference -and $mode -eq 'Export') {
     Write-Information '-WhatIf specified with -ExportCurrentState. Planned behaviour (no remote calls made):' -InformationAction Continue
     Write-Information ('  1. Resolve Entra app via `az ad app list` (Graph read).') -InformationAction Continue
     Write-Information ('  2. Acquire access token via Get-PurviewIPPSAccessToken.ps1 (Key Vault PS256 sign).') -InformationAction Continue
@@ -401,6 +439,50 @@ try {
         $cols  = @($first.PSObject.Properties.Name | Sort-Object)
         Write-Verbose ("Get-DlpSensitiveInformationType row schema: {0}" -f ($cols -join ', '))
     }
+
+    #region Compare mode -- read-only parity check (issue #48)
+    if ($mode -eq 'Compare') {
+        # Join the committed catalog and the live tenant by GUID (case-insensitive).
+        # NameDrift on a stable GUID is fatal (the catalog must be refreshed); count
+        # deltas are reported, not fatal (benign Microsoft rollout lag between tenants).
+        $tenantById = @{}
+        foreach ($sit in $allSits) {
+            $gid = if ($sit.PSObject.Properties.Name -contains 'Id' -and $sit.Id) { [string]$sit.Id } else { [string]$sit.Identity }
+            if ($gid) { $tenantById[$gid.Trim().ToLowerInvariant()] = [string]$sit.Name }
+        }
+        $catalogById = @{}
+        foreach ($c in $desiredSits) {
+            $gid = [string]$c.id
+            if ($gid) { $catalogById[$gid.Trim().ToLowerInvariant()] = [string]$c.name }
+        }
+
+        $nameDrift = 0
+        foreach ($gid in $catalogById.Keys) {
+            if ($tenantById.ContainsKey($gid)) {
+                if ($catalogById[$gid] -ne $tenantById[$gid]) {
+                    $nameDrift++
+                    $report.Add([pscustomobject]@{ Category = 'NameDrift'; Kind = 'SIT'; Name = $catalogById[$gid]; Reason = ("id={0}; tenant name='{1}'" -f $gid, $tenantById[$gid]) })
+                }
+            }
+            else {
+                $report.Add([pscustomobject]@{ Category = 'MissingFromTenant'; Kind = 'SIT'; Name = $catalogById[$gid]; Reason = ("id={0}; in catalog, absent from tenant" -f $gid) })
+            }
+        }
+        foreach ($gid in $tenantById.Keys) {
+            if (-not $catalogById.ContainsKey($gid)) {
+                $report.Add([pscustomobject]@{ Category = 'NotInCatalog'; Kind = 'SIT'; Name = $tenantById[$gid]; Reason = ("id={0}; in tenant, absent from catalog (refresh with -ExportCurrentState)" -f $gid) })
+            }
+        }
+
+        $missing = @($report | Where-Object { $_.Category -eq 'MissingFromTenant' }).Count
+        $extra   = @($report | Where-Object { $_.Category -eq 'NotInCatalog' }).Count
+        Write-Information ("Parity: catalog={0}, tenant={1}. NameDrift={2}, MissingFromTenant={3}, NotInCatalog={4}." -f $catalogById.Count, $tenantById.Count, $nameDrift, $missing, $extra) -InformationAction Continue
+        if ($nameDrift -gt 0) {
+            throw ("SIT catalog parity FAILED: {0} stable-GUID name drift row(s). The catalog names no longer match the tenant; refresh with -ExportCurrentState. See the NameDrift rows above." -f $nameDrift)
+        }
+        return $report
+    }
+    #endregion
 
     $exportStamp = [DateTime]::UtcNow.ToString('yyyy-MM-dd')
     $exportEntries = New-Object 'System.Collections.Generic.List[hashtable]'

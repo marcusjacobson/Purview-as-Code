@@ -726,6 +726,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 $scriptRoot = Split-Path -Parent $PSCommandPath
 $repoRoot = Split-Path -Parent $scriptRoot
 
@@ -794,6 +801,28 @@ if ($mode -eq 'Apply') {
     $desiredScans = @($desiredRoot.scans | ForEach-Object { ConvertTo-DesiredScanHash -Scan ([hashtable]$_) })
     $desiredRulesets = @($desiredRoot.scanRulesets | ForEach-Object { ConvertTo-DesiredScanRulesetHash -Ruleset ([hashtable]$_) })
     Write-Information ("Desired         : {0} scan(s), {1} scan ruleset(s)" -f $desiredScans.Count, $desiredRulesets.Count) -InformationAction Continue
+
+    # Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+    #
+    # This reconciler manages two collections -- scans and scan rulesets -- so
+    # the guard is keyed on their TOTAL. A prune is only catastrophic when
+    # NOTHING at all is declared; a file that legitimately declares scans but no
+    # custom rulesets (the common case) must still be prunable.
+    #
+    # With a zero total, every live scan and ruleset falls out of the orphan
+    # match below and the run would delete the whole set. The rationale, the
+    # likely causes, and the 2026-07-19 production hit are documented in
+    # scripts/modules/PruneGuard.psm1.
+    #
+    # Placed in the desired-state load region so it fires before the tenant is
+    # contacted at all -- before `az account show` and before any write phase.
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneDesiredSetNotEmpty `
+            -DesiredCount   ($desiredScans.Count + $desiredRulesets.Count) `
+            -ObjectTypeNoun 'scan or scan ruleset' `
+            -SourcePath     $Path `
+            -CollectionKey  'scans/scanRulesets'
+    }
 }
 
 # Reference: https://learn.microsoft.com/en-us/cli/azure/account#az-account-show
@@ -1230,6 +1259,16 @@ function Invoke-TriggerDelete {
     $null = Invoke-RestMethod -Method DELETE -Uri $uri -Headers $ctx.DataHeaders -ErrorAction Stop
 }
 
+# Issue #13: orphan prune failures are reported via Write-PruneFailure
+# (Write-Warning plus an '::error::' annotation, not Write-Error, which
+# shell: pwsh's $ErrorActionPreference='stop' would promote to terminating
+# and abandon the remaining orphans) and collected here; a single aggregate
+# throw after the loop names every failure so a failed prune exits non-zero.
+# NOTE: this reconciler intentionally has NO guard 2 (Assert-PruneRatioWithinThreshold)
+# -- a scan/trigger teardown legitimately prunes a majority, so the ratio
+# guard does not fit here (owner decision, issue #13 batch 2).
+$pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
 foreach ($row in $plan) {
     $target = "Purview $($row.Kind) '$($row.Name)'"
 
@@ -1310,7 +1349,10 @@ foreach ($row in $plan) {
                     }
                     $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = $row.Kind; Name = $row.Name; Reason = 'Deleted (-PruneMissing).' }) | Out-Null
                 } catch {
-                    $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = $row.Kind; Name = $row.Name; Reason = ("Delete failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_)) }) | Out-Null
+                    $reason = Format-PurviewRestError -ErrorRecord $_
+                    $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = $row.Kind; Name = $row.Name; Reason = ("Delete failed: {0}" -f $reason) }) | Out-Null
+                    Write-PruneFailure ("Remove {0} '{1}' failed: {2}" -f $row.Kind, $row.Name, $reason)
+                    $pruneFailures.Add(("{0} '{1}'" -f $row.Kind, $row.Name))
                 }
             } else {
                 $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = $row.Kind; Name = $row.Name; Reason = 'Would be deleted (-PruneMissing).' }) | Out-Null
@@ -1318,6 +1360,14 @@ foreach ($row in $plan) {
             continue
         }
     }
+}
+
+# Issue #13: a failed prune now exits non-zero (behaviour change) -- the
+# aggregate throw fires after every orphan has been attempted, naming them
+# all. Before this change the Failed report row was the only signal and the
+# script exited 0 even when a teardown could not complete.
+if ($pruneFailures.Count -gt 0) {
+    throw ("Reconciliation aborted: {0} orphan scanning object(s) could not be removed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
 }
 
 $report

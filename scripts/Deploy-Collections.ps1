@@ -92,6 +92,16 @@
     collections are deleted before their parents. NEVER passes a name
     listed in `-SkipNames`.
 
+    Guard 1 (`Assert-PruneDesiredSetNotEmpty`, `scripts/modules/PruneGuard.psm1`)
+    stands in front of this switch: a prune against an empty
+    `collections:` set would classify every live child collection as an
+    orphan, so it is refused before the tenant is contacted. The issue #13
+    sanity-ratio guard (guard 2) is deliberately NOT wired for collections:
+    a subtree teardown legitimately removes a majority of the live
+    collections, so the ratio guard does not fit (owner decision). A
+    `-PruneMissing` run that hits delete failures now reports every one and
+    fails the run non-zero via an aggregate error, rather than exiting 0.
+
 .PARAMETER DirectionPolicy
     Source-of-truth direction for shared-property drift between the
     desired YAML and the live tenant. One of:
@@ -807,6 +817,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -895,6 +912,25 @@ if ($mode -eq 'Apply') {
     Write-Information ("Desired         : {0} collection(s)" -f $desiredEntries.Count) -InformationAction Continue
     if ($protectedNames.Count -gt 0) {
         Write-Information ("Protected       : {0} name(s) ({1})" -f $protectedNames.Count, ($protectedNames -join ', ')) -InformationAction Continue
+    }
+
+    # Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+    #
+    # ConvertTo-DesiredCollectionList never emits the root collection, so a
+    # count of zero really does mean "no managed collections declared". With
+    # zero desired entries every live child collection falls out of the orphan
+    # match below and the run would delete the whole hierarchy. The rationale,
+    # the likely causes, and the 2026-07-19 production hit are documented in
+    # scripts/modules/PruneGuard.psm1.
+    #
+    # Placed in the desired-state load region so it fires before the tenant is
+    # contacted at all -- before `az account show` and before any write phase.
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneDesiredSetNotEmpty `
+            -DesiredCount   $desiredEntries.Count `
+            -ObjectTypeNoun 'collection' `
+            -SourcePath     $Path `
+            -CollectionKey  'collections'
     }
 
     # Pre-flight collection-name validation moved to after the
@@ -1267,6 +1303,20 @@ if ($PruneMissing.IsPresent -and $pruneTargets.Count -gt 0) {
 
 $report = New-Object 'System.Collections.Generic.List[object]'
 
+# Issue #13: in-loop prune failures keep their 'Failed' report row AND are
+# reported via Write-PruneFailure (scripts/modules/PruneGuard.psm1), which uses
+# Write-Warning plus an '::error::' workflow command rather than Write-Error.
+# Previously the Orphan catch added the 'Failed' row and moved on, so a failed
+# prune exited 0. Each object in the collection is recorded here and, after the
+# apply loop attempts every row, a single aggregate throw names them all so a
+# failed prune exits non-zero. No audit / -WhatIf gate is needed on this
+# reporter: under -DirectionPolicy audit the script flips $WhatIfPreference, so
+# every DELETE ShouldProcess returns false and the delete catch never runs, and
+# under -WhatIf the same holds. The issue #13 ratio guard (guard 2) is
+# deliberately NOT wired: a subtree teardown legitimately prunes a majority
+# (owner decision), so only guard 1 and this reporter protect the prune path.
+$pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
 foreach ($row in $plan) {
     $target = "Purview collection '{0}'" -f $row.Name
     switch ($row.Action) {
@@ -1332,7 +1382,11 @@ foreach ($row in $plan) {
                     $null = Invoke-RestMethod -Method DELETE -Uri $uri -Headers $ctx.DataHeaders -ErrorAction Stop
                     $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Collection'; Name = $row.Name; Reason = 'Deleted (-PruneMissing).' }) | Out-Null
                 } catch {
-                    $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Collection'; Name = $row.Name; Reason = ("Delete failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_)) }) | Out-Null
+                    $failureText = Format-PurviewRestError -ErrorRecord $_
+                    $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Collection'; Name = $row.Name; Reason = ("Delete failed: {0}" -f $failureText) }) | Out-Null
+                    Write-PruneFailure ("DELETE collection '{0}' failed: {1}" -f $row.Name, $failureText)
+                    $pruneFailures.Add(("collection '{0}'" -f $row.Name)) | Out-Null
+                    continue
                 }
             } else {
                 $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Collection'; Name = $row.Name; Reason = 'Would be deleted (-PruneMissing).' }) | Out-Null
@@ -1349,6 +1403,10 @@ foreach ($row in $plan) {
             continue
         }
     }
+}
+
+if ($pruneFailures.Count -gt 0) {
+    throw ("Reconciliation aborted: {0} orphan collection(s) could not be deleted: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
 }
 
 #endregion

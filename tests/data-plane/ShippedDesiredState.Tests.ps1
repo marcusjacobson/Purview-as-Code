@@ -126,12 +126,14 @@ BeforeAll {
             Path   = 'data-plane/classifications/sit-catalog.yaml'
             Reason = @(
                 'REFERENCE DATA, NOT DESIRED STATE — and emptying it would BREAK label deploys.'
-                'All 327 entries carry `publisher: Microsoft Corporation`: these are Microsoft'
-                'built-in Sensitive Information Type definitions, identical in every tenant, so'
-                'they are tenant-INDEPENDENT and disclose nothing. Nothing RECONCILES them: there'
-                'is no Deploy-SITs.ps1, and no script calls New-/Set-/Remove-DlpSensitiveInformationType'
-                'except Sync-SITCatalog.ps1, which is the EXPORTER that generates this file from'
-                'the SIT API. Every other consumer only READS it — Deploy-Labels.ps1:1244-1264,'
+                'Every entry is either `publisher: Microsoft Corporation` (a built-in SIT,'
+                'identical in every tenant, tenant-INDEPENDENT and disclosing nothing) or a'
+                'repo-managed custom SIT this repo''s own Deploy-SITRulePackages.ps1 reconciler'
+                'deployed from sit-rule-packages.yaml (ADR 0061) — never a raw, unfiltered tenant'
+                'discovery. Nothing else RECONCILES this file: there is no Deploy-SITs.ps1, and no'
+                'script calls New-/Set-/Remove-DlpSensitiveInformationType except'
+                'Sync-SITCatalog.ps1, which is the EXPORTER that generates this file from the SIT'
+                'API. Every other consumer only READS it — Deploy-Labels.ps1:1244-1264,'
                 'Deploy-AutoLabelPolicies.ps1:1432/1891, Invoke-SITConfidenceAnalysis.ps1:494.'
                 'DECISIVE: Deploy-Labels.ps1:1262 ERRORS and RETURNS when a label references an'
                 'autoApplicationOf sitId that is not in this catalog. An empty catalog therefore'
@@ -304,18 +306,33 @@ Describe 'Shipped desired state — EVERY root list under data-plane/** ships EM
         $sits = @($doc.sits)
         $sits.Count | Should -BeGreaterThan 300 -Because 'the SIT catalog is load-bearing for label auto-application validation'
 
-        # Tenant-independence is the licence for shipping it. Verify it, do not assume it.
+        # Tenant-independence is the licence for shipping it -- EXCEPT for SITs this repo's
+        # own reconciler deployed (ADR 0061): Deploy-SITRulePackages.ps1 manages custom SITs
+        # declared in sit-rule-packages.yaml, and they enter this catalog only via a later,
+        # deliberate `Sync-SITCatalog.ps1 -ExportCurrentState` (never a raw, unfiltered
+        # overwrite -- a full re-export also surfaces un-managed tenant-local discoveries,
+        # e.g. document-fingerprint / EDM SITs whose `publisher` is the tenant's own
+        # `*.onmicrosoft.com` domain, real tenant data that must never land in this PUBLIC
+        # file, #48 Phase 3). So a non-Microsoft entry is allowed ONLY if its id is declared
+        # in the manifest; anything else is either an un-managed discovery or a genuine leak.
+        $manifestDoc = Get-ShippedYaml -RelativePath 'data-plane/classifications/sit-rule-packages.yaml'
+        $repoManagedIds = @(
+            @($manifestDoc.rulePackages) | ForEach-Object { @($_.sits) | ForEach-Object { [string]$_.id } }
+        ) | Where-Object { $_ }
         $nonMicrosoft = @($sits | Where-Object { [string]$_.publisher -ne 'Microsoft Corporation' })
-        $nonMicrosoft.Count | Should -Be 0 -Because (
-            'every entry must be a Microsoft built-in SIT (tenant-independent). A ' +
-            'tenant-authored custom SIT in this catalog would be real tenant data and ' +
-            'would void the carve-out. Offenders: ' + (($nonMicrosoft | Select-Object -First 5).name -join ', '))
+        $unclaimed = @($nonMicrosoft | Where-Object { $repoManagedIds -notcontains [string]$_.id })
+        $unclaimed.Count | Should -Be 0 -Because (
+            'every non-Microsoft entry must be a SIT this repo''s own Deploy-SITRulePackages.ps1 ' +
+            'reconciler deployed (its id must be declared in sit-rule-packages.yaml, ADR 0061). ' +
+            'An un-managed tenant-local discovery or any other real tenant data in this catalog ' +
+            'would disclose the tenant. Offenders: ' + (($unclaimed | Select-Object -First 5).name -join ', '))
     }
 
-    It 'carve-out 1: no script CREATES, UPDATES, or PRUNES a SIT from the catalog' {
-        # The carve-out rests on "nothing reconciles this list". Verify it against the
+    It 'carve-out 1: no UNSANCTIONED script CREATES, UPDATES, or PRUNES a SIT' {
+        # The carve-out rests on "nothing reconciles the CATALOG". Verify it against the
         # source rather than taking the ADR's word for it — the ADR could go stale, this
-        # assertion cannot.
+        # assertion cannot. The regex is unanchored, so it also matches the
+        # *-DlpSensitiveInformationTypeRulePackage cmdlet family as a substring.
         $scriptDir = Join-Path $script:RepoRoot 'scripts'
         $writers = @(
             Get-ChildItem -Path $scriptDir -Filter '*.ps1' -File |
@@ -325,14 +342,34 @@ Describe 'Shipped desired state — EVERY root list under data-plane/** ships EM
                 } |
                 Select-Object -ExpandProperty Name
         )
-        # Sync-SITCatalog.ps1 is the EXPORTER (it reads the SIT API and regenerates the
-        # file). Anything else appearing here means a SIT reconciler now exists, the
-        # catalog has become desired state, and this carve-out must be re-litigated.
-        $unexpected = @($writers | Where-Object { $_ -ne 'Sync-SITCatalog.ps1' })
+        # Two scripts are SANCTIONED writers, and NEITHER makes sit-catalog.yaml desired state:
+        #   * Sync-SITCatalog.ps1        — the EXPORTER (reads the SIT API, regenerates the catalog).
+        #   * Deploy-SITRulePackages.ps1 — the custom-SIT rule-package reconciler (ADR 0061). It
+        #     manages a SEPARATE desired-state surface (sit-rule-packages.yaml + rule-packages/*.xml)
+        #     via the *RulePackage cmdlets; it does NOT read or write sit-catalog.yaml (asserted
+        #     separately below). Custom SITs enter the catalog only via a later export.
+        # Anything ELSE here means a new writer exists that this carve-out has not vetted.
+        $sanctioned = @('Sync-SITCatalog.ps1', 'Deploy-SITRulePackages.ps1')
+        $unexpected = @($writers | Where-Object { $_ -notin $sanctioned })
         $unexpected.Count | Should -Be 0 -Because (
             'the sit-catalog carve-out rests on the catalog being READ-ONLY reference data. ' +
-            'A script that writes SITs makes it desired state, and the carve-out is void. ' +
+            'A NEW (unsanctioned) script that writes SITs must be vetted against that premise. ' +
             'Offenders: ' + ($unexpected -join ', '))
+    }
+
+    It 'carve-out 1: the rule-package reconciler''s desired-state file is the manifest, not the catalog' {
+        # The above widens the sanctioned writer set to include Deploy-SITRulePackages.ps1.
+        # That is only safe because the rule-package reconciler owns a DIFFERENT file. Pin
+        # that here via its -Path default: its desired state is sit-rule-packages.yaml, and
+        # it does NOT default to sit-catalog.yaml. If that ever changes, the catalog has
+        # become desired state and the carve-out is void (ADR 0061 decision 7). (Prose that
+        # merely NAMES sit-catalog.yaml to explain the boundary is fine — hence the check is
+        # on the parameter default, not a blanket string search.)
+        $reconciler = Join-Path $script:RepoRoot 'scripts' 'Deploy-SITRulePackages.ps1'
+        Test-Path -LiteralPath $reconciler | Should -BeTrue
+        $src = Get-Content -LiteralPath $reconciler -Raw
+        $src | Should -Match '\$Path\s*=\s*\(Join-Path[^\r\n]*sit-rule-packages\.yaml'
+        $src | Should -Not -Match '\$Path\s*=\s*\(Join-Path[^\r\n]*sit-catalog\.yaml'
     }
 
     It 'carve-out 2: seed-skip-names.yaml stays POPULATED — it is a skip list, and emptying it is LESS safe' {

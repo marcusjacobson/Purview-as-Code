@@ -97,6 +97,31 @@
     reconciler attempts disable + remove and surfaces the server error
     if the tenant refuses.
 
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against
+        `labels: []` would classify the entire live taxonomy as orphaned.
+      * The prune must not exceed `-MaxPruneRatio` of the live labels
+        without `-AllowMajorityPrune`.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live labels is refused before any write. Supply it when a large
+    prune is genuinely intended (a deliberate taxonomy consolidation);
+    the ratio is then reported as a warning and the run proceeds.
+    Has no effect on the empty-desired-set guard, which cannot be
+    overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live labels `-PruneMissing` may delete without
+    `-AllowMajorityPrune`, as a fraction in (0, 1]. Default 0.5. A prune
+    exactly at the threshold passes; only a strictly larger share is
+    refused. Set to 1 to disable the ratio guard for a single run.
+
 .PARAMETER Force
     With -ExportCurrentState: allow overwriting a `labels:` block that
     already contains entries. Without it the script refuses, to avoid
@@ -249,6 +274,13 @@ param(
 
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -1117,6 +1149,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guards (issue #13): the empty-desired-set
+# refusal, the sanity-ratio refusal, and the $ErrorActionPreference-safe
+# per-orphan failure reporter. Shared with the other Deploy-*.ps1
+# reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -1222,6 +1261,28 @@ if (-not $SkipSchemaValidation.IsPresent) {
 $desiredEntries = @()
 if ($desiredRoot -and $desiredRoot.ContainsKey('labels') -and $desiredRoot.labels) {
     $desiredEntries = @($desiredRoot.labels)
+}
+
+# Issue #13: echo the desired-set size next to the other header lines so an
+# operator reading a CI log sees a zero or short count BEFORE the write phase,
+# rather than inferring it from a suspiciously long Orphan list further down.
+Write-Information ("Desired labels  : {0}" -f $desiredEntries.Count) -InformationAction Continue
+
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# With zero desired entries, every live tenant label falls out of the composite-key
+# orphan match below and the run would attempt Remove-Label across the entire
+# taxonomy. The rationale, the likely causes, and the 2026-07-19 production hit
+# are documented in scripts/modules/PruneGuard.psm1.
+#
+# This fires before the ADR 0052 confirmation gate and before Phase 2/3, and before
+# the tenant is even contacted, so no write path is reachable from here.
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desiredEntries.Count `
+        -ObjectTypeNoun 'sensitivity label' `
+        -SourcePath     $Path `
+        -CollectionKey  'labels'
 }
 
 $desiredHashes = @()
@@ -1912,6 +1973,10 @@ try {
 
     Write-Information '' -InformationAction Continue
     Write-Information 'Plan summary (pre-write):' -InformationAction Continue
+    # Issue #13: repeat the desired-set size at the last read-only checkpoint
+    # before the write phase, so the count sits directly above the plan table in
+    # the CI log instead of hundreds of lines up in the header block.
+    Write-Information ("Desired labels  : {0}" -f $desiredEntries.Count) -InformationAction Continue
     $planRows |
         Format-Table Category, Kind, Parent, Name, Fields -Wrap |
         Out-String |
@@ -1937,6 +2002,27 @@ try {
         Write-Information '[ADR0029-AUDIT] DirectionPolicy=audit — no writes would have fired. Plan above is read-only.' -InformationAction Continue
         $plan.Clear()
         $orphans = @()
+    }
+
+    # ---- Issue #13, guard 2: prune sanity ratio ----
+    # Guard 1 (desired-state load region) catches only the total wipe. This
+    # catches the near-total one: a labels.yaml that lost most of its entries
+    # to a bad merge, or a -Path pointing at a smaller environment's file, both
+    # of which leave a non-zero desired count and so clear guard 1.
+    #
+    # Keyed on the PLAN -- the orphan set this run would actually delete --
+    # against the live tenant count, and evaluated after the audit
+    # short-circuit has emptied $orphans so `-DirectionPolicy audit` cannot
+    # trip it. Fires before the ADR 0052 gate and before Phase 2/3: the last
+    # point at which nothing has been written.
+    # Reference: scripts/modules/PruneGuard.psm1
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     $orphans.Count `
+            -LiveCount      @($tenantLabels).Count `
+            -ObjectTypeNoun 'sensitivity label' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
     }
 
     # ---- ADR 0052: destructive-operation confirmation gate ----
@@ -2284,6 +2370,15 @@ try {
         $sortedOrphans = $orphans | Sort-Object -Property @{ Expression = { & $depthFor $_ }; Descending = $true }, @{ Expression = 'DisplayName'; Descending = $false }
 
         $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+        # Issue #13: in-loop prune failures are reported via Write-PruneFailure
+        # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+        # '::error::' workflow command rather than Write-Error. Under GitHub
+        # Actions, `shell: pwsh` sets $ErrorActionPreference='stop', so a
+        # Write-Error here would terminate the loop on the first orphan and the
+        # rest would never be attempted. The aggregate `throw` below remains the
+        # terminal outcome, so a failed prune still exits non-zero.
+
         foreach ($l in $sortedOrphans) {
             $shouldProcessTarget = "Sensitivity label '{0}'" -f $l.DisplayName
             $shouldProcessAction = 'Remove-Label (destructive: drops a label)'
@@ -2301,13 +2396,16 @@ try {
                         -ErrorAction Stop | Out-Null
                 }
                 catch {
-                    Write-Error ("Remove-Label '{0}' failed: {1}" -f $l.DisplayName, $_.Exception.Message)
+                    Write-PruneFailure ("Remove-Label '{0}' failed: {1}" -f $l.DisplayName, $_.Exception.Message)
                     $pruneFailures.Add([string]$l.DisplayName)
                     continue
                 }
                 if ($rmWarnings -and $rmWarnings.Count -gt 0) {
+                    # #154: a non-throwing WARNING from Remove-Label means the tenant
+                    # refused the delete (for example, parent-with-children). It is a
+                    # failure, not a note -- keep it in $pruneFailures.
                     $warnText = ($rmWarnings | ForEach-Object { [string]$_ } | Where-Object { $_ } | Select-Object -First 1)
-                    Write-Error ("Remove-Label '{0}' did not delete the label. Tenant warning: {1}" -f $l.DisplayName, $warnText)
+                    Write-PruneFailure ("Remove-Label '{0}' did not delete the label. Tenant warning: {1}" -f $l.DisplayName, $warnText)
                     $pruneFailures.Add([string]$l.DisplayName)
                     continue
                 }

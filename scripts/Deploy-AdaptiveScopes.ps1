@@ -113,6 +113,31 @@
     Default $false. Destructive; gated by `$PSCmdlet.ShouldProcess` per
     scope.
 
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against
+        `scopes: []` would classify the entire live set as orphaned.
+      * The prune must not exceed `-MaxPruneRatio` of the live adaptive
+        scopes without `-AllowMajorityPrune`.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live adaptive scopes is refused before any write. Supply it when
+    a large prune is genuinely intended (a deliberate consolidation);
+    the ratio is then reported as a warning and the run proceeds.
+    Has no effect on the empty-desired-set guard, which cannot be
+    overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live adaptive scopes `-PruneMissing` may delete
+    without `-AllowMajorityPrune`, as a fraction in (0, 1]. Default 0.5.
+    A prune exactly at the threshold passes; only a strictly larger share
+    is refused. Set to 1 to disable the ratio guard for a single run.
+
 .PARAMETER Force
     With `-ExportCurrentState`: allow overwriting a `scopes:` block that
     already contains entries. Without it the script refuses, to avoid
@@ -217,6 +242,13 @@ param(
 
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -550,6 +582,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -655,6 +694,24 @@ if (-not $SkipSchemaValidation.IsPresent) {
 $desiredEntries = @()
 if ($desiredRoot -and $desiredRoot.ContainsKey('scopes') -and $desiredRoot.scopes) {
     $desiredEntries = @($desiredRoot.scopes)
+}
+
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# With zero desired entries every live tenant adaptive scope falls out of the
+# orphan match below, so the run would classify the entire set as orphans and
+# delete it. The rationale, the likely causes, and the 2026-07-19 production
+# hit are documented in scripts/modules/PruneGuard.psm1.
+#
+# Placed in the desired-state load region so it fires before the tenant is
+# contacted at all -- before `az account show`, before Connect-IPPSSession,
+# and before any write phase.
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desiredEntries.Count `
+        -ObjectTypeNoun 'adaptive scope' `
+        -SourcePath     $Path `
+        -CollectionKey  'scopes'
 }
 
 $desiredHashes = @()
@@ -1074,6 +1131,27 @@ try {
         $orphanScopes.Clear()
     }
 
+    # ---- Issue #13, guard 2: prune sanity ratio ----
+    # Guard 1 (desired-state load region) catches only the total wipe. This
+    # catches the near-total one: a scopes.yaml that lost most of its entries
+    # to a bad merge, or a -Path pointing at a smaller environment's file, both
+    # of which leave a non-zero desired count and so clear guard 1.
+    #
+    # Keyed on the ORPHAN set this run would actually delete against the live
+    # tenant count, and evaluated after the audit short-circuit has emptied
+    # $orphanScopes so `-DirectionPolicy audit` cannot trip it. Fires before the
+    # ADR 0052 gate and before Phase 2/3: the last point at which nothing has
+    # been written.
+    # Reference: scripts/modules/PruneGuard.psm1
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     $orphanScopes.Count `
+            -LiveCount      @($tenantScopes).Count `
+            -ObjectTypeNoun 'adaptive scope' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
+    }
+
     # ---- ADR 0052: destructive-operation confirmation gate ----
     # The last point before Phase 2/3 at which nothing has been written.
     # Both destructive branches are gated here, once per run, via
@@ -1203,6 +1281,16 @@ try {
     }
 
     if ($PruneMissing.IsPresent) {
+        $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+        # Issue #13: in-loop prune failures are reported via Write-PruneFailure
+        # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+        # '::error::' workflow command rather than Write-Error. Under GitHub
+        # Actions, `shell: pwsh` sets $ErrorActionPreference='stop', so a
+        # Write-Error here would terminate the loop on the first orphan and the
+        # rest would never be attempted. The aggregate `throw` below remains the
+        # terminal outcome, so a failed prune still exits non-zero.
+
         foreach ($s in $orphanScopes) {
             $tenantName = [string]$s.Name
             $shouldProcessTarget = "Adaptive scope '{0}'" -f $tenantName
@@ -1212,10 +1300,15 @@ try {
                     Remove-AdaptiveScope -Identity $tenantName -Confirm:$false -ErrorAction Stop | Out-Null
                     Write-Information ("Removed orphan adaptive scope '{0}'." -f $tenantName) -InformationAction Continue
                 } catch {
-                    Write-Error ("Remove-AdaptiveScope '{0}' failed: {1}" -f $tenantName, $_.Exception.Message)
-                    return
+                    Write-PruneFailure ("Remove-AdaptiveScope '{0}' failed: {1}" -f $tenantName, $_.Exception.Message)
+                    $pruneFailures.Add($tenantName)
+                    continue
                 }
             }
+        }
+
+        if ($pruneFailures.Count -gt 0) {
+            throw ("Reconciliation aborted: {0} orphan adaptive scope(s) could not be removed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
         }
     }
 
