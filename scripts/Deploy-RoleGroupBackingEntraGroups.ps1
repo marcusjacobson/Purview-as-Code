@@ -163,6 +163,16 @@ $ErrorActionPreference = 'Stop'
 # Constants from docs/adr/0025-role-group-entra-backing-naming.md.
 # ---------------------------------------------------------------------------
 $script:NamePrefix       = 'sg-purview-'
+# Issue #65 F1: the directory-role backing groups (ADR 0062) share the
+# 'sg-purview-' prefix but carry a 'directory-role-' segment and belong to a
+# DIFFERENT RBAC surface (Entra directory roles, managed via role-assignments.yaml
+# by Deploy-EntraDirectoryRoles.ps1), not the Purview portal role groups this
+# reconciler owns. They must be excluded from this script's tenant view so they
+# are never mis-classified as Orphan -- otherwise a future `-PruneMissing` here
+# would DELETE the ADR-0062 backing groups. No `roleGroups[].name` can ever derive
+# a 'directory-role-' slug (ConvertTo-BackingGroupSlug never emits that segment),
+# so nothing in this reconciler's desired set is ever excluded by this filter.
+$script:DirectoryRolePrefix = 'sg-purview-directory-role-'
 $script:DescriptionShape = "Backs the Microsoft Purview portal role group '{0}'. Managed by scripts/Deploy-RoleGroupBackingEntraGroups.ps1. See docs/adr/0025-role-group-entra-backing-naming.md."
 
 # ---------------------------------------------------------------------------
@@ -224,6 +234,21 @@ function ConvertTo-BackingGroupSlug {
     )
     $slug = [regex]::Replace($RoleGroupName, '(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])', '-').ToLowerInvariant()
     return ($script:NamePrefix + $slug)
+}
+
+# Issue #65 F1: true when a tenant group displayName belongs to the ADR 0062
+# directory-role backing-group namespace (`sg-purview-directory-role-*`), which
+# this reconciler does NOT manage. Pure/side-effect-free so it can be unit-tested
+# in isolation. Case-insensitive to match Graph's displayName matching.
+function Test-IsDirectoryRoleBackingName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$DisplayName
+    )
+    return $DisplayName.StartsWith($script:DirectoryRolePrefix, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 # ---------------------------------------------------------------------------
@@ -300,6 +325,19 @@ while ($next) {
     $current += @($response.value)
     $next = $response.'@odata.nextLink'
 }
+
+# Issue #65 F1: drop the ADR 0062 directory-role backing groups from the tenant
+# view before ANY drift calculation. The Graph `startswith(displayName,
+# 'sg-purview-')` filter above cannot express "but not sg-purview-directory-role-*"
+# without an unsupported OData `not(startswith(...))` combination, so it is applied
+# here in-memory. This keeps `sg-purview-directory-role-*` groups out of the export
+# inventory, the Orphan set, AND the prune-ratio denominator -- the reconciler
+# behaves as if they do not exist.
+$excludedDirectoryRole = @($current | Where-Object { Test-IsDirectoryRoleBackingName -DisplayName $_.displayName })
+if ($excludedDirectoryRole.Count -gt 0) {
+    Write-Verbose ("Excluding {0} ADR-0062 directory-role backing group(s) from role-group backing reconciliation (managed by Deploy-EntraDirectoryRoles.ps1)." -f $excludedDirectoryRole.Count)
+}
+$current = @($current | Where-Object { -not (Test-IsDirectoryRoleBackingName -DisplayName $_.displayName) })
 
 # ---------------------------------------------------------------------------
 # Drift calculation.
@@ -503,6 +541,19 @@ foreach ($row in $report) {
                 throw "Create action requires -OwnerObjectId for the lab-owner co-owner. See docs/adr/0025-role-group-entra-backing-naming.md."
             }
             $desiredItem = $desired | Where-Object { $_.DisplayName -eq $row.Name } | Select-Object -First 1
+            # Issue #65 F2/F3: create the group WITHOUT `owners@odata.bind`, then
+            # ensure -OwnerObjectId is an owner via a separate POST /owners/$ref.
+            # Setting the owner in the create body is unreliable here:
+            #   * F2 -- running delegated, Graph auto-owns the CREATOR; if
+            #     -OwnerObjectId is that same principal the explicit bind duplicates
+            #     it and the whole create fails with "Request contains a property
+            #     with duplicate values".
+            #   * F3 -- passing a service principal in the create-body bind was
+            #     silently NOT applied (the group came back owned by the creator
+            #     only), so -OwnerObjectId was effectively a no-op.
+            # The post-create $ref add is idempotent: if -OwnerObjectId is already
+            # an owner (the delegated-self case) Graph returns "already exist",
+            # which is treated as success.
             $bodyHash = @{
                 displayName     = $desiredItem.DisplayName
                 description     = $desiredItem.Description
@@ -510,14 +561,30 @@ foreach ($row in $report) {
                 mailNickname    = $desiredItem.DisplayName
                 securityEnabled = $true
             }
-            if ($OwnerObjectId) {
-                $bodyHash['owners@odata.bind'] = @("https://graph.microsoft.com/v1.0/directoryObjects/$OwnerObjectId")
-            }
             $body = $bodyHash | ConvertTo-Json -Depth 5
             if ($PSCmdlet.ShouldProcess("Entra security group '$($row.Name)'", 'Create')) {
                 # Reference: https://learn.microsoft.com/en-us/graph/api/group-post-groups
                 $created = Invoke-RestMethod -Method Post -Uri "$graphBase/groups" -Headers $headers -Body $body
                 Write-Information "Created Entra security group '$($created.displayName)' (id=$($created.id)) backing role group '$($desiredItem.RoleGroupName)'." -InformationAction Continue
+                if ($OwnerObjectId) {
+                    # Reference: https://learn.microsoft.com/en-us/graph/api/group-post-owners
+                    $ownerRefBody = @{ '@odata.id' = "$graphBase/directoryObjects/$OwnerObjectId" } | ConvertTo-Json
+                    try {
+                        Invoke-RestMethod -Method Post -Uri "$graphBase/groups/$($created.id)/owners/`$ref" -Headers $headers -Body $ownerRefBody | Out-Null
+                        Write-Information "Assigned owner $OwnerObjectId to '$($created.displayName)'." -InformationAction Continue
+                    }
+                    catch {
+                        # Idempotent: the creator is already an owner (delegated-self
+                        # case) -- Graph returns "One or more added object references
+                        # already exist". Any other failure is real and re-thrown.
+                        if ($_.Exception.Message -match 'already exist') {
+                            Write-Verbose "Owner $OwnerObjectId already present on '$($created.displayName)' (creator auto-owned); no-op."
+                        }
+                        else {
+                            throw
+                        }
+                    }
+                }
             }
         }
         'Update' {

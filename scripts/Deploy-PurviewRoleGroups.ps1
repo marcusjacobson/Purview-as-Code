@@ -296,6 +296,56 @@ function Test-IsGuid {
     return [System.Guid]::TryParse($Value, [ref]([guid]::Empty))
 }
 
+# Issue #65 F4: role groups that `Get-RoleGroup` returns but that cannot take an
+# Entra-group member -- `Add-RoleGroupMember` rejects them with
+# `EntityValidation CheckIsUserRole, Role with isUserRole not allowed`.
+# `DefaultRoleAssignmentPolicy` is an Exchange RBAC role-assignment *policy*, not a
+# bindable role group; it was dropped from role-groups.yaml in #61. This denylist
+# keeps `-ExportCurrentState` from ever writing such a role group back into the
+# desired set. Kept as an explicit list rather than a Get-RoleGroup property probe
+# because the discriminating field is undocumented; add names here if a future
+# tenant surfaces additional non-bindable role groups (see #65 F4).
+$script:NonBindableRoleGroups = @('DefaultRoleAssignmentPolicy')
+
+function Test-IsNonBindableRoleGroup {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$RoleGroupName)
+    return ($script:NonBindableRoleGroups -contains $RoleGroupName)
+}
+
+# Issue #65 F5: confirm a just-added role-group member is visible, tolerating
+# Security & Compliance replication lag. The immediate post-Add read frequently
+# misses a member that a moments-later read sees -- proven benign on #61 (every
+# such warning cleared on a later -WhatIf). Retries the caller-supplied reader a
+# few times with a short backoff and returns whether the member OID became
+# visible, so the caller only warns after genuine non-persistence. The reader is
+# injected (not hard-coded to Get-RoleGroupMember) purely so this stays
+# unit-testable without a live S&C session.
+function Wait-RoleGroupMemberVisible {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Reader,
+        [Parameter(Mandatory = $true)][string]$Oid,
+        [int]$MaxAttempts = 3,
+        [int]$DelaySeconds = 2
+    )
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            $rows = @(& $Reader)
+            if (@($rows | Where-Object { $_.ExternalDirectoryObjectId -ieq $Oid }).Count -gt 0) {
+                return $true
+            }
+        }
+        catch {
+            Write-Verbose ("[verify-add] post-Add read attempt {0}/{1} failed: {2}" -f $attempt, $MaxAttempts, $_.Exception.Message)
+        }
+        if ($attempt -lt $MaxAttempts -and $DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
+    }
+    return $false
+}
+
 function Test-IsRoleMemberShapeValid {
     <#
     .SYNOPSIS
@@ -683,6 +733,15 @@ try {
         $exportEntries = New-Object 'System.Collections.Generic.List[hashtable]'
         $exportStamp   = [DateTime]::UtcNow.ToString('yyyy-MM-dd')
         foreach ($rg in $allRoleGroups | Sort-Object Name) {
+            # Issue #65 F4: never write a non-bindable role group into the desired
+            # set. `Get-RoleGroup` returns entries like `DefaultRoleAssignmentPolicy`
+            # (an Exchange RBAC role-assignment policy) that `Add-RoleGroupMember`
+            # rejects; exporting them would re-introduce the #61 bind failure on the
+            # next apply. Skip on export so a fresh role-groups.yaml stays applyable.
+            if (Test-IsNonBindableRoleGroup -RoleGroupName $rg.Name) {
+                Write-Warning ("Skipping non-bindable role group '{0}' on export: it cannot take an Entra-group member (Add-RoleGroupMember rejects it with EntityValidation CheckIsUserRole). See issue #65 F4." -f $rg.Name)
+                continue
+            }
             try {
                 $members = @(Get-RoleGroupMember -Identity $rg.Name -ResultSize Unlimited -ErrorAction Stop)
             }
@@ -855,6 +914,12 @@ try {
 
     # ---- Phase 1: Read + categorize ----
     $plan = New-Object 'System.Collections.Generic.List[object]'
+    # Issue #61 F6: role groups whose CURRENT membership could not be read
+    # (Get-RoleGroupMember threw -- e.g. an orphaned member whose backing
+    # principal was deleted). Collected here so one unreadable group no longer
+    # aborts the whole reconcile; the aggregate throw after the write phase
+    # still exits the run non-zero once every group has been tried.
+    $readFailures = New-Object 'System.Collections.Generic.List[string]'
     foreach ($rg in $desiredRoleGroups) {
         $rgName = [string]$rg.name
         # Normalize `members:` to a flat objectId array (ADR 0023 Category
@@ -884,8 +949,28 @@ try {
             $tenantMembers = @(Get-RoleGroupMember -Identity $rgName -ResultSize Unlimited -ErrorAction Stop)
         }
         catch {
-            Write-Error ("Get-RoleGroupMember -Identity '{0}' failed: {1}. Verify the role-group name is exactly correct (case-sensitive) and the workload SP holds 'View-Only Recipients'." -f $rgName, $_.Exception.Message)
-            return
+            # Issue #61 F6: collect-and-continue on the READ leg, mirroring the
+            # Phase 3 bind/revoke catches. A single orphaned/unresolvable member
+            # (e.g. a role-group member whose backing principal was deleted --
+            # it surfaces with an identity of "<tenantId>\") makes
+            # Get-RoleGroupMember throw for that ONE role group; under
+            # $ErrorActionPreference='stop' the old `Write-Error; return` aborted
+            # the ENTIRE reconcile on the first such group. Report via
+            # Write-PruneFailure (Write-Warning + '::error::', never Write-Error,
+            # so it does not terminate the loop), record the role group, skip it
+            # (no plan row is added, so the write phase never touches it), and
+            # keep reading the rest. The aggregate throw after the write phase
+            # still fails the run non-zero once every group has been tried.
+            $report.Add([pscustomobject]@{
+                Category  = 'Failed'
+                Kind      = 'RoleGroupMember'
+                Name      = ("{0} :: <members>" -f $rgName)
+                Reason    = ('Get-RoleGroupMember read failed; role group skipped: {0}' -f $_.Exception.Message)
+                RoleGroup = $rgName
+            })
+            Write-PruneFailure ("Get-RoleGroupMember -Identity '{0}' failed: {1}. Role group skipped (unreadable current membership); verify the name is exactly correct (case-sensitive), the workload SP holds 'View-Only Recipients', and the role group has no orphaned members." -f $rgName, $_.Exception.Message)
+            $readFailures.Add($rgName)
+            continue
         }
 
         # Read-phase diagnostic: the '#401' reference this comment
@@ -1104,6 +1189,15 @@ try {
 
     # ---- Phase 3: Write ----
     $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+    # Issue #61: Add (bind) failures are collected and continued exactly like
+    # revoke failures below, rather than aborting the run on the first one. A
+    # single non-bindable role group (e.g. an Exchange RBAC role-assignment
+    # policy such as `DefaultRoleAssignmentPolicy`, which rejects
+    # Add-RoleGroupMember with `EntityValidation CheckIsUserRole`) must not
+    # prevent every other declared bind from being attempted. The aggregate
+    # throw after the Phase 3 loop names every failed add + revoke, so the run
+    # still exits non-zero, but only after every plan row has been tried.
+    $addFailures = New-Object 'System.Collections.Generic.List[string]'
 
     # Issue #13: in-loop revoke failures are reported via Write-PruneFailure
     # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
@@ -1144,19 +1238,19 @@ try {
                     # to confirm the Add actually persisted server-side. Diagnoses the
                     # silent non-persistence hypothesis where Exchange / S&C returns 2xx
                     # but the row never lands.
+                    # Issue #65 F5: the immediate post-Add read routinely misses the new
+                    # member to S&C replication lag (proven benign on #61 -- every such
+                    # warning cleared on a later -WhatIf). Wait-RoleGroupMemberVisible
+                    # retries a few times with a short backoff, so the warning below now
+                    # fires only after genuine non-persistence, not on the first lagging
+                    # read.
                     # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/get-rolegroupmember
-                    try {
-                        $verify = @(Get-RoleGroupMember -Identity $rgName -ResultSize Unlimited -ErrorAction Stop |
-                            Where-Object { $_.ExternalDirectoryObjectId -ieq $oid })
-                        if ($verify.Count -gt 0) {
-                            Write-Verbose ("[verify-add] '{0}': post-Add read confirmed member present." -f $rgName)
-                        }
-                        else {
-                            Write-Warning ("[verify-add] '{0}': Add returned success but post-Add read did NOT see the member. Possible silent non-persistence or replication lag." -f $rgName)
-                        }
+                    $verifyReader = { Get-RoleGroupMember -Identity $rgName -ResultSize Unlimited -ErrorAction Stop }
+                    if (Wait-RoleGroupMemberVisible -Reader $verifyReader -Oid $oid) {
+                        Write-Verbose ("[verify-add] '{0}': post-Add read confirmed member present." -f $rgName)
                     }
-                    catch {
-                        Write-Verbose ("[verify-add] '{0}': post-Add read failed: {1}" -f $rgName, $_.Exception.Message)
+                    else {
+                        Write-Warning ("[verify-add] '{0}': Add returned success but post-Add read did NOT see the member after retries. Possible silent non-persistence." -f $rgName)
                     }
                 }
                 catch {
@@ -1169,8 +1263,18 @@ try {
                         Write-Information ("Role group '{0}' already contains the desired member; treating as no-op." -f $rgName) -InformationAction Continue
                         continue
                     }
-                    Write-Error ("Add-RoleGroupMember -Identity '{0}' failed: {1}" -f $rgName, $_.Exception.Message)
-                    return
+                    # Issue #61: collect-and-continue (same shape as the revoke
+                    # catch below) instead of Write-Error + return. Report via
+                    # Write-PruneFailure (Write-Warning + '::error::', never
+                    # Write-Error, so shell: pwsh's $ErrorActionPreference='stop'
+                    # does not terminate the loop), record the role group, and
+                    # keep binding the rest. The aggregate throw at the end of
+                    # Phase 3 fails the run non-zero once every row is tried.
+                    $reportRow.Category = 'Failed'
+                    $reportRow.Reason   = ('Add failed: {0}' -f $_.Exception.Message)
+                    Write-PruneFailure ("Add-RoleGroupMember -Identity '{0}' failed: {1}" -f $rgName, $_.Exception.Message)
+                    $addFailures.Add(("{0} :: <oid>" -f $rgName))
+                    continue
                 }
             }
         }
@@ -1214,8 +1318,22 @@ try {
         }
     }
 
-    if ($pruneFailures.Count -gt 0) {
-        throw ("Reconciliation aborted: {0} role-group member revoke(s) failed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
+    # Issue #61: one aggregate throw covering read (F6), add, and revoke
+    # failures, so a failed member read, bind, or revoke still exits the run
+    # non-zero -- but only after every role group has been tried, never on the
+    # first failure.
+    if ($readFailures.Count -gt 0 -or $addFailures.Count -gt 0 -or $pruneFailures.Count -gt 0) {
+        $parts = @()
+        if ($readFailures.Count -gt 0) {
+            $parts += ('{0} role-group member read(s) failed: {1}' -f $readFailures.Count, ($readFailures -join ', '))
+        }
+        if ($addFailures.Count -gt 0) {
+            $parts += ('{0} role-group member add(s) failed: {1}' -f $addFailures.Count, ($addFailures -join ', '))
+        }
+        if ($pruneFailures.Count -gt 0) {
+            $parts += ('{0} role-group member revoke(s) failed: {1}' -f $pruneFailures.Count, ($pruneFailures -join ', '))
+        }
+        throw ("Reconciliation completed with failures: {0}. See errors above." -f ($parts -join '; '))
     }
 
     #endregion

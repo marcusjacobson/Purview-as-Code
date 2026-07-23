@@ -645,7 +645,7 @@ Describe 'Prune failure reporting executed through the script wiring (issue #13,
         if ($s -lt 0) { throw 'Could not locate the $pruneFailures declaration in Deploy-PurviewRoleGroups.ps1; update the anchor in this test.' }
         $ifStart = -1
         for ($i = $s; $i -lt $script:RepLines.Count; $i++) {
-            if ($script:RepLines[$i] -match '^\s*if \(\$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
+            if ($script:RepLines[$i] -match '^\s*if \(\$readFailures\.Count -gt 0 -or \$addFailures\.Count -gt 0 -or \$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
         }
         if ($ifStart -lt 0) { throw 'Could not locate the aggregate-throw block in Deploy-PurviewRoleGroups.ps1; update the anchor in this test.' }
         $depth = 0; $e = -1
@@ -685,6 +685,9 @@ Describe 'Prune failure reporting executed through the script wiring (issue #13,
             function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
             $PruneMissing = [switch]$true
             $report = New-Object 'System.Collections.Generic.List[object]'
+            # #61 F6: declared upstream of the lifted region in the real script;
+            # the aggregate throw now reads $readFailures.Count too.
+            $readFailures = New-Object 'System.Collections.Generic.List[string]'
             $plan = @($RoleGroups | ForEach-Object {
                     [pscustomobject]@{
                         RoleGroup = $_
@@ -694,7 +697,7 @@ Describe 'Prune failure reporting executed through the script wiring (issue #13,
                 })
             $ShouldProcessStub = [pscustomobject]@{}
             $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
-            $null = $PruneMissing, $report, $plan, $ShouldProcessStub
+            $null = $PruneMissing, $report, $plan, $ShouldProcessStub, $readFailures
             $thrown = $null
             try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null } catch { $thrown = $_.Exception.Message }
             [pscustomobject]@{ Attempted = $attempted.ToArray(); Reported = $reported.ToArray(); Thrown = $thrown }
@@ -738,5 +741,324 @@ Describe 'Prune failure reporting executed through the script wiring (issue #13,
         $script:ReporterRegion | Should -Match 'Write-PruneFailure'
         $script:ReporterRegion | Should -Match 'throw'
         $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error.*Remove-RoleGroupMember'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Issue #61: the Add (bind) catch previously did Write-Error + return -- a
+# first-failure abort that let one non-bindable role group (e.g. an Exchange
+# RBAC role-assignment policy like DefaultRoleAssignmentPolicy, which rejects
+# Add-RoleGroupMember with EntityValidation CheckIsUserRole) block every other
+# declared bind. It now collects-and-continues exactly like the revoke catch,
+# with the failure surfaced in the same aggregate throw. Same lifted-region +
+# stub technique as the revoke tests above.
+# ---------------------------------------------------------------------------
+Describe 'Add failure reporter -- collect-and-continue, not first-failure abort (issue #61)' {
+
+    BeforeAll {
+        $script:AddSource = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'reports an Add failure via the shared reporter (Write-PruneFailure), not Write-Error' {
+        # the add catch appends to $addFailures and reports via Write-PruneFailure
+        $script:AddSource | Should -Match '\$addFailures'
+        $script:AddSource | Should -Match "Write-PruneFailure \(""Add-RoleGroupMember"
+    }
+    It 'the add catch does NOT Write-Error + return (mutation check vs the pre-fix first-failure abort)' {
+        $script:AddSource | Should -Not -Match '(?m)^\s*Write-Error.*Add-RoleGroupMember'
+    }
+    It 'the aggregate throw covers add failures as well as revoke failures' {
+        $script:AddSource | Should -Match 'if \(\$readFailures\.Count -gt 0 -or \$addFailures\.Count -gt 0 -or \$pruneFailures\.Count -gt 0\)'
+        $script:AddSource | Should -Match 'role-group member add\(s\) failed'
+    }
+}
+
+Describe 'Add failure reporting executed through the script wiring (issue #61)' {
+
+    BeforeAll {
+        $script:SecretOid = '99999999-9999-9999-9999-999999999999'
+
+        function Invoke-AddRegion {
+            # Each entry adds the sentinel OID to one role group. $Fail lists
+            # role-group names whose Add throws a non-idempotent error (the
+            # DefaultRoleAssignmentPolicy class); $Idempotent lists names whose
+            # Add throws MemberAlreadyExistsException.
+            param([string[]]$RoleGroups = @(), [string[]]$Fail = @(), [string[]]$Idempotent = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            function Add-RoleGroupMember {
+                [CmdletBinding(SupportsShouldProcess)]
+                param([string]$Identity, [string]$Member)
+                $null = $Member
+                $attempted.Add($Identity)
+                if ($Idempotent -contains $Identity) { throw 'MemberAlreadyExistsException: is already a member of the group' }
+                if ($Fail -contains $Identity) { throw "EntityValidation CheckIsUserRole, Role with isUserRole not allowed on $Identity" }
+            }
+            # verify-add read: return empty (exercises the non-fatal verify warning path)
+            function Get-RoleGroupMember { param([string]$Identity, $ResultSize) $null = $Identity, $ResultSize; @() }
+            # #65 F5: the lifted write region's verify-add step now delegates to
+            # Wait-RoleGroupMemberVisible; stub it so this add-failure harness stays
+            # focused on the bind collect-and-continue contract.
+            function Wait-RoleGroupMemberVisible { param($Reader, $Oid, $MaxAttempts, $DelaySeconds) $null = $Reader, $Oid, $MaxAttempts, $DelaySeconds; $true }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            $PruneMissing = [switch]$false
+            $report = New-Object 'System.Collections.Generic.List[object]'
+            # #61 F6: declared upstream of the lifted region in the real script;
+            # the aggregate throw now reads $readFailures.Count too.
+            $readFailures = New-Object 'System.Collections.Generic.List[string]'
+            $plan = @($RoleGroups | ForEach-Object {
+                    [pscustomobject]@{
+                        RoleGroup = $_
+                        ToCreate  = @($script:SecretOid)
+                        ToRevoke  = @()
+                    }
+                })
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+            $null = $PruneMissing, $report, $plan, $ShouldProcessStub, $readFailures
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = $attempted.ToArray(); Reported = $reported.ToArray(); Thrown = $thrown }
+        }
+    }
+
+    It 'attempts every bind after a failure (no first-failure abort)' {
+        $r = Invoke-AddRegion -RoleGroups @('rg1', 'rg2', 'rg3') -Fail @('rg1')
+        $r.Attempted | Should -Be @('rg1', 'rg2', 'rg3')
+    }
+    It 'treats an idempotent MemberAlreadyExistsException as a no-op, not a failure' {
+        $r = Invoke-AddRegion -RoleGroups @('rg1', 'rg2') -Idempotent @('rg1')
+        $r.Reported | Should -BeNullOrEmpty
+        $r.Thrown   | Should -BeNullOrEmpty
+    }
+    It 'reports each failed bind with the tenant''s own error text' {
+        $r = Invoke-AddRegion -RoleGroups @('rg1', 'rg2') -Fail @('rg2')
+        $r.Reported.Count | Should -Be 1
+        $r.Reported[0] | Should -Match 'CheckIsUserRole'
+    }
+    It 'throws one aggregate naming every failed bind (non-zero exit preserved)' {
+        $r = Invoke-AddRegion -RoleGroups @('rg1', 'rg2', 'rg3') -Fail @('rg1', 'rg3')
+        $r.Thrown | Should -Match '2 role-group member add'
+    }
+    It 'NEVER names a principal object ID in any add-failure output (privacy: <oid> redaction)' {
+        $r = Invoke-AddRegion -RoleGroups @('rg1') -Fail @('rg1')
+        $r.Thrown               | Should -Not -Match ([regex]::Escape($script:SecretOid))
+        ($r.Reported -join ' ') | Should -Not -Match ([regex]::Escape($script:SecretOid))
+    }
+    It 'throws nothing when every bind succeeds' {
+        $r = Invoke-AddRegion -RoleGroups @('rg1', 'rg2')
+        $r.Thrown   | Should -BeNullOrEmpty
+        $r.Reported | Should -BeNullOrEmpty
+    }
+}
+
+# --------------------------------------------------------------------------
+# Issue #61 F6: the APPLY-side member READ leg must collect-and-continue too.
+# A single orphaned/unresolvable role-group member (e.g. one whose backing
+# principal was deleted -- it surfaces with an identity of "<tenantId>\")
+# makes Get-RoleGroupMember throw for that ONE role group. Before this fix the
+# read-phase catch did `Write-Error; return`, which under the script's
+# $ErrorActionPreference='stop' aborted the ENTIRE reconcile (and even a
+# read-only -WhatIf) on the first such group. The fix mirrors the Phase 3
+# add/revoke catches: report via Write-PruneFailure, record the role group in
+# $readFailures, skip it, keep reading the rest, and fail the run non-zero via
+# the same aggregate throw. Surfaced by the post-merge belt-and-suspenders
+# -WhatIf that hit an orphaned member in lab's PrivacyManagementAnalysts.
+# --------------------------------------------------------------------------
+Describe 'Read failure reporter -- collect-and-continue on the member-read leg (issue #61 F6)' {
+
+    BeforeAll {
+        $script:ReadSrc = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'the Get-RoleGroupMember read catch reports via Write-PruneFailure and records $readFailures' {
+        $script:ReadSrc | Should -Match '\$readFailures = New-Object'
+        $script:ReadSrc | Should -Match 'Write-PruneFailure \("Get-RoleGroupMember'
+        $script:ReadSrc | Should -Match '\$readFailures\.Add\(\$rgName\)'
+    }
+    It 'the read catch does NOT Write-Error + return (mutation check vs the pre-F6 first-failure abort)' {
+        $script:ReadSrc | Should -Not -Match "Write-Error \(""Get-RoleGroupMember -Identity '\{0\}' failed"
+    }
+    It 'the aggregate throw covers read failures alongside add and revoke failures' {
+        $script:ReadSrc | Should -Match 'if \(\$readFailures\.Count -gt 0 -or \$addFailures\.Count -gt 0 -or \$pruneFailures\.Count -gt 0\)'
+        $script:ReadSrc | Should -Match 'role-group member read\(s\) failed'
+    }
+}
+
+Describe 'Read failure reporting executed through the script wiring (issue #61 F6)' {
+
+    BeforeAll {
+        $script:RdLines = @(Get-Content -LiteralPath $script:ScriptPath)
+        # Lift the Phase 1 read loop -- `foreach ($rg in $desiredRoleGroups) {`
+        # through its matching close brace -- and run it against cmdlet stubs,
+        # the same lifted-region technique the add/revoke wiring tests use.
+        # The -ExportCurrentState path also iterates `$desiredRoleGroups`, so
+        # anchor on the Phase 1 read/categorize marker first, then take the
+        # foreach that follows it.
+        $phase1 = -1
+        for ($i = 0; $i -lt $script:RdLines.Count; $i++) {
+            if ($script:RdLines[$i] -match '^\s*#\s*----\s*Phase 1: Read \+ categorize') { $phase1 = $i; break }
+        }
+        if ($phase1 -lt 0) { throw 'Could not locate the Phase 1 read/categorize marker in Deploy-PurviewRoleGroups.ps1; update the anchor in this test.' }
+        $s = -1
+        for ($i = $phase1; $i -lt $script:RdLines.Count; $i++) {
+            if ($script:RdLines[$i] -match '^\s*foreach \(\$rg in \$desiredRoleGroups\) \{') { $s = $i; break }
+        }
+        if ($s -lt 0) { throw 'Could not locate the Phase 1 read loop in Deploy-PurviewRoleGroups.ps1; update the anchor in this test.' }
+        $depth = 0; $e = -1
+        for ($j = $s; $j -lt $script:RdLines.Count; $j++) {
+            $depth += ([regex]::Matches($script:RdLines[$j], '\{')).Count
+            $depth -= ([regex]::Matches($script:RdLines[$j], '\}')).Count
+            if ($depth -le 0) { $e = $j; break }
+        }
+        if ($e -lt 0) { throw 'Could not brace-match the Phase 1 read loop; update the anchor in this test.' }
+        $script:ReadRegion = ($script:RdLines[$s..$e] -join [Environment]::NewLine)
+
+        function Invoke-ReadRegion {
+            # $Fail lists role-group names whose Get-RoleGroupMember throws the
+            # orphaned-member error; every other name returns no members.
+            param([string[]]$RoleGroups = @(), [string[]]$Fail = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            function Get-RoleGroupMember {
+                param([string]$Identity, $ResultSize, $ErrorAction)
+                $null = $ResultSize, $ErrorAction
+                $attempted.Add($Identity)
+                if ($Fail -contains $Identity) {
+                    # Synthetic (repeated-nibble, ADR 0055 residue-safe) stand-in
+                    # for the "<tenantId>\<blank account>" orphaned-member identity
+                    # the live tenant returns; the value is immaterial to the test.
+                    throw ("A management role assignment policy, user, or security group couldn't be found with the identity ""dddddddd-dddd-dddd-dddd-dddddddddddd\""")
+                }
+                @()
+            }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            # Reproduce the script's runtime condition: a non-terminating
+            # Write-Error would terminate under Stop, so if the fix ever regresses
+            # to `Write-Error; return` this harness aborts on the first failure and
+            # the continue-through assertions below fail.
+            $ErrorActionPreference = 'Stop'
+            $PruneMissing = [switch]$false
+            $report = New-Object 'System.Collections.Generic.List[object]'
+            $readFailures = New-Object 'System.Collections.Generic.List[string]'
+            $plan = New-Object 'System.Collections.Generic.List[object]'
+            $desiredRoleGroups = @($RoleGroups | ForEach-Object { @{ name = $_ } })
+            $null = $PruneMissing, $report, $plan, $desiredRoleGroups
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReadRegion)) 6>$null 4>$null 3>$null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{
+                Attempted    = $attempted.ToArray()
+                Reported     = $reported.ToArray()
+                ReadFailures = $readFailures.ToArray()
+                FailedRows   = @($report | Where-Object { $_.Category -eq 'Failed' })
+                Thrown       = $thrown
+            }
+        }
+    }
+
+    It 'continues reading every role group after one throws (no first-failure abort)' {
+        $r = Invoke-ReadRegion -RoleGroups @('rg1', 'rg2', 'rg3') -Fail @('rg1')
+        $r.Attempted | Should -Be @('rg1', 'rg2', 'rg3')
+        $r.Thrown    | Should -BeNullOrEmpty
+    }
+    It 'records only the unreadable role group in $readFailures' {
+        $r = Invoke-ReadRegion -RoleGroups @('rg1', 'rg2', 'rg3') -Fail @('rg2')
+        $r.ReadFailures | Should -Be @('rg2')
+    }
+    It 'reports each read failure via Write-PruneFailure with the tenant''s own error text' {
+        $r = Invoke-ReadRegion -RoleGroups @('rg1', 'rg2') -Fail @('rg2')
+        $r.Reported.Count | Should -Be 1
+        $r.Reported[0]    | Should -Match "couldn't be found with the identity"
+    }
+    It 'emits a Failed report row for the skipped role group' {
+        $r = Invoke-ReadRegion -RoleGroups @('rg1', 'rg2') -Fail @('rg2')
+        $r.FailedRows.Count        | Should -Be 1
+        $r.FailedRows[0].RoleGroup | Should -Be 'rg2'
+    }
+    It 'records nothing when every read succeeds' {
+        $r = Invoke-ReadRegion -RoleGroups @('rg1', 'rg2')
+        $r.ReadFailures | Should -BeNullOrEmpty
+        $r.Reported     | Should -BeNullOrEmpty
+        $r.Thrown       | Should -BeNullOrEmpty
+    }
+}
+
+# --------------------------------------------------------------------------
+# Issue #65 F4: -ExportCurrentState must never write a non-bindable role group
+# (e.g. DefaultRoleAssignmentPolicy) into role-groups.yaml, or the next apply
+# re-hits the #61 bind failure.
+# --------------------------------------------------------------------------
+Describe 'Deploy-PurviewRoleGroups.ps1 — non-bindable role groups excluded from export (issue #65 F4)' {
+
+    BeforeAll {
+        $script:NonBindableRoleGroups = @('DefaultRoleAssignmentPolicy')
+        $fnAst = $script:Ast.Find({
+                param($node)
+                ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) -and
+                ($node.Name -eq 'Test-IsNonBindableRoleGroup')
+            }, $true)
+        if (-not $fnAst) { throw 'Test-IsNonBindableRoleGroup not found; the F4 fix is missing.' }
+        . ([scriptblock]::Create($fnAst.Extent.Text))
+    }
+
+    It 'declares DefaultRoleAssignmentPolicy in the non-bindable denylist' {
+        $script:ScriptText | Should -Match "NonBindableRoleGroups = @\('DefaultRoleAssignmentPolicy'\)"
+    }
+    It 'classifies DefaultRoleAssignmentPolicy as non-bindable' {
+        Test-IsNonBindableRoleGroup -RoleGroupName 'DefaultRoleAssignmentPolicy' | Should -BeTrue
+    }
+    It 'classifies a normal role group as bindable' {
+        Test-IsNonBindableRoleGroup -RoleGroupName 'ComplianceAdministrator' | Should -BeFalse
+    }
+    It 'skips non-bindable role groups in the export loop before reading members (source contract)' {
+        $script:ScriptText | Should -Match 'if \(Test-IsNonBindableRoleGroup -RoleGroupName \$rg\.Name\) \{'
+    }
+}
+
+# --------------------------------------------------------------------------
+# Issue #65 F5: the post-Add verification read routinely misses the new member
+# to S&C replication lag. Wait-RoleGroupMemberVisible retries with a short
+# backoff so the "did NOT see the member" warning fires only after genuine
+# non-persistence, not on every successful bind.
+# --------------------------------------------------------------------------
+Describe 'Wait-RoleGroupMemberVisible — verify-add retry/backoff (issue #65 F5)' {
+
+    BeforeAll {
+        $fnAst = $script:Ast.Find({
+                param($node)
+                ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) -and
+                ($node.Name -eq 'Wait-RoleGroupMemberVisible')
+            }, $true)
+        if (-not $fnAst) { throw 'Wait-RoleGroupMemberVisible not found; the F5 fix is missing.' }
+        . ([scriptblock]::Create($fnAst.Extent.Text))
+        # Synthetic (repeated-nibble, ADR 0055 residue-safe) member OID.
+        $script:VerifyOid = '11111111-1111-1111-1111-111111111111'
+    }
+
+    It 'returns true on the first read when the member is already visible (no retry)' {
+        $script:calls = 0
+        $reader = { $script:calls++; [pscustomobject]@{ ExternalDirectoryObjectId = $script:VerifyOid } }
+        Wait-RoleGroupMemberVisible -Reader $reader -Oid $script:VerifyOid -MaxAttempts 3 -DelaySeconds 0 | Should -BeTrue
+        $script:calls | Should -Be 1
+    }
+    It 'retries and returns true once the member becomes visible after replication lag' {
+        $script:calls = 0
+        $reader = { $script:calls++; if ($script:calls -ge 3) { [pscustomobject]@{ ExternalDirectoryObjectId = $script:VerifyOid } } else { @() } }
+        Wait-RoleGroupMemberVisible -Reader $reader -Oid $script:VerifyOid -MaxAttempts 3 -DelaySeconds 0 | Should -BeTrue
+        $script:calls | Should -Be 3
+    }
+    It 'returns false after exhausting attempts when the member never appears' {
+        $script:calls = 0
+        $reader = { $script:calls++; @() }
+        Wait-RoleGroupMemberVisible -Reader $reader -Oid $script:VerifyOid -MaxAttempts 3 -DelaySeconds 0 | Should -BeFalse
+        $script:calls | Should -Be 3
+    }
+    It 'tolerates a transient throwing read and keeps retrying' {
+        $script:calls = 0
+        $reader = { $script:calls++; if ($script:calls -lt 2) { throw 'transient' }; [pscustomobject]@{ ExternalDirectoryObjectId = $script:VerifyOid } }
+        Wait-RoleGroupMemberVisible -Reader $reader -Oid $script:VerifyOid -MaxAttempts 3 -DelaySeconds 0 | Should -BeTrue
+    }
+    It 'wires the verify-add site to the retry helper instead of a single-shot read (source contract)' {
+        $script:ScriptText | Should -Match 'Wait-RoleGroupMemberVisible -Reader \$verifyReader -Oid \$oid'
     }
 }

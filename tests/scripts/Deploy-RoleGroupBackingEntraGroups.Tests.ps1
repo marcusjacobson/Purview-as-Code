@@ -505,3 +505,67 @@ Describe 'Prune failure reporting executed through the script wiring (issue #13,
         $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
     }
 }
+
+# --------------------------------------------------------------------------
+# Issue #65 F1: the ADR 0062 directory-role backing groups share the
+# 'sg-purview-' prefix but belong to a different RBAC surface. This reconciler
+# must exclude them from its tenant view so a future -PruneMissing never deletes
+# them as false orphans.
+# --------------------------------------------------------------------------
+Describe 'Deploy-RoleGroupBackingEntraGroups.ps1 — directory-role namespace excluded (issue #65 F1)' {
+
+    BeforeAll {
+        # Satisfy the $script:DirectoryRolePrefix constant the helper references,
+        # then dot-source just the pure predicate (no script execution).
+        $script:DirectoryRolePrefix = 'sg-purview-directory-role-'
+        $fnAst = $script:Ast.Find({
+                param($node)
+                ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) -and
+                ($node.Name -eq 'Test-IsDirectoryRoleBackingName')
+            }, $true)
+        if (-not $fnAst) { throw 'Test-IsDirectoryRoleBackingName not found; the F1 fix is missing.' }
+        . ([scriptblock]::Create($fnAst.Extent.Text))
+    }
+
+    It 'defines the sg-purview-directory-role- exclusion prefix constant' {
+        $script:ScriptText | Should -Match "DirectoryRolePrefix = 'sg-purview-directory-role-'"
+    }
+    It 'classifies a directory-role backing group as directory-role-owned' {
+        Test-IsDirectoryRoleBackingName -DisplayName 'sg-purview-directory-role-compliance-administrator' | Should -BeTrue
+    }
+    It 'classifies a portal role-group backing group as NOT directory-role-owned' {
+        Test-IsDirectoryRoleBackingName -DisplayName 'sg-purview-compliance-administrator' | Should -BeFalse
+    }
+    It 'matches the directory-role prefix case-insensitively' {
+        Test-IsDirectoryRoleBackingName -DisplayName 'SG-PURVIEW-DIRECTORY-ROLE-X' | Should -BeTrue
+    }
+    It 'classifies an unrelated or empty display name as NOT directory-role-owned' {
+        Test-IsDirectoryRoleBackingName -DisplayName 'sg-something-else' | Should -BeFalse
+        Test-IsDirectoryRoleBackingName -DisplayName '' | Should -BeFalse
+    }
+    It 'reduces $current by the directory-role predicate before any drift calc (source contract)' {
+        $script:ScriptText | Should -Match '\$current = @\(\$current \| Where-Object \{ -not \(Test-IsDirectoryRoleBackingName'
+    }
+}
+
+# --------------------------------------------------------------------------
+# Issue #65 F2/F3: the group create must not set owners@odata.bind (F2 -- a
+# delegated-self run duplicates the creator and the create fails), and must
+# apply -OwnerObjectId via an idempotent post-create POST /owners/$ref (F3 --
+# the create-body bind was silently dropped for a service principal).
+# --------------------------------------------------------------------------
+Describe 'Deploy-RoleGroupBackingEntraGroups.ps1 — create owner handling (issue #65 F2/F3)' {
+
+    It 'does NOT assign owners@odata.bind in the group create body (F2)' {
+        # The removed defect was `$bodyHash['owners@odata.bind'] = ...`; the prose
+        # comment still names the property, so anchor on the hashtable-key access.
+        $script:ScriptText | Should -Not -Match "owners@odata\.bind'\]"
+    }
+    It 'ensures -OwnerObjectId via a post-create POST to /owners/$ref (F3)' {
+        $script:ScriptText | Should -Match 'ownerRefBody'
+        $script:ScriptText | Should -Match 'learn\.microsoft\.com/en-us/graph/api/group-post-owners'
+    }
+    It 'treats an already-an-owner response as an idempotent no-op, not a failure' {
+        $script:ScriptText | Should -Match "already exist"
+    }
+}
