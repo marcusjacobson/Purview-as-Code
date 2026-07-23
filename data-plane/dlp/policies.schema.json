@@ -225,8 +225,8 @@
                 },
                 "notifyPolicyTipDisplayOption": {
                     "type": "string",
-                    "enum": [ "Tip", "NotifyOnly", "NotificationOnly" ],
-                    "description": "Maps to -NotifyPolicyTipDisplayOption on New-DlpComplianceRule. Controls how the policy-tip surface displays the match (in-product tip, notification only, or notification-only). The 'None' / absent case is represented by omitting the field. Tracked per ADR 0033 Batch 3a (#521 slice D). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                    "minLength": 1,
+                    "description": "Maps to -NotifyPolicyTipDisplayOption on New-DlpComplianceRule. Controls how the policy-tip surface displays the match. Allowed values are validated server-side by the cmdlet at apply time; schema does not pin an enum because the allowlist is not published as a strongly-typed enum on the cmdlet's parameter metadata and the live service returns values beyond the originally-assumed set (observed on the lab tenant: 'Tip' and 'Dialog'; also 'NotifyOnly' / 'NotificationOnly'). Consistent with the sibling notifyUserType / notifyOverrideRequirements / notifyEmailOnedriveRemediationActions fields. The 'None' / absent case is represented by omitting the field. Tracked per ADR 0033 Batch 3a (#521 slice D). Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
                 },
                 "notifyUserType": {
                     "type": "string",

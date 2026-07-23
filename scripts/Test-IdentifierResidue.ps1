@@ -21,7 +21,7 @@
     if it had been scanned. This script closes that gap.
 
     CONTRACT -- FAIL CLOSED. Every GUID-shaped token in every tracked file is
-    guilty until acquitted. A GUID is acquitted only if one of four manifest
+    guilty until acquitted. A GUID is acquitted only if one of five manifest
     rules claims it:
 
       1. syntheticShapes    -- acquits by SHAPE (zero GUID, the zero-prefixed
@@ -43,6 +43,14 @@
                                them. Reported as `Review`, not `Finding`, and
                                pinned by a Pester test so the list cannot grow
                                quietly.
+      5. committedTenantIdentifiers -- acquits by exact VALUE. Tenant-SPECIFIC IDs
+                               deliberately committed as desired state because the
+                               surface has no displayName the reconciler can
+                               round-trip (Power BI/Fabric DLP workspace locations,
+                               genericLocations principals keyed on object ID). A
+                               narrow, owner-approved ADR-0023/0055 exception; each
+                               entry is named + reasoned + Pester-pinned. NOT a
+                               path/shape hatch -- any OTHER tenant GUID still fails.
 
     Anything else is a `Finding` and the script exits 1.
 
@@ -316,6 +324,20 @@ foreach ($c in $cfg.microsoftConstants) {
     $microsoftConstants[([string]$c.value).ToLowerInvariant()] = [string]$c.name
 }
 
+# Rule 5 — committed tenant identifiers (by exact value). OPTIONAL. Tenant-
+# SPECIFIC identifiers deliberately committed as desired state because the
+# surface that carries them has no displayName-based representation the
+# reconciler can round-trip (ADR 0055 exception, issue #71 — e.g. Power BI /
+# Fabric DLP policy workspace locations, genericLocations principals keyed on
+# object ID). Fail-closed: exact value only, each entry named and reasoned in
+# the manifest and pinned by a Pester test.
+$committedTenantIds = @{}
+if ($cfg.ContainsKey('committedTenantIdentifiers') -and $null -ne $cfg.committedTenantIdentifiers) {
+    foreach ($c in $cfg.committedTenantIdentifiers) {
+        $committedTenantIds[([string]$c.value).ToLowerInvariant()] = [string]$c.name
+    }
+}
+
 # Rule 4 — review-required quarantine (by SHA-256 of the lower-cased value).
 $reviewRequired = @{}
 if ($cfg.ContainsKey('reviewRequired') -and $null -ne $cfg.reviewRequired) {
@@ -391,6 +413,11 @@ foreach ($relativePath in $fileList) {
             elseif ($microsoftConstants.ContainsKey($value)) {
                 $verdict = 'Allow'
                 $rule = "microsoftConstant:$($microsoftConstants[$value])"
+            }
+            # Rule 5 — committed tenant identifier (exact value, ADR 0055 exception).
+            elseif ($committedTenantIds.ContainsKey($value)) {
+                $verdict = 'Allow'
+                $rule = "committedTenantIdentifier:$($committedTenantIds[$value])"
             }
             # Rule 4 — quarantine.
             elseif ($reviewRequired.ContainsKey((Get-Sha256Hex -Value $value))) {

@@ -99,6 +99,19 @@ Describe 'Test-IdentifierResidue — manifest contract' {
         }
     }
 
+    It 'gives every committed tenant identifier a value, a name AND a reason (Rule 5 acquits real tenant OIDs, so each MUST be justified)' {
+        # ADR 0055 Rule 5 (issue #71). This category acquits tenant-SPECIFIC GUIDs by
+        # exact value — the one place a real object ID is legitimately committed — so
+        # unlike every other rule each entry MUST carry a written reason, or it is
+        # indistinguishable from laundering an OID into the allow-list. Optional key:
+        # @() makes the loop a no-op when the category is absent.
+        foreach ($c in @($script:Manifest.identifierScan.committedTenantIdentifiers)) {
+            [string]$c.value  | Should -Match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            [string]$c.name   | Should -Not -BeNullOrEmpty
+            [string]$c.reason | Should -Not -BeNullOrEmpty
+        }
+    }
+
     It 'scopes every catalogKeys entry to a specific file AND specific keys (never a whole directory)' {
         foreach ($entry in $script:Manifest.identifierScan.catalogKeys) {
             [string]$entry.path | Should -Not -Match '[*?]'          # no globs — one file

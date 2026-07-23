@@ -78,7 +78,8 @@ BeforeAll {
             'Compare-DlpPolicy',
             'Compare-DlpRule',
             'Get-DlpPolicySplat',
-            'Get-DlpRuleSplat')) {
+            'Get-DlpRuleSplat',
+            'Invoke-DlpExport')) {
         $fnAst = $ast.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -452,6 +453,29 @@ Describe 'Schema and reconciler accept the post-export tenant shape (PR for #362
     BeforeAll {
         $script:SchemaPath = Join-Path $PSScriptRoot '..' '..' 'data-plane' 'dlp' 'policies.schema.json'
         $script:Schema     = Get-Content -LiteralPath $script:SchemaPath -Raw
+        Import-Module powershell-yaml -ErrorAction Stop
+    }
+
+    It 'exporter omits restrictAccess when the tenant items normalize to empty (issue #71 -- never emits schema-invalid restrictAccess: [])' {
+        # A tenant rule whose only RestrictAccess entry has no `setting` is dropped
+        # by ConvertTo-NormalizedRestrictAccess, so a naive exporter would write
+        # `restrictAccess: []` -- which the schema (restrictAccess minItems: 1)
+        # rejects and no round-trip can satisfy. Observed live on the lab Copilot
+        # "Protect sensitive M365 Copilot interactions" rule. The export must omit
+        # the key entirely and stay schema-valid.
+        $policy = [pscustomobject]@{ Name = 'P-71'; Mode = 'Enable'; Priority = 0; TeamsLocation = @('All') }
+        $rule = [pscustomobject]@{
+            ParentPolicyName = 'P-71'
+            Name             = 'R-71'
+            Priority         = 0
+            IsAdvancedRule   = $false
+            RestrictAccess   = @(@{ notASetting = 'value' })
+        }
+        $out = Join-Path $TestDrive 'export-71.yaml'
+        Invoke-DlpExport -Path $out -TenantPolicies @($policy) -TenantRules @($rule)
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        $doc.policies[0].rules[0].ContainsKey('restrictAccess') | Should -BeFalse
+        { ($doc | ConvertTo-Json -Depth 25) | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Not -Throw
     }
 
     It 'validates a policy that declares the powerBI location bucket (Fabric DLP)' {
@@ -1617,16 +1641,20 @@ Describe 'DLP rule tracked-field expansion -- Batch 3a: operator-facing notify c
             { $doc | Test-Json -Schema $script:Schema536 -ErrorAction Stop } | Should -Not -Throw
         }
 
-        It 'schema rejects notifyPolicyTipDisplayOption outside Tip/NotifyOnly/NotificationOnly' {
-            $doc = '{"policies":[{"name":"p","mode":"Enable","locations":{"sharePoint":"All"},"rules":[{"name":"r","sensitiveInfoTypes":[{"guid":"50842eb7-edc8-4019-85dd-5a5c1f2bb085"}],"notifyPolicyTipDisplayOption":"NotAnOption"}]}]}'
-            { $doc | Test-Json -Schema $script:Schema536 -ErrorAction Stop } | Should -Throw
-        }
-
-        It 'schema accepts each of the 3 documented notifyPolicyTipDisplayOption enum values' {
-            foreach ($v in @('Tip','NotifyOnly','NotificationOnly')) {
+        It 'schema accepts notifyPolicyTipDisplayOption values beyond the originally-assumed set (live tenant returns Dialog; issue #71)' {
+            # The enum was relaxed to a non-empty string to match its sibling
+            # notify-* fields: the live service returns values (e.g. Dialog) outside
+            # the originally-pinned [Tip, NotifyOnly, NotificationOnly], and the
+            # cmdlet validates the allowed set server-side at apply time.
+            foreach ($v in @('Tip','NotifyOnly','NotificationOnly','Dialog')) {
                 $doc = '{"policies":[{"name":"p","mode":"Enable","locations":{"sharePoint":"All"},"rules":[{"name":"r","sensitiveInfoTypes":[{"guid":"50842eb7-edc8-4019-85dd-5a5c1f2bb085"}],"notifyPolicyTipDisplayOption":"' + $v + '"}]}]}'
                 { $doc | Test-Json -Schema $script:Schema536 -ErrorAction Stop } | Should -Not -Throw -Because ("notifyPolicyTipDisplayOption=$v should be accepted")
             }
+        }
+
+        It 'schema still rejects an EMPTY notifyPolicyTipDisplayOption (minLength: 1 -- relaxed, not unconstrained)' {
+            $doc = '{"policies":[{"name":"p","mode":"Enable","locations":{"sharePoint":"All"},"rules":[{"name":"r","sensitiveInfoTypes":[{"guid":"50842eb7-edc8-4019-85dd-5a5c1f2bb085"}],"notifyPolicyTipDisplayOption":""}]}]}'
+            { $doc | Test-Json -Schema $script:Schema536 -ErrorAction Stop } | Should -Throw
         }
     }
 

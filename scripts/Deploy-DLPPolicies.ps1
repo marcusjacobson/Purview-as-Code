@@ -2192,11 +2192,20 @@ function Invoke-DlpExport {
                 # value: Block}. Closes out Batch 4 and umbrella #521.
                 if ($r.RestrictAccess -and @($r.RestrictAccess).Count -gt 0) {
                     $raNormalized = ConvertTo-NormalizedRestrictAccess -Source @($r.RestrictAccess)
-                    $re.restrictAccess = @($raNormalized | ForEach-Object {
-                        $o = [ordered]@{}
-                        foreach ($p in $_.PSObject.Properties) { $o[$p.Name] = $p.Value }
-                        $o
-                    })
+                    # Emit only when normalization yields >=1 item. A tenant rule can
+                    # carry a RestrictAccess entry that drops out during normalization
+                    # (e.g. an item with no `setting` -- observed on the lab Copilot
+                    # "interactions" rule), which would otherwise write an empty
+                    # `restrictAccess: []`. That value is rejected by the schema
+                    # (restrictAccess minItems: 1) and can never round-trip. Mirrors the
+                    # endpointDlpRestrictions / alertProperties emit guards above.
+                    if (@($raNormalized).Count -gt 0) {
+                        $re.restrictAccess = @($raNormalized | ForEach-Object {
+                            $o = [ordered]@{}
+                            foreach ($p in $_.PSObject.Properties) { $o[$p.Name] = $p.Value }
+                            $o
+                        })
+                    }
                 }
 
                 # AdvancedRule extraction (ADR 0031). When IsAdvancedRule=True,

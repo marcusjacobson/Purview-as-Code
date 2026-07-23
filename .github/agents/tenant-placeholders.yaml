@@ -563,6 +563,34 @@ identifierScan:
   # exception.
   reviewRequired: []
 
+  # --- Rule 5 — COMMITTED TENANT IDENTIFIERS (ADR 0055 exception) ----------------
+  # Acquits by exact VALUE, verdict Allow. Tenant-SPECIFIC identifiers that are
+  # DELIBERATELY committed as desired state because the surface that carries them
+  # has no displayName-based representation the reconciler can round-trip — unlike
+  # an ADR 0023 principal, which is named by displayName and never appears here.
+  # This is a narrow exception to "name principals by displayName" (ADR 0023) and
+  # "every non-catalog GUID fails closed" (ADR 0055): each entry is a single exact
+  # value, individually named, with the committing file and the reason it cannot
+  # be represented any other way. It is NOT a path/shape escape hatch — a DIFFERENT
+  # tenant GUID, or the same value in a surface not described here, still fails
+  # closed.
+  #
+  # SHIPS EMPTY (ADR 0056). Every entry is by definition a value from YOUR tenant,
+  # so the template can never carry one. Add entries only when a reconciler genuinely
+  # cannot round-trip a surface without the raw identifier. Two such surfaces are
+  # known today, both in DLP: Power BI / Fabric policy locations are workspace GUIDs
+  # (the wire shape has no displayName alternative, analogous to a committed
+  # SharePoint site URL), and genericLocations inclusion/exclusion principals are
+  # keyed on object ID by the comparator (Deploy-DLPPolicies.ps1,
+  # ConvertTo-NormalizedGenericLocations). Every OTHER tenant GUID must still fail
+  # closed — if you find yourself adding a third kind of entry, fix the reconciler
+  # to carry a displayName instead.
+  #
+  # PINNED BY A PESTER TEST (tests/scripts/Test-IdentifierResidue.Tests.ps1): every
+  # entry must carry value + name + reason, so a bare tenant OID can never be
+  # laundered in here without a visible, reviewed justification.
+  committedTenantIdentifiers: []
+
 # -----------------------------------------------------------------------------
 # functionalWorkflowScan — regression guard over .github/workflows (excluded
 # from the broad residualScan above because cosmetic prose dominates). Since
