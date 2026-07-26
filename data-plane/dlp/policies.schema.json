@@ -131,7 +131,8 @@
             "not": {
                 "anyOf": [
                     { "required": [ "advancedRule", "sensitiveInfoTypes" ] },
-                    { "required": [ "advancedRule", "sensitivityLabels" ] }
+                    { "required": [ "advancedRule", "sensitivityLabels" ] },
+                    { "required": [ "advancedRule", "rawAdvancedRule" ] }
                 ]
             },
             "properties": {
@@ -167,6 +168,11 @@
                 "advancedRule": {
                     "$ref": "#/definitions/advancedRule",
                     "description": "Declarative representation of the Microsoft `AdvancedRule` JSON predicate (rules with IsAdvancedRule=True). Mutually exclusive with `sensitiveInfoTypes` and `sensitivityLabels`. See docs/adr/0031-dlp-advancedrule-yaml-shape.md for the wire-to-YAML transform and Microsoft-shipped wire wrappers reconstructed at apply time. Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule"
+                },
+                "rawAdvancedRule": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Captured evidence, NOT desired state. Verbatim Microsoft `AdvancedRule` wire JSON, written by the reconciler exporter when ConvertFrom-AdvancedRuleWire cannot parse the body into the modelled 'advancedRule' shape (an ADR 0031 representability limit). Without it the exporter would discard the only copy of the predicate, leaving the degradation undiagnosable from the repo and blocking any future work to model the shape. Exporter-write / applier-skip: Get-DlpRuleSplat MUST never emit this to New-/Set-DlpComplianceRule -- the body is unvalidated and reaching the write path with it would be a live write-path defect (same defensive boundary as 'policyTemplateInfo', ADR 0032). Deliberately absent from the 'anyOf' predicate list: it is evidence, never a predicate, and always accompanies 'notes'. Mutually exclusive with 'advancedRule' (one means the parse succeeded, the other that it failed); MAY co-exist with 'sensitiveInfoTypes', because 'AdvancedRule' and 'ContentContainsSensitiveInformation' are separate tenant properties and a rule can populate both."
                 },
                 "blockAccess": {
                     "type": "boolean",
@@ -349,9 +355,17 @@
             }
         },
         "advancedRule": {
+            "oneOf": [
+                { "$ref": "#/definitions/advancedRuleFlat" },
+                { "$ref": "#/definitions/advancedRuleTree" }
+            ],
+            "description": "The rule predicate carried in Microsoft's `AdvancedRule` body, in either of two equivalent authored forms. `advancedRuleFlat` ({outerOperator, groups}) is the original ADR 0031 shorthand for the single-`ContentContainsSensitiveInformation` case; `advancedRuleTree` ({operator, conditions}) models the full boolean condition tree (#80). Both normalize to the same internal shape, so they compare and apply identically."
+        },
+        "advancedRuleFlat": {
             "type": "object",
             "additionalProperties": false,
             "required": [ "outerOperator", "groups" ],
+            "description": "Shorthand for a tree whose root operator is `And` over exactly one `ContentContainsSensitiveInformation` predicate -- the only shape ADR 0031 originally modeled, and the form the exporter still emits whenever the predicate fits it (so rules authored before #80 round-trip byte-identically).",
             "properties": {
                 "outerOperator": {
                     "type": "string",
@@ -362,7 +376,95 @@
                     "type": "array",
                     "minItems": 1,
                     "items": { "$ref": "#/definitions/advancedRuleGroup" },
-                    "description": "Named SIT / trainable-classifier groups. Maps to `Condition.SubConditions[0].Value[0].Groups` on the wire."
+                    "description": "Named SIT / trainable-classifier / sensitivity-label groups. Maps to `Condition.SubConditions[0].Value[0].Groups` on the wire."
+                }
+            }
+        },
+        "advancedRuleTree": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "operator", "conditions" ],
+            "description": "The full boolean predicate tree (#80). Maps to `Condition` on the wire: `operator` is `Condition.Operator` (NOT the deeper `Value[].Operator`, which is `outerOperator`) and `conditions` is `Condition.SubConditions`. See docs/adr/0031-dlp-advancedrule-yaml-shape.md.",
+            "properties": {
+                "operator": {
+                    "type": "string",
+                    "enum": [ "And", "Or" ],
+                    "description": "Boolean operator joining the entries in `conditions`. Maps to `Condition.Operator` on the wire."
+                },
+                "conditions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/advancedRuleCondition" },
+                    "description": "The predicates (and nested predicate groups) this operator joins. Maps to `Condition.SubConditions` on the wire. Order is preserved -- Microsoft's evaluation honors it."
+                }
+            }
+        },
+        "advancedRuleCondition": {
+            "oneOf": [
+                { "$ref": "#/definitions/advancedRuleConditionGroup" },
+                { "$ref": "#/definitions/advancedRuleContentCondition" },
+                { "$ref": "#/definitions/advancedRuleScalarCondition" }
+            ],
+            "description": "One node of the predicate tree: a nested boolean group, the content-inspection predicate, or a scalar predicate."
+        },
+        "advancedRuleConditionGroup": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "operator", "conditions" ],
+            "description": "A nested boolean group. Maps to a `SubConditions[]` entry that carries `Operator` + `SubConditions` and no `ConditionName` (observed on the lab Copilot-interactions rule).",
+            "properties": {
+                "operator": {
+                    "type": "string",
+                    "enum": [ "And", "Or" ],
+                    "description": "Boolean operator joining the entries in `conditions`. Maps to `SubConditions[].Operator` on the wire."
+                },
+                "conditions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/advancedRuleCondition" },
+                    "description": "Nested predicates. Maps to `SubConditions[].SubConditions` on the wire."
+                }
+            }
+        },
+        "advancedRuleContentCondition": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "type", "outerOperator", "groups" ],
+            "description": "The content-inspection predicate. Maps to a `SubConditions[]` entry with `ConditionName: ContentContainsSensitiveInformation`.",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": [ "ContentContainsSensitiveInformation" ],
+                    "description": "Maps to `SubConditions[].ConditionName` on the wire."
+                },
+                "outerOperator": {
+                    "type": "string",
+                    "enum": [ "And", "Or" ],
+                    "description": "Boolean operator joining the entries in `groups`. Maps to `SubConditions[].Value[0].Operator` on the wire -- a DIFFERENT, deeper node than the enclosing `operator`."
+                },
+                "groups": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "$ref": "#/definitions/advancedRuleGroup" },
+                    "description": "Named SIT / trainable-classifier / sensitivity-label groups. Maps to `SubConditions[].Value[0].Groups` on the wire."
+                }
+            }
+        },
+        "advancedRuleScalarCondition": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "type", "value" ],
+            "description": "A predicate whose whole payload is one scalar value. Maps to a `SubConditions[]` entry with `ConditionName` + a string `Value`. The enum is closed to the predicates observed in captured tenant bodies; an unmodeled predicate degrades to the `notes` + `rawAdvancedRule` evidence path rather than being widened silently. Reference: https://learn.microsoft.com/en-us/purview/dlp-conditions-and-exceptions",
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": [ "AccessScope", "FromScope", "HasActivity", "DocumentSizeOver" ],
+                    "description": "Maps to `SubConditions[].ConditionName` on the wire."
+                },
+                "value": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The predicate's scalar value, round-tripped verbatim (e.g. `NotInOrganization`, `UploadText`, `1 B`). Maps to `SubConditions[].Value`."
                 }
             }
         },
@@ -372,7 +474,8 @@
             "required": [ "name", "operator" ],
             "anyOf": [
                 { "required": [ "sensitiveInfoTypes" ] },
-                { "required": [ "trainableClassifiers" ] }
+                { "required": [ "trainableClassifiers" ] },
+                { "required": [ "sensitivityLabels" ] }
             ],
             "properties": {
                 "name": {
@@ -396,6 +499,13 @@
                     "minItems": 1,
                     "items": { "$ref": "#/definitions/trainableClassifierReference" },
                     "description": "Trainable-classifier entries. Each entry maps to one `Sensitivetypes[]` object on the wire with `Classifiertype: MLModel`. Reference: https://learn.microsoft.com/en-us/purview/trainable-classifiers-definitions"
+                },
+                "sensitivityLabels": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": { "$ref": "#/definitions/labelReference" },
+                    "description": "Sensitivity-label entries, referenced BY DISPLAY NAME (ADR 0023 -- a raw tenant label GUID must never enter the repo). Each entry maps to one `Labels[]` object on the wire with `Type: Sensitivity`; the export resolves `Labels[].Id` to a display name via Get-Label and the apply path resolves it back to the target tenant's own GUID, which is what makes a label-bearing rule portable across the name-synced taxonomy."
                 }
             }
         },

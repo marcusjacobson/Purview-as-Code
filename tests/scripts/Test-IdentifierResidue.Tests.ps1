@@ -237,6 +237,129 @@ Describe 'Test-IdentifierResidue — acquittal rules' {
         }
         finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
     }
+
+    Context 'Rule 6 — Sensitivetypes IDs inside captured rawAdvancedRule evidence (#80)' {
+
+        BeforeAll {
+            # Builds a policies.yaml carrying one rawAdvancedRule block scalar, with
+            # the caller's JSON body indented into it. Mirrors what Invoke-DlpExport
+            # writes when ConvertFrom-AdvancedRuleWire cannot model a shape (#79).
+            function New-RawAdvancedRuleYaml {
+                param([string]$Body)
+                $indented = (($Body -split "`n") | ForEach-Object { '          ' + $_ }) -join "`n"
+                @"
+policies:
+  - name: P
+    mode: Enable
+    rules:
+      - name: R
+        rawAdvancedRule: |-
+$indented
+        notes: wire shape not yet modeled
+"@
+            }
+            $script:NewRawAdvancedRuleYaml = ${function:New-RawAdvancedRuleYaml}
+        }
+
+        It 'acquits a SIT Id in a Sensitivetypes position inside the evidence body' {
+            ${function:New-RawAdvancedRuleYaml} = $script:NewRawAdvancedRuleYaml
+            $repo = New-FixtureRepo
+            try {
+                $sit = [guid]::NewGuid().ToString()
+                $body = @"
+{
+  "Version": "1.0",
+  "Condition": {
+    "SubConditions": [
+      {
+        "Sensitivetypes": [
+          {
+            "Id": "$sit"
+          }
+        ]
+      }
+    ]
+  }
+}
+"@
+                Set-FixtureFile -Root $repo -RelativePath 'data-plane/dlp/policies.yaml' `
+                    -Content (New-RawAdvancedRuleYaml -Body $body)
+                $r = Invoke-Scan -Root $repo
+                $r.Findings.Count | Should -Be 0
+            }
+            finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'FAILS on a sensitivity-label Id in the SAME body — Labels is not Sensitivetypes' {
+            # The disclosure this rule must not open. A tenant label GUID has a
+            # display-name representation (ADR 0023 / #80), so it never has an
+            # excuse to sit in the repo -- unlike a Microsoft catalog SIT ID.
+            ${function:New-RawAdvancedRuleYaml} = $script:NewRawAdvancedRuleYaml
+            $repo = New-FixtureRepo
+            try {
+                $label = [guid]::NewGuid().ToString()
+                $body = @"
+{
+  "Version": "1.0",
+  "Condition": {
+    "SubConditions": [
+      {
+        "Labels": [
+          {
+            "Id": "$label"
+          }
+        ]
+      }
+    ]
+  }
+}
+"@
+                Set-FixtureFile -Root $repo -RelativePath 'data-plane/dlp/policies.yaml' `
+                    -Content (New-RawAdvancedRuleYaml -Body $body)
+                $r = Invoke-Scan -Root $repo
+                $r.Findings.Count | Should -BeGreaterThan 0
+                $r.ExitCode       | Should -Be 1
+            }
+            finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'FAILS on an `"Id"` line that is NOT inside a rawAdvancedRule block (position, not spelling)' {
+            $repo = New-FixtureRepo
+            try {
+                $oid = [guid]::NewGuid().ToString()
+                Set-FixtureFile -Root $repo -RelativePath 'data-plane/dlp/notes.md' `
+                    -Content "Some JSON we pasted into a doc:`n`n    `"Id`": `"$oid`"`n"
+                $r = Invoke-Scan -Root $repo
+                $r.Findings.Count | Should -BeGreaterThan 0
+            }
+            finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'FAILS on a GUID that merely FOLLOWS the evidence block once the block has closed' {
+            # Pins the block-scalar termination logic: the acquittal must not leak
+            # past the end of the rawAdvancedRule body into the rest of the file.
+            ${function:New-RawAdvancedRuleYaml} = $script:NewRawAdvancedRuleYaml
+            $repo = New-FixtureRepo
+            try {
+                $sit = [guid]::NewGuid().ToString()
+                $oid = [guid]::NewGuid().ToString()
+                $body = @"
+{
+  "Sensitivetypes": [
+    {
+      "Id": "$sit"
+    }
+  ]
+}
+"@
+                $yaml = (New-RawAdvancedRuleYaml -Body $body) + "`n        generateIncidentReport:`n          - $oid`n"
+                Set-FixtureFile -Root $repo -RelativePath 'data-plane/dlp/policies.yaml' -Content $yaml
+                $r = Invoke-Scan -Root $repo
+                @($r.Findings | Where-Object { $_.Rule -eq 'unclaimed' }).Count | Should -Be 1
+            }
+            finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
 }
 
 Describe 'Test-IdentifierResidue — FAIL CLOSED (the contract that decides whether this control is real)' {

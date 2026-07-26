@@ -1,6 +1,6 @@
 # 0031 — DLP AdvancedRule YAML shape: flattened groups, not verbatim JSON
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-07-25 — see "Amendment — 2026-07-25")
 - **Date:** 2026-06-01
 - **Gates:** Unblocks issue [#514](../../issues/514) PR A2 (schema + reconciler implementation). Follows [`docs/project-plan.md`](../project-plan.md) §5.3 DLP closure (PR #516, issue [#362](../../issues/362)). Implemented in [#514](../../issues/514) PR A2.
 - **Deciders:** @contoso
@@ -231,6 +231,93 @@ Carry the wire JSON as a single quoted string under `advancedRule: |`. Rejected 
 ### Option D — defer indefinitely; keep `notes:` pass-through forever
 
 Rejected because: the 11 rules remain unmanaged in [`data-plane/dlp/policies.yaml`](../../data-plane/dlp/policies.yaml), [#362](../../issues/362) exit criterion 1 stays open indefinitely, and any portal-side edit to one of these rules goes undetected.
+
+## Amendment — 2026-07-25 (the full predicate vocabulary, issue [#80](../../issues/80))
+
+### What the original decision got wrong
+
+The Decision above models exactly **one** predicate shape: a single `ContentContainsSensitiveInformation` SubCondition under `Condition.Operator = "And"`. That was an honest generalization from the 11 rules captured during [#362](../../issues/362) — every one of them had that shape. It is not the shape the tenants actually use.
+
+The [#79](../../issues/79) exporter (`rawAdvancedRule`, the captured-evidence field) made the real vocabulary visible for the first time: across the lab and dev tenants, **10 rules** degraded to inert `notes:` pass-throughs. Their captured wire bodies show the modelling surface is a **boolean tree**, not a flat group list:
+
+| Captured rule (tenant) | `Condition.Operator` | nested SubConditions | predicates present |
+|---|---|:---:|---|
+| `Default DLP policy - Protect sensitive M365 Copilot interactions` (lab) | `And` | **yes** | `HasActivity`, `ContentContainsSensitiveInformation` |
+| `Test DLP - IRM Data Leaks` / `Email to external users from OneDrive attachment` (lab) | `And` | no | `AccessScope`, `ContentContainsSensitiveInformation` + **`Labels`** |
+| `Test IRM - Email Attachments` / `Email with Attachments - External` (lab) | `And` | no | `AccessScope`, **`DocumentSizeOver`** |
+| `U.S. Financial Data (Exchange)` / `CC 10 SSN 1 ABA 1 — Block with override` (lab) | **`Or`** | no | `ContentContainsSensitiveInformation` |
+| `DSPM for AI - Protect sensitive data from Copilot processing` (lab) | **`Or`** | no | `ContentContainsSensitiveInformation` + **`Labels`**, `FromScope` |
+| 5 Retail / SharePoint / Forms rules (dev) | `And` | no | `AccessScope`, `ContentContainsSensitiveInformation` |
+
+Two structural facts the original ADR missed:
+
+- **`Condition.Operator` was never modeled.** The parser asserted it to `And` and discarded it. The existing `outerOperator` field is `Condition.SubConditions[].Value[0].Operator` — a *different, deeper* node. Every `Or`-rooted rule was therefore unrepresentable, and the two operators must stay distinct fields.
+- **A degraded rule was not safe by default.** The rule-level plan skipped notes-only rules while the policy-level plan happily created their parent, which could land an **enabled, ruleless** policy in the tenant.
+
+### The amended model
+
+`advancedRule:` now accepts **two equivalent authored forms**, which normalize to one internal shape:
+
+```yaml
+# Form 1 — the tree (new). Models Condition verbatim.
+advancedRule:
+  operator: And                # Condition.Operator
+  conditions:
+    - type: HasActivity        # a scalar predicate
+      value: UploadText
+    - operator: Or             # a nested condition group
+      conditions:
+        - type: ContentContainsSensitiveInformation
+          outerOperator: And   # Value[0].Operator — the DEEPER node
+          groups:
+            - name: Default
+              operator: Or
+              sensitiveInfoTypes: [ { guid: ... } ]
+              sensitivityLabels:  [ { displayName: Internal } ]
+
+# Form 2 — the original flat shorthand, unchanged and still emitted.
+advancedRule:
+  outerOperator: And
+  groups: [ ... ]
+```
+
+Form 2 is exactly a tree whose root `operator` is `And` over a single `ContentContainsSensitiveInformation` predicate. `ConvertTo-NormalizedAdvancedRule` up-converts it; `ConvertTo-ExportedAdvancedRule` renders the tree back into it whenever the shape allows. So **every rule that was already clean keeps its authored YAML byte-for-byte** and the widened model costs zero churn — verified against all 13 modeled blocks in `data-plane/dlp/policies.yaml`, whose emitted `-AdvancedRule` JSON is byte-identical to the pre-amendment writer's.
+
+**Predicate vocabulary modeled** (closed sets, taken only from captured wire):
+
+| Node | YAML | Wire |
+|---|---|---|
+| condition group | `{ operator, conditions }` | `{ Operator, SubConditions }` (no `ConditionName`) |
+| content predicate | `{ type: ContentContainsSensitiveInformation, outerOperator, groups }` | `{ ConditionName, Value: [{ Operator, Groups }] }` |
+| scalar predicate | `{ type, value }` where `type ∈ { AccessScope, FromScope, HasActivity, DocumentSizeOver }` | `{ ConditionName, Value: "<scalar>" }` |
+| sensitivity label | `groups[].sensitivityLabels[].displayName` | `Groups[].Labels[] = { Name, Id, Type: "Sensitivity" }` |
+
+### Sensitivity labels are modeled by display name
+
+The label-bearing rules carry `Labels[]` entries whose `Id` is a raw tenant label GUID (and whose `Name` is *also* that GUID on the DSPM rule — Microsoft does not resolve it). Committing either would violate [ADR 0023](0023-identifier-resolution.md) and produce an [ADR 0055](0055-identifier-shaped-residual-scan.md) residue finding that no rule can honestly acquit.
+
+So the transform resolves them: **export** maps `Labels[].Id → displayName` via `Get-Label`; **apply** maps `displayName →` the target tenant's own GUID. Consequences:
+
+- No raw sensitivity-label GUID ever enters `data-plane/**`.
+- Label-bearing policies become **portable across tenants for free**, because the 10-label taxonomy is name-synced between lab and dev. A label reference means the same thing on both.
+- **An unresolvable label fails the parse.** It does not degrade to a GUID and does not emit a partial predicate — the rule falls back to the [#79](../../issues/79) `notes:` + `rawAdvancedRule` evidence path. No failure reason may quote a GUID, because reasons are written into `policies.yaml` as `notes:`.
+
+This supersedes the "not round-tripped by name in Phase 1" limitation for labels carried *inside* an `advancedRule`.
+
+### Degradation is now safe by default
+
+Two changes make the *next* unmodeled shape harmless rather than silently wrong:
+
+1. **One definition of "no predicate."** `Test-DlpRuleIsNotesOnly` is shared by the rule-level skip and the new policy-level guard, so they cannot disagree again.
+2. **Hollow-policy create guard.** A policy absent from the tenant whose *every* rule is a notes-only pass-through is planned **`Blocked`**, never `Create`, and the run aborts before any write — matching the `Blocked` convention in `Deploy-AdaptiveScopes.ps1` and `Deploy-AutoLabelPolicies.ps1`. An *existing* policy is unaffected: its live rules are untouched and its policy-level fields keep reconciling.
+
+### What stays unmodeled, deliberately
+
+Any predicate not in the table above — `RecipientDomainIs`, `DocumentIsPasswordProtected`, `ExceptIf*`, a scalar predicate carrying an array `Value`, a `Labels[]` entry whose `Type` is not `Sensitivity`, a `Version` other than `1.0`. These degrade to `notes:` + `rawAdvancedRule` exactly as before. The vocabulary is widened **only** by evidence, never speculatively: an enum widened without a captured body is a guess that the apply path would push to a live tenant.
+
+### Residue-scan interaction
+
+`Test-IdentifierResidue.ps1` gains one positional rule (rule 6): a GUID that is the whole value of an `"Id"` / `"Name"` member of a `Sensitivetypes` array **inside a `rawAdvancedRule:` block scalar** is a Microsoft catalog identifier by construction and is acquitted. The sibling `Labels` array in the same body is **not** acquitted — by this amendment a modeled label is a display name, so a label GUID has no legitimate reason to be in the file. This rule is pure future-proofing for the *next* capture-before-model cycle: after this amendment none of the ten rules carries a `rawAdvancedRule` at all.
 
 ## References
 
