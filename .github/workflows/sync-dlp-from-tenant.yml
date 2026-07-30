@@ -80,6 +80,13 @@ name: sync-dlp-from-tenant
 # job cleanly instead of failing at azure/login. This also folds in the
 # KEY_VAULT_NAME throw guard that previously lived in the "Temporarily
 # allow Key Vault public access" step.
+#
+# ADR 0060: the same preflight step additionally skips a *scheduled* run
+# (not a manual workflow_dispatch) when vars.CI_DATA_PLANE_ENABLED is
+# 'false' on the selected Environment -- the owner's switch to silence a
+# governance-locked tenant's daily failing cron instead of leaving it red
+# and unexplained. Absent or any other value keeps the current
+# attempt-and-fail-if-blocked behavior.
 
 on:
   schedule:
@@ -133,6 +140,14 @@ jobs:
       # or jobs.<job_id>.steps.if) -- see ADR 0054.
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+      # ADR 0060: lets a governance-locked tenant's owner silence this
+      # workflow's daily scheduled failure instead of it going
+      # unexplained-red forever. Only applies to the schedule trigger -- a
+      # manual workflow_dispatch run still attempts the tenant call even
+      # when this is 'false', so the owner can test after a policy
+      # exemption is granted.
+      CI_DATA_PLANE_ENABLED: ${{ vars.CI_DATA_PLANE_ENABLED }}
+      EVENT_NAME: ${{ github.event_name }}
     steps:
       - name: Check onboarding signal
         id: check
@@ -143,6 +158,9 @@ jobs:
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
           } elseif ([string]::IsNullOrEmpty($env:KEY_VAULT_NAME)) {
             Write-Host "::notice::vars.KEY_VAULT_NAME is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+          } elseif ($env:EVENT_NAME -eq 'schedule' -and $env:CI_DATA_PLANE_ENABLED -eq 'false') {
+            Write-Host "::notice::vars.CI_DATA_PLANE_ENABLED is 'false' on this GitHub Environment (ADR 0060) -- skipping this scheduled tenant-touching run. Trigger workflow_dispatch manually to run anyway."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
           } else {
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=true"

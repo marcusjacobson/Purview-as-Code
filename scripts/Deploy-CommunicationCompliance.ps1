@@ -696,7 +696,11 @@ if (-not $SkipSchemaValidation.IsPresent) {
         return
     }
     $schemaText = Get-Content -LiteralPath $schemaPath -Raw
-    $docJson = $desiredRoot | ConvertTo-Json -Depth 10
+    # Depth 100 (the ConvertTo-Json maximum), matching Deploy-DLPPolicies.ps1 (#80):
+    # -Depth 10 can silently truncate a deep desired-state document during
+    # serialization, and Test-Json then rejects the truncated document with an
+    # error pointing at an unrelated shallow field (#90).
+    $docJson = $desiredRoot | ConvertTo-Json -Depth 100
     try {
         $null = $docJson | Test-Json -Schema $schemaText -ErrorAction Stop
     }

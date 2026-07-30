@@ -1,6 +1,6 @@
 # 0060 — In a governance-locked tenant the CI Key Vault open fails; data-plane apply runs owner-driven on the ADR 0028 local cert
 
-- **Status:** Proposed <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
+- **Status:** Accepted <!-- Proposed | Accepted | Superseded by NNNN | Deprecated -->
 - **Date:** 2026-07-18
 - **Gates:** Unblocks the standing failure of `sync-*-from-tenant.yml` and `deploy-*.yml` in a governance-locked operator tenant (the daily red `sync-labels-from-tenant.yml`). Relates to [ADR 0011](0011-certificate-lifecycle.md) (KV-signed credential), [ADR 0028](0028-co-equal-local-cert-credential.md) (co-equal local cert), [ADR 0054](0054-tenant-touching-workflow-skip-gate.md) (onboarding skip gate), and [ADR 0057](0057-multi-environment-and-branch-model.md) (per-environment operator branches).
 - **Deciders:** @marcusjacobson
@@ -36,7 +36,7 @@ We will treat the CI Key-Vault-open pattern as **available only where tenant gov
 
 **Security posture is unchanged.** No identity, secret, or tenant surface changes. The local-cert path is already governed by [ADR 0028](0028-co-equal-local-cert-credential.md)'s threat model; this ADR only records *when* to prefer it. If anything it upholds least-privilege by not standing up long-lived network exposure to work around the policy.
 
-**Follow-ups (not decided here):** whether to gate the scheduled `sync-*` crons behind a per-environment "CI data-plane enabled" variable so a governed tenant stops firing failing runs; and whether a private-endpoint + self-hosted-runner path is ever worth building (rejected below on cost).
+**Follow-ups:** the scheduled-cron-noise item is now **decided and implemented** — every schedule-triggered, tenant-touching workflow that opens (or transitively needs) the automation Key Vault's IPPS-signing path (`drift-detection.yml`, `export-content-explorer.yml`, and the five `sync-*-from-tenant.yml` workflows) reads a per-environment `vars.CI_DATA_PLANE_ENABLED` GitHub Environment variable in its existing ADR 0054 preflight step. Setting it to `false` on a governance-locked environment silences that workflow's *scheduled* runs (a manual `workflow_dispatch` still attempts the tenant call, so the owner can test after requesting a policy exemption); leaving it unset or any other value keeps today's attempt-and-fail-if-blocked behavior, so no environment's behavior changes until the owner opts in. Whether a private-endpoint + self-hosted-runner path is ever worth building remains undecided (rejected below on cost, revisit only if requirements change).
 
 ## Alternatives considered
 
