@@ -4,7 +4,7 @@ on:
   pull_request:
     types: [labeled]
 
-# Why this workflow closes linked issues itself (issue #73)
+# Why this workflow closes linked issues AND dispatches deploys itself (issues #73, #95, #96)
 #
 # GitHub never fires the implicit `Closes #NN` linked-issue closure for a PR merged by
 # `secrets.GITHUB_TOKEN` (`gh pr merge --auto`). Adding `issues: write` (PR #74) was necessary
@@ -17,14 +17,21 @@ on:
 #   1. the implicit linked-issue close never fires;
 #   2. a `pull_request: closed` workflow never runs (`pr-stacked-retarget.yml` has run only on
 #      human merges — never on any of the 11 `GITHUB_TOKEN` merges);
-#   3. a `push: [main]` workflow never runs (`validate.yml`'s push lane likewise).
+#   3. a `push: [main/dev/lab]` workflow never runs — `validate.yml`'s push lane, and (found later,
+#      #95) every `deploy-*.yml` push trigger. #94's auto-merge landed on `dev` with zero
+#      `deploy-dlp.yml` run, silently forfeiting the merge-triggered all-NoChange proof the DLP
+#      remediation plan depended on. The gap is worse than face #1's: a missing issue-close is
+#      visible on the issue itself, but a missing deploy run leaves no trace anywhere the merge
+#      touches.
 #
-# So the close CANNOT be hung off `pull_request: closed` or `push: main` — neither trigger ever
-# fires for our merges. The only surviving, non-suppressed trigger is the *human* `labeled` event
-# already used below (the owner applying `owner-approved`). The `close-linked-issues` job therefore
-# waits for the auto-merge to land inside this same human-triggered run, then closes the linked
-# issues explicitly. This is fallback #1 named on issue #73, and it is what makes the `issues: write`
-# scope added by PR #74 load-bearing rather than dead.
+# So neither a linked-issue close nor a deploy dispatch can be hung off `pull_request: closed` or
+# `push: [main/dev/lab]` — neither trigger ever fires for our merges. The only surviving,
+# non-suppressed trigger is the *human* `labeled` event already used below (the owner applying
+# `owner-approved`). `wait-for-merge` waits for the auto-merge to land inside this same
+# human-triggered run; `close-linked-issues` and `dispatch-affected-deploys` then both act on its
+# outputs. This is fallback #1 named on issue #73 (issues) and the same pattern extended to
+# deploys (#95), and it is what makes the `issues: write` scope added by PR #74 and the
+# `actions: write` scope added for #95 load-bearing rather than dead.
 #
 # Reference: https://docs.github.com/en/actions/concepts/security/github_token
 # Reference: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions
@@ -176,34 +183,23 @@ jobs:
 
           *Triggered by the \`pr-auto-merge\` workflow.*"
 
-  # Closes the merged PR's linked issues explicitly, because GitHub will not do it for a
-  # `GITHUB_TOKEN`-merged PR (see the header comment and issue #73).
-  #
-  # `needs: auto-merge` keeps this inside the same human-triggered `labeled` run — the only run
-  # that actually executes for these merges. `gh pr merge --auto` merely *enables* auto-merge; the
-  # merge itself lands later (once required checks pass), so this job waits for it rather than
-  # assuming it has already happened.
-  #
-  # LOAD-BEARING — DO NOT REMOVE AS "REDUNDANT". This step is the ONLY mechanism that closes
-  # issues in this repository. GitHub's native linked-issue auto-close (the implicit behavior of a
-  # `Closes #N` reference) has been confirmed to NEVER fire here, on 16-for-16 consecutively
-  # observed, correctly-linked PRs — not intermittently, a consistent property of a repo whose PRs
-  # merge via `GITHUB_TOKEN`. If you are reading this because a PR body already contains
-  # `Closes #N` and this step looks superfluous: it is not. Removing it would silently stop all
-  # issue closure in this repo. Full evidence table and root-cause analysis:
-  # https://github.com/marcusjacobson/Purview-as-Code/issues/99
-  close-linked-issues:
-    name: Close linked issues after merge
+  # Waits for `gh pr merge --auto` (enabled above) to actually land, once required checks pass.
+  # Extracted into its own job (was a step inside `close-linked-issues`) so `dispatch-affected-deploys`
+  # (#95) can share the same wait without a second, redundant 20-minute polling loop — both
+  # downstream jobs depend on this one instead of on each other, so a failure in either stays
+  # isolated to that job alone.
+  wait-for-merge:
+    name: Wait for the auto-merge to land
     needs: auto-merge
     runs-on: ubuntu-latest
     # Bounded so a PR whose checks never go green cannot pin a runner open.
     timeout-minutes: 30
-    # Least privilege: write issue state only. No `contents: write`, no `pull-requests: write` —
-    # this job must never be able to merge, push, or delete a branch.
     permissions:
-      issues: write
       pull-requests: read
-      contents: read
+    outputs:
+      merged: ${{ steps.wait.outputs.merged }}
+      merge_sha: ${{ steps.wait.outputs.merge_sha }}
+      base_ref: ${{ steps.wait.outputs.base_ref }}
     steps:
       - name: Wait for the auto-merge to land
         id: wait
@@ -222,14 +218,18 @@ jobs:
 
             if [ "$STATE" = "MERGED" ]; then
               MERGE_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeCommit --jq '.mergeCommit.oid')
-              echo "merged=true" >> "$GITHUB_OUTPUT"
-              echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
-              echo "PR #$PR_NUMBER merged as $MERGE_SHA (after $ATTEMPT attempt(s))."
+              BASE_REF=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName --jq '.baseRefName')
+              {
+                echo "merged=true"
+                echo "merge_sha=$MERGE_SHA"
+                echo "base_ref=$BASE_REF"
+              } >> "$GITHUB_OUTPUT"
+              echo "PR #$PR_NUMBER merged as $MERGE_SHA into $BASE_REF (after $ATTEMPT attempt(s))."
               exit 0
             fi
 
             if [ "$STATE" = "CLOSED" ]; then
-              echo "::warning::PR #$PR_NUMBER was closed without merging. No linked issue will be closed."
+              echo "::warning::PR #$PR_NUMBER was closed without merging. No linked issue will be closed and no deploy will be dispatched."
               echo "merged=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -239,27 +239,65 @@ jobs:
           done
 
           # Timing out is not a failure: auto-merge is still armed and the PR will merge later.
-          # Only the automatic issue close is forfeited, so warn and exit clean.
-          echo "::warning::Timed out after ~$(( MAX_ATTEMPTS * SLEEP_SECONDS / 60 )) minutes waiting for PR #$PR_NUMBER to merge. Auto-merge remains enabled; close the linked issue(s) manually once it lands."
+          # Only the automatic issue close / deploy dispatch is forfeited, so warn and exit clean.
+          echo "::warning::Timed out after ~$(( MAX_ATTEMPTS * SLEEP_SECONDS / 60 )) minutes waiting for PR #$PR_NUMBER to merge. Auto-merge remains enabled; close the linked issue(s) and dispatch the deploy manually once it lands."
           echo "merged=false" >> "$GITHUB_OUTPUT"
 
+  # Closes the merged PR's linked issues explicitly, because GitHub will not do it for a
+  # `GITHUB_TOKEN`-merged PR (see the header comment and issue #73).
+  #
+  # `needs: wait-for-merge` keeps this inside the same human-triggered `labeled` run — the only
+  # run that actually executes for these merges.
+  #
+  # LOAD-BEARING — DO NOT REMOVE AS "REDUNDANT". This step is a mechanism that closes issues in
+  # this repository, but **not the only signal it relies on**: GitHub's own `closingIssuesReferences`
+  # is populated only for a PR whose *base* is the repository's default branch (`lab` in this repo),
+  # confirmed empirically on 16-for-16 correctly-linked `lab`-based PRs and confirmed EMPTY on every
+  # `dev`-based PR regardless of how correct its closing keywords are (#96 — #85 and #94 both merged
+  # with correct `Closes #N` text and an empty `closingIssuesReferences`, silently closing nothing).
+  # This step therefore UNIONS that GraphQL list with a direct parse of the PR body's own closing
+  # keywords, so closure no longer depends on which branch happened to be the target. If you are
+  # reading this because a PR body already contains `Closes #N` and this step looks superfluous: it
+  # is not, on either branch. Removing it would silently stop all issue closure in this repo (`lab`
+  # PRs) or stop it *and* remove the only signal that was ever working (`dev`/`main` PRs, #96).
+  # Full evidence table and root-cause analysis:
+  # https://github.com/marcusjacobson/Purview-as-Code/issues/99 (original, #73)
+  # https://github.com/marcusjacobson/Purview-as-Code-Operations/issues/96 (default-branch gap)
+  close-linked-issues:
+    name: Close linked issues after merge
+    needs: wait-for-merge
+    if: needs.wait-for-merge.outputs.merged == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Least privilege: write issue state only. No `contents: write`, no `pull-requests: write` —
+    # this job must never be able to merge, push, or delete a branch.
+    permissions:
+      issues: write
+      pull-requests: read
+      contents: read
+    steps:
       - name: Close linked issues
-        if: steps.wait.outputs.merged == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
-          MERGE_SHA: ${{ steps.wait.outputs.merge_sha }}
+          MERGE_SHA: ${{ needs.wait-for-merge.outputs.merge_sha }}
+          # PR_BODY flows in via env, never spliced into the script text below, per this repo's
+          # script-injection hardening (actionlint's shellcheck-backed check; see #115/#116). The
+          # PR body is fully author-controlled text — interpolating it with `${{ }}` directly into
+          # a `run:` script would be a real command-injection vector.
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           # No `-e`: a single un-closable issue must not fail the workflow (the PR is already
           # merged by this point). Each close is attempted independently and logged.
           set -uo pipefail
 
-          # `closingIssuesReferences` is GitHub's own authoritative list of the issues it *would*
-          # have closed for this PR. It is the only list we act on — nothing outside it is ever
-          # touched, so this job cannot close an unrelated issue.
+          # Source 1: `closingIssuesReferences`, GitHub's own list of the issues it *would* have
+          # closed natively — populated only when this PR's base is the repository's default
+          # branch (#96). Kept as a source (not replaced) because it also catches an issue linked
+          # by hand via the PR sidebar with no closing keyword in the body at all.
           # Reference: https://docs.github.com/en/graphql/reference/objects#pullrequest
           #
           # The query below is single-quoted ON PURPOSE: $owner, $name, and $number are
@@ -270,7 +308,7 @@ jobs:
           # substitute $owner/$name/$number with their unset, empty shell values, corrupting
           # the query into `query(: String!, ...)`.
           # shellcheck disable=SC2016
-          LINKED=$(gh api graphql \
+          FROM_GRAPHQL=$(gh api graphql \
             -f owner="$OWNER" \
             -f name="$REPO_NAME" \
             -F number="$PR_NUMBER" \
@@ -278,23 +316,52 @@ jobs:
               repository(owner: $owner, name: $name) {
                 pullRequest(number: $number) {
                   closingIssuesReferences(first: 50) {
-                    nodes { number state }
+                    nodes { number }
                   }
                 }
               }
-            }' --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[] | "\(.number) \(.state)"')
+            }' --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].number')
 
-          if [ -z "$LINKED" ]; then
-            echo "PR #$PR_NUMBER has no linked closing issues. Nothing to close."
+          # Source 2: closing keywords parsed directly from the PR body (#96) — the source that
+          # actually works for a `dev`- or `main`-based PR, where source 1 is always empty by
+          # construction. `PR_BODY` is read from the environment, never interpolated into this
+          # script (see the env: block above).
+          FROM_BODY=$(python3 - <<'PYEOF'
+          import os, re
+          body = os.environ.get("PR_BODY") or ""
+          # Strip fenced code blocks first so example text inside a fence (e.g. this file's own
+          # comments, if ever quoted in a PR body) can never trigger a real close.
+          stripped = re.sub(r"(?ms)^(```|~~~).*?^\1[^\n]*$", "", body)
+          keyword = r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)\b"
+          for n in sorted({int(m) for m in re.findall(keyword, stripped, flags=re.IGNORECASE)}):
+              print(n)
+          PYEOF
+          )
+
+          ALL_ISSUES=$(printf '%s\n%s\n' "$FROM_GRAPHQL" "$FROM_BODY" | grep -E '^[0-9]+$' | sort -un)
+
+          if [ -z "$ALL_ISSUES" ]; then
+            echo "PR #$PR_NUMBER has no linked closing issues (checked both closingIssuesReferences and the PR body). Nothing to close."
             exit 0
           fi
 
-          echo "$LINKED" | while read -r ISSUE_NUMBER ISSUE_STATE; do
+          echo "Resolved closing issues for PR #$PR_NUMBER: $(echo "$ALL_ISSUES" | tr '\n' ' ')"
+          echo "  from closingIssuesReferences: $(echo "$FROM_GRAPHQL" | tr '\n' ' ')"
+          echo "  from PR body keyword parse:   $(echo "$FROM_BODY" | tr '\n' ' ')"
+
+          echo "$ALL_ISSUES" | while read -r ISSUE_NUMBER; do
             [ -z "$ISSUE_NUMBER" ] && continue
+
+            ISSUE_STATE=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
 
             # Idempotent: a re-run, or an issue closed by hand in the meantime, is a no-op.
             if [ "$ISSUE_STATE" = "CLOSED" ]; then
               echo "Issue #$ISSUE_NUMBER is already closed. Skipping."
+              continue
+            fi
+
+            if [ "$ISSUE_STATE" = "UNKNOWN" ]; then
+              echo "::warning::Could not read issue #$ISSUE_NUMBER (may not exist, or the reference is a cross-repo number). Skipping."
               continue
             fi
 
@@ -304,9 +371,172 @@ jobs:
             if gh issue close "$ISSUE_NUMBER" \
                  --repo "$REPO" \
                  --reason completed \
-                 --comment "Closed by the \`pr-auto-merge\` workflow: PR #${PR_NUMBER} was merged as \`${MERGE_SHA}\`. GitHub does not fire its implicit linked-issue closure for pull requests merged by \`GITHUB_TOKEN\` (issue #73), so the workflow performs the close explicitly."; then
+                 --comment "Closed by the \`pr-auto-merge\` workflow: PR #${PR_NUMBER} was merged as \`${MERGE_SHA}\`. GitHub does not fire its implicit linked-issue closure for pull requests merged by \`GITHUB_TOKEN\` (issue #73), so the workflow performs the close explicitly, from the union of \`closingIssuesReferences\` and a direct parse of the PR body (issue #96)."; then
               echo "Issue #$ISSUE_NUMBER closed."
             else
               echo "::warning::Could not close issue #$ISSUE_NUMBER. Close it manually. Continuing."
             fi
           done
+
+  # Dispatches every `deploy-*.yml` workflow whose OWN `on.push` trigger would have fired natively
+  # had this merge not been attributed to `GITHUB_TOKEN` (#95). Determines "would have fired" by
+  # reading each deploy workflow's own `on.push.branches` / `on.push.paths` — the single source of
+  # truth already declared in that file — rather than hand-maintaining a second copy of the same
+  # filter here, which would silently drift the day someone edits a deploy workflow's paths list.
+  #
+  # `needs: wait-for-merge` (not `close-linked-issues`): the two jobs do unrelated things and
+  # neither should be able to block the other. Both merely depend on the same merge having landed.
+  dispatch-affected-deploys:
+    name: Dispatch deploys the merge would have triggered natively
+    needs: wait-for-merge
+    if: needs.wait-for-merge.outputs.merged == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Least privilege: read the merged tree and the changed-files list, dispatch OTHER workflow
+    # runs, comment on the PR. No `contents: write` — this job never pushes or merges anything;
+    # each dispatched deploy workflow authenticates to Azure/Purview on its own via OIDC.
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.wait-for-merge.outputs.merge_sha }}
+
+      - name: Install powershell-yaml
+        shell: pwsh
+        run: Install-Module powershell-yaml -Force -Scope CurrentUser
+
+      - name: Determine changed files
+        id: changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          FILES=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '[.files[].path] | @json')
+          echo "files_json=$FILES" >> "$GITHUB_OUTPUT"
+          echo "Changed files: $FILES"
+
+      - name: Match and dispatch affected deploy workflows
+        id: dispatch
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE_REF: ${{ needs.wait-for-merge.outputs.base_ref }}
+          CHANGED_FILES_JSON: ${{ steps.changed.outputs.files_json }}
+        run: |
+          Import-Module powershell-yaml -ErrorAction Stop
+
+          function Convert-GlobToRegex {
+            param([Parameter(Mandatory)][string]$Pattern)
+            $sb = [System.Text.StringBuilder]::new('^')
+            $i = 0
+            while ($i -lt $Pattern.Length) {
+              if ($Pattern[$i] -eq '*') {
+                if ($i + 1 -lt $Pattern.Length -and $Pattern[$i + 1] -eq '*') {
+                  [void]$sb.Append('.*'); $i += 2; continue
+                }
+                [void]$sb.Append('[^/]*'); $i += 1; continue
+              }
+              [void]$sb.Append([regex]::Escape([string]$Pattern[$i])); $i += 1
+            }
+            [void]$sb.Append('$')
+            return $sb.ToString()
+          }
+
+          $changedFiles = ConvertFrom-Json -InputObject $env:CHANGED_FILES_JSON
+          $baseRef = $env:BASE_REF
+          # ADR 0057: push/schedule runs map branch dev -> dev, every other branch -> lab. Every
+          # deploy-*.yml's own `environment` workflow_dispatch input documents this identically.
+          $targetEnv = if ($baseRef -eq 'dev') { 'dev' } else { 'lab' }
+
+          $workflowFiles = Get-ChildItem -Path '.github/workflows' -Filter 'deploy-*.yml'
+          $dispatched = @()
+          $skipped = @()
+
+          foreach ($wf in $workflowFiles) {
+            $parsed = Get-Content $wf.FullName -Raw | ConvertFrom-Yaml -Ordered
+            $push = $parsed.on.push
+            if ($null -eq $push) {
+              $skipped += "$($wf.Name) (no push trigger)"
+              continue
+            }
+            if ($push.branches -notcontains $baseRef) {
+              $skipped += "$($wf.Name) (push.branches does not include '$baseRef')"
+              continue
+            }
+            $pathPatterns = @($push.paths)
+            $matchedFile = $null
+            foreach ($pattern in $pathPatterns) {
+              $regex = Convert-GlobToRegex -Pattern $pattern
+              $hit = $changedFiles | Where-Object { $_ -match $regex } | Select-Object -First 1
+              if ($hit) { $matchedFile = $hit; break }
+            }
+            if (-not $matchedFile) {
+              $skipped += "$($wf.Name) (no changed file matches push.paths)"
+              continue
+            }
+
+            Write-Host "Dispatching $($wf.Name) on ref '$baseRef' (environment=$targetEnv, matched '$matchedFile')."
+            # Deliberately no extra -f flags beyond `environment`: every remaining input on every
+            # deploy-*.yml already defaults to exactly what a native push trigger would have used
+            # (direction_policy=portal-wins, prune_missing=false, etc.) — passing only the one
+            # input a push event has no equivalent of keeps this dispatch behaviourally identical
+            # to the suppressed native run.
+            & gh workflow run $wf.Name --repo $env:REPO --ref $baseRef -f "environment=$targetEnv"
+            if ($LASTEXITCODE -ne 0) {
+              throw "gh workflow run failed for $($wf.Name) (exit $LASTEXITCODE)"
+            }
+            $dispatched += "$($wf.Name) (environment=$targetEnv, matched '$matchedFile')"
+          }
+
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "dispatched_count=$($dispatched.Count)"
+          $summaryLines = @()
+          if ($dispatched.Count -gt 0) {
+            $summaryLines += 'Dispatched:'
+            $dispatched | ForEach-Object { $summaryLines += "- $_" }
+          } else {
+            $summaryLines += 'Dispatched: none (no deploy workflow matched this merge''s changed files on this branch).'
+          }
+          $summaryLines += ''
+          $summaryLines += ($skipped | ForEach-Object { "<!-- skipped: $_ -->" })
+          $summary = $summaryLines -join "`n"
+          # Multi-line job outputs need the heredoc delimiter form, not a bare key=value line.
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "summary<<DISPATCH_EOF"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $summary
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "DISPATCH_EOF"
+
+      - name: Comment dispatch results on the PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          SUMMARY: ${{ steps.dispatch.outputs.summary }}
+        run: |
+          # Marker deliberately avoids the reconciler-script name prefix (case-insensitive) that
+          # tests/scripts/ConfirmGate.Tests.ps1's cross-workflow scan (Get-CiHangScan) treats as a
+          # "candidate" run: block worth PowerShell-parsing (a deliberate text-superset match, so
+          # it can never miss a real invocation). Containing that prefix here would make the
+          # scanner attempt to parse this bash block as PowerShell and fail loudly on the
+          # `<!--`/`-->` HTML comment markers ("Missing expression after unary operator '--'") —
+          # by that scanner's own design, on purpose (an unparseable candidate fails the suite
+          # rather than being silently skipped, since skipping could hide a real reconciler call
+          # it can't see into). This step never invokes a reconciler directly (it only calls
+          # `gh workflow run` against a separate workflow file), so it has no business being a
+          # candidate in the first place. If you're editing this comment, keep it that way.
+          gh pr comment "$PR_NUMBER" \
+            --repo "$REPO" \
+            --body "<!-- pr-auto-merge:dispatch-summary -->
+          ## Deploy dispatch (merge-triggered push was suppressed by \`GITHUB_TOKEN\`)
+
+          This merge landed via \`pr-auto-merge\`, whose \`GITHUB_TOKEN\`-attributed push does not
+          fire native \`push:\` triggers (issue #95). The workflows below were dispatched explicitly
+          to stand in for that suppressed run.
+
+          $SUMMARY
+
+          *Triggered by the \`pr-auto-merge\` workflow.*"

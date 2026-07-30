@@ -192,3 +192,48 @@ Describe 'Prune failure reporting executed through the script wiring (issue #13,
         $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
     }
 }
+
+Describe 'Desired-state schema-validation serialization depth is not truncated (#90)' {
+
+    BeforeAll {
+        $script:ScriptPathForDepth = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-CommunicationCompliance.ps1'
+
+        # A synthetic document unrelated to this reconciler's actual schema -- the
+        # #90 fix is schema-independent, so this only needs to nest deep enough
+        # (12+ levels) to prove -Depth 100 does not truncate while -Depth 10 does.
+        $script:DeepDoc = @{
+            l1 = @{ l2 = @{ l3 = @{ l4 = @{ l5 = @{ l6 = @{ l7 = @{ l8 = @{
+                l9 = @{ l10 = @{ l11 = @{ l12 = @{ l13 = @{ l14 = 'leaf' } } } } }
+            } } } } } } } }
+        }
+    }
+
+    It 'reads the serialization depth from the script itself and confirms it is pinned to 100' {
+        # A test that hard-codes its own depth cannot catch this defect -- exactly
+        # how the #80 sibling escaped every offline schema test before it (each
+        # test serialized at a depth of its own choosing rather than the script's).
+        $src = Get-Content -LiteralPath $script:ScriptPathForDepth -Raw
+        $m = [regex]::Match($src, '\$docJson\s*=\s*\$desiredRoot\s*\|\s*ConvertTo-Json\s+-Depth\s+(?<d>\d+)')
+        $m.Success | Should -BeTrue -Because 'the desired-state validation site must stay greppable for this regression test'
+        [int]$m.Groups['d'].Value | Should -Be 100
+    }
+
+    It 'serializes a deeply nested document WITHOUT truncating at the pinned depth' {
+        # ConvertTo-Json warns and rewrites deeper nodes as strings when it hits the
+        # depth cap; the truncated document then fails schema validation with an
+        # error pointing at an unrelated shallow field (the #80 failure mode).
+        $src = Get-Content -LiteralPath $script:ScriptPathForDepth -Raw
+        $depth = [int][regex]::Match($src, '\$docJson\s*=\s*\$desiredRoot\s*\|\s*ConvertTo-Json\s+-Depth\s+(?<d>\d+)').Groups['d'].Value
+
+        $warnings = @()
+        $null = $script:DeepDoc | ConvertTo-Json -Depth $depth -WarningVariable warnings -WarningAction SilentlyContinue
+        $warnings | Should -BeNullOrEmpty -Because 'a truncation warning means the validation site would reject a valid deep document'
+    }
+
+    It 'demonstrates the defect: the same document at the old -Depth 10 does NOT survive' {
+        # Mutation check -- proves the two assertions above are non-vacuous.
+        $warnings = @()
+        $null = $script:DeepDoc | ConvertTo-Json -Depth 10 -WarningVariable warnings -WarningAction SilentlyContinue
+        $warnings | Should -Not -BeNullOrEmpty
+    }
+}

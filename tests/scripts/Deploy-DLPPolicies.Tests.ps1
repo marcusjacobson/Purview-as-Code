@@ -4313,3 +4313,49 @@ Describe 'Desired-state schema validation serializes deeply enough for the model
         $warnings | Should -Not -BeNullOrEmpty
     }
 }
+
+Describe 'Prune-ratio guard call avoids the PS 7.6 List[object] @() array-wrap crash (#110)' {
+    <#
+        Found live at first -PruneMissing contact against a real tenant: PowerShell 7.6.x
+        throws "Argument types do not match" when @() directly wraps a
+        System.Collections.Generic.List[object] VARIABLE REFERENCE (as opposed to a pipeline
+        result), independent of element count -- reproduced crashing at 0, 1, and 2 elements
+        alike. $ruleOrphanPlan is exactly this shape (built via New-Object + .Add()). The fix
+        drops the unnecessary @() wrap in favor of List<T>'s own .Count property, which carries
+        none of the pipeline single-result-unwrapping hazard @(...) normally guards against --
+        that hazard is a property of PIPELINE output, not of a pre-built List<T>.
+
+        This suite does not try to reproduce the PS-7.6-specific crash directly (that would make
+        the test fragile across different PowerShell versions in CI); instead it (a) source-reads
+        the fixed call site to pin the exact pattern, and (b) proves the guard's actual behavior
+        -- refuse an oversized prune, allow a sane one -- survives unchanged at 0/1/many elements,
+        so the fix could not have silently defanged the ratio guard it touches.
+    #>
+
+    BeforeAll {
+        $script:ScriptPathForPruneCount = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-DLPPolicies.ps1'
+        Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'PruneGuard.psm1') -Force
+    }
+
+    It 'the ruleOrphanPlan prune-count argument reads .Count directly, not @(...).Count' {
+        $src = Get-Content -LiteralPath $script:ScriptPathForPruneCount -Raw
+        $src | Should -Not -Match '@\(\$ruleOrphanPlan\)\.Count' -Because 'wrapping a List[object] variable in @() crashes on PowerShell 7.6.x (issue #110)'
+        $src | Should -Match '-PruneCount\s+\$ruleOrphanPlan\.Count'
+    }
+
+    It 'passing a real List[object].Count through the guard at 0, 1, and many elements does not throw' {
+        foreach ($n in 0, 1, 5) {
+            $list = New-Object 'System.Collections.Generic.List[object]'
+            for ($i = 0; $i -lt $n; $i++) { $list.Add([pscustomobject]@{ Action = 'Orphan' }) }
+            { Assert-PruneRatioWithinThreshold -PruneCount $list.Count -LiveCount 100 -ObjectTypeNoun 'DLP rule' -MaxPruneRatio 0.75 -Allow:$false } |
+                Should -Not -Throw -Because "a List[object] with $n elements must not crash the guard call (issue #110)"
+        }
+    }
+
+    It 'the guard still refuses a genuinely oversized prune (non-vacuous: the fix did not defang it)' {
+        $list = New-Object 'System.Collections.Generic.List[object]'
+        1..90 | ForEach-Object { $list.Add([pscustomobject]@{ Action = 'Orphan' }) }
+        { Assert-PruneRatioWithinThreshold -PruneCount $list.Count -LiveCount 100 -ObjectTypeNoun 'DLP rule' -MaxPruneRatio 0.75 -Allow:$false } |
+            Should -Throw -Because '90 of 100 (90%) exceeds the 75% threshold and must still be refused'
+    }
+}

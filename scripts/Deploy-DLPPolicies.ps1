@@ -3206,8 +3206,19 @@ try {
     # for a delete it can never perform.
     # Reference: scripts/modules/PruneGuard.psm1
     if ($PruneMissing.IsPresent -and $DirectionPolicy -ne 'audit') {
+        # $ruleOrphanPlan is a System.Collections.Generic.List[object] (built via
+        # New-Object + .Add()). Do NOT re-wrap it in @() -- on PowerShell 7.6.x,
+        # directly array-wrapping a List[object] VARIABLE REFERENCE throws
+        # "Argument types do not match" inside the dynamic array-conversion
+        # binder, independent of element count (reproduced crashing at 0, 1, and
+        # 2 elements alike). .Count is a native property on List<T>, always
+        # correct with none of the pipeline single-result-unwrapping hazard
+        # @(...) normally guards against -- that hazard applies to PIPELINE
+        # output, not a pre-built List<T>. Found live at first -PruneMissing
+        # contact against a real tenant (issue #110); invisible offline because
+        # no offline test builds a real List[object] and exercises this wrap.
         Assert-PruneRatioWithinThreshold `
-            -PruneCount     @($ruleOrphanPlan).Count `
+            -PruneCount     $ruleOrphanPlan.Count `
             -LiveCount      @($tenantRules).Count `
             -ObjectTypeNoun 'DLP rule' `
             -MaxPruneRatio  $MaxPruneRatio `
