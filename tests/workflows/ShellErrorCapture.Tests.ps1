@@ -25,9 +25,15 @@
     that swallows a failure is caught when it is written:
 
       1. no `2>/dev/null` inside a command substitution in any gh-driven workflow;
-      2. the comment id is shape-validated before it can reach a URL;
-      3. the fallbacks are the SAFE ones (never `passing`);
-      4. Get-UpstreamDelta.ps1 writes no progress text to stdout.
+      2. every gh read in the advisory workflow is guarded, not just the ones that swallow
+         stderr -- a bare `VAR=$(gh ...)` aborts its whole step under `bash -e`;
+      3. the comment id is shape-validated before it can reach a URL;
+      4. the fallbacks are the SAFE ones (never `passing`);
+      5. the advisory workflow serialises per PR, so its sticky comment is actually sticky.
+
+    The PowerShell half of the same defect class -- #124, Write-Information reaching stdout under
+    `pwsh -File` -- is asserted in tests/scripts/Get-UpstreamDelta.Tests.ps1 instead, because its
+    subject is operator-tooling and absent from the template. This file ports; that one does not.
 
     Deliberately NOT asserted: validate-oidc-auth.yml's `az ... 2>/dev/null || true`. The Azure
     CLI writes errors to stderr, so that variable goes empty rather than corrupt, and its
@@ -118,33 +124,11 @@ Describe 'No gh-driven workflow captures a failed command as data (#137)' {
     }
 }
 
-Describe 'Get-UpstreamDelta.ps1 keeps stdout to the payload (#124)' {
-
-    BeforeAll {
-        $script:ScanText = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'scripts/Get-UpstreamDelta.ps1') -Raw
-    }
-
-    It 'writes no progress text through a stdout-bound stream' {
-        # Under `pwsh -File` the information stream is written to stdout, so Write-Information and
-        # Write-Host both corrupt `-AsJson` output for any caller that pipes it.
-        #
-        # Anchored to a statement, not a mention: the fixed line carries a comment explaining WHY
-        # Write-Information is wrong here, and a bare substring match would flag that comment and
-        # push the next author toward deleting the explanation to get green.
-        $calls = @([regex]::Matches($script:ScanText, '(?m)^\s*(Write-Information|Write-Host)\b') | ForEach-Object { $_.Value.Trim() })
-        $calls | Should -BeNullOrEmpty -Because "these write to stdout under pwsh -File, which is what broke upstream-delta-watch for four weeks (#124): $($calls -join ', ')"
-    }
-
-    It 'still announces the module install, on stderr' {
-        # The notice must not simply be deleted -- an unexplained multi-second pause installing a
-        # module is worse than a warning line.
-        $script:ScanText | Should -Match "Write-Warning 'powershell-yaml module not found"
-    }
-
-    It 'emits exactly one stdout-bound write, the payload itself' {
-        ([regex]::Matches($script:ScanText, 'Write-Output')).Count | Should -Be 1
-    }
-}
+# The #124 assertions that used to live here now sit in
+# tests/scripts/Get-UpstreamDelta.Tests.ps1. They read scripts/Get-UpstreamDelta.ps1, which is
+# operator-tooling and correctly absent from the public template -- so this file, which IS ported,
+# could not pass there: `Cannot find path ... Get-UpstreamDelta.ps1`. A test may only assert about
+# files that exist wherever the test itself ships. Its subject's suppression decides its home.
 
 Describe 'Non-vacuity -- the detector flags the defect as it shipped (red-replay)' {
 
