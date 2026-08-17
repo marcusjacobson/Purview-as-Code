@@ -194,8 +194,18 @@ jobs:
     runs-on: ubuntu-latest
     # Bounded so a PR whose checks never go green cannot pin a runner open.
     timeout-minutes: 30
+    # `contents: read` is LOAD-BEARING and is not over-granting (#130). Reading
+    # `repository.pullRequest.mergeCommit` below resolves a *commit* object, which the
+    # `GITHUB_TOKEN` cannot see under `pull-requests: read` alone — it fails with
+    # "Resource not accessible by integration (repository.pullRequest.mergeCommit)". Because the
+    # step runs under `set -euo pipefail`, that abort took the whole job down *after* a successful
+    # merge, and `close-linked-issues` / `dispatch-affected-deploys` both skipped on `needs`. Every
+    # merge between this workflow shipping and #130 silently forfeited both. The merge SHA cannot
+    # simply be dropped instead: `dispatch-affected-deploys` consumes it as its checkout ref.
+    # Reference: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#permissions
     permissions:
       pull-requests: read
+      contents: read
     outputs:
       merged: ${{ steps.wait.outputs.merged }}
       merge_sha: ${{ steps.wait.outputs.merge_sha }}
@@ -352,7 +362,14 @@ jobs:
           echo "$ALL_ISSUES" | while read -r ISSUE_NUMBER; do
             [ -z "$ISSUE_NUMBER" ] && continue
 
-            ISSUE_STATE=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "UNKNOWN")
+            # The UNKNOWN sentinel below is only reachable if the failure is detected. `2>/dev/null
+            # || echo UNKNOWN` did NOT detect it: gh writes the error body to stdout, so a failed
+            # read produced "<body>\nUNKNOWN", which matches neither CLOSED nor UNKNOWN and fell
+            # straight through to the close path on an issue whose state was never read (#137).
+            if ! ISSUE_STATE=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json state --jq '.state' 2>&1); then
+              echo "::warning::Reading issue #$ISSUE_NUMBER failed. Response: $ISSUE_STATE"
+              ISSUE_STATE="UNKNOWN"
+            fi
 
             # Idempotent: a re-run, or an issue closed by hand in the meantime, is a no-op.
             if [ "$ISSUE_STATE" = "CLOSED" ]; then

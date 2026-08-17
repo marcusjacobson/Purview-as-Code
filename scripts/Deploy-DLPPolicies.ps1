@@ -1774,13 +1774,112 @@ function Compare-DlpPolicy {
     return $diffs
 }
 
+# ---- Location-restricted rule parameters (#108) --------------------------
+# The DLP service accepts some New-/Set-DlpComplianceRule parameters only when
+# the PARENT policy is scoped to a workload that implements the feature. The
+# restriction is NOT documented on the cmdlet reference page -- it surfaces
+# only as a runtime rejection, quoted verbatim:
+#
+#   Using the 'NotifyUserType' parameter is supported only for Exchange,
+#   SharePoint, OneDriveForBusiness, Teams, EndpointDevices. Either remove
+#   this parameter or turn on only Exchange, SharePoint, OneDriveForBusiness,
+#   Teams, EndpointDevices.
+#
+# Hit live on 2026-07-27 creating 'Fabric PII Detection - CoA Demo Workspace'
+# (locations.powerBI only): the POLICY created, its rule did not, leaving an
+# enabled RULELESS policy on the tenant. Same defect class as #92/#93 -- a
+# value that round-trips cleanly on -ExportCurrentState is undeployable on
+# apply, so no offline test can see it.
+#
+# Only NotifyUserType is listed, deliberately. The sibling notify-* parameters
+# are NOT listed: no Microsoft source documents a restriction for them, and
+# none has been observed rejected. Adding one on suspicion would silently drop
+# a user-notification setting from a working policy -- strictly worse than the
+# loud service error this guard replaces. Add a sibling here only with an
+# observed rejection to cite.
+# Reference: https://learn.microsoft.com/en-us/purview/dlp-use-notifications-and-policy-tips
+function Test-DlpParameterLocationSupport {
+    # $true when $ParameterName may be emitted for a rule whose parent policy
+    # declares $PolicyLocations.
+    #
+    # Fails OPEN in three cases, each on purpose:
+    #   1. The parameter carries no known restriction.
+    #   2. $PolicyLocations is $null -- the caller has no parent-policy context
+    #      (unit-test path, notes-only pass-through). Suppressing on absent
+    #      information would silently weaken a policy.
+    #   3. The policy declares no inclusion bucket at all (genericLocations-only
+    #      or notes-only). Scope is unknown; let the service arbitrate.
+    #
+    # Suppresses ONLY when the policy declares at least one inclusion bucket and
+    # EVERY declared bucket is outside the supported set -- the exact shape the
+    # service rejects.
+    #
+    # A MIXED policy (say exchange + powerBI) deliberately still emits. The
+    # service's own remedy text ("turn on only Exchange, ...") reads as though
+    # it may reject that too, but no such rejection has been observed, and the
+    # two failure modes are not symmetric: emitting risks a LOUD create error
+    # the operator sees and can act on, while suppressing risks SILENTLY
+    # dropping a notification setting from a policy that works today. Loud beats
+    # silent for a security control.
+    param(
+        [Parameter(Mandatory = $true)][string]$ParameterName,
+        [Parameter()][hashtable]$PolicyLocations
+    )
+
+    # Held inside the function, not at script scope, so the function is
+    # self-contained: the Pester suite extracts functions by AST and
+    # dot-sources them individually, and a script-scope table would be $null
+    # under test while working in production -- the worst possible split.
+    $restricted = @{
+        NotifyUserType = @('exchange', 'sharePoint', 'oneDrive', 'teams', 'endpoint')
+    }
+
+    # Every location bucket that TURNS ON a workload. The `*Exception` buckets
+    # carve scope out of an already-enabled workload, so they can never make a
+    # restricted parameter supported and are excluded on purpose.
+    $inclusionBuckets = @(
+        'endpoint', 'exchange', 'exchangeOnPremises', 'onPremisesScanner',
+        'oneDrive', 'powerBI', 'sharePoint', 'sharePointServer', 'teams',
+        'thirdPartyApp'
+    )
+
+    if (-not $restricted.ContainsKey($ParameterName)) { return $true }
+    if ($null -eq $PolicyLocations) { return $true }
+
+    $supported = @($restricted[$ParameterName])
+
+    # NOT `@($PolicyLocations[$bucket]).Count -gt 0`: for a key the hash does
+    # not carry, the indexer returns $null and `@($null).Count` is **1**, not
+    # 0 -- so that idiom reports every bucket as declared and the guard can
+    # never fire. Filter the entries themselves instead.
+    $declared = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($bucket in $inclusionBuckets) {
+        $value = $PolicyLocations[$bucket]
+        if ($null -eq $value) { continue }
+        $entries = @($value | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) })
+        if ($entries.Count -gt 0) { $declared.Add($bucket) }
+    }
+
+    if ($declared.Count -eq 0) { return $true }
+    foreach ($bucket in $declared) {
+        if ($supported -contains $bucket) { return $true }
+    }
+    return $false
+}
+
 function Compare-DlpRule {
     # Return a list of field names that differ between desired and
     # tenant rule hashes. Only declared (non-null / non-empty)
     # desired fields are compared.
+    #
+    # -PolicyLocations is the parent policy's `locations` hash. It is optional
+    # so every existing caller and test keeps working; when supplied it lets
+    # the comparison drop a field the write path cannot emit (#108), which is
+    # what stops a suppressed parameter from planning an Update forever.
     param(
         [Parameter(Mandatory = $true)][hashtable]$Desired,
-        [Parameter(Mandatory = $true)][hashtable]$Tenant
+        [Parameter(Mandatory = $true)][hashtable]$Tenant,
+        [Parameter()][hashtable]$PolicyLocations
     )
 
     $diffs = New-Object 'System.Collections.Generic.List[string]'
@@ -1845,7 +1944,11 @@ function Compare-DlpRule {
     }
 
     # ADR 0033 Batch 3b (#521 slice E) scalars: same only-when-declared semantics.
-    if (-not [string]::IsNullOrEmpty([string]$Desired.notifyUserType)) {
+    # notifyUserType additionally honors the #108 location guard: if the write
+    # path cannot emit it for this policy's workload, comparing it would plan an
+    # Update on every run that the apply could never satisfy.
+    if (-not [string]::IsNullOrEmpty([string]$Desired.notifyUserType) -and
+        (Test-DlpParameterLocationSupport -ParameterName 'NotifyUserType' -PolicyLocations $PolicyLocations)) {
         if ([string]$Desired.notifyUserType -ne [string]$Tenant.notifyUserType) {
             $diffs.Add('notifyUserType') | Out-Null
         }
@@ -2075,10 +2178,16 @@ function Get-DlpRuleSplat {
     # New- expects -Name + -Policy; Set- expects -Identity.
     # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule
     # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/set-dlpcompliancerule
+    #
+    # -PolicyLocations is the parent policy's `locations` hash, used by the
+    # #108 guard to omit parameters the service rejects for this policy's
+    # workload. Optional so existing callers and tests keep working; omitting
+    # it emits every declared parameter exactly as before.
     param(
         [Parameter(Mandatory = $true)][hashtable]$Hash,
         [Parameter()][string]$PolicyName,
         [Parameter()][hashtable]$LabelGuidMap = @{},
+        [Parameter()][hashtable]$PolicyLocations,
         [switch]$ForSet
     )
 
@@ -2122,8 +2231,17 @@ function Get-DlpRuleSplat {
     }
 
     # ADR 0033 Batch 3b (#521 slice E) scalars -> 3 cmdlet parameters.
+    # NotifyUserType is location-restricted (#108): emitting it for a policy
+    # scoped exclusively to an unsupported workload (powerBI/Fabric, on-prem,
+    # third-party) fails the rule create outright and strands an enabled,
+    # ruleless policy in the tenant. Omit it and WARN -- never drop it silently.
     if (-not [string]::IsNullOrEmpty([string]$Hash.notifyUserType)) {
-        $splat.NotifyUserType = [string]$Hash.notifyUserType
+        if (Test-DlpParameterLocationSupport -ParameterName 'NotifyUserType' -PolicyLocations $PolicyLocations) {
+            $splat.NotifyUserType = [string]$Hash.notifyUserType
+        } else {
+            Write-Warning ("[#108] Omitting -NotifyUserType ('{0}') from rule '{1}\{2}': the parent policy is scoped only to workloads the DLP service does not accept this parameter for (supported: Exchange, SharePoint, OneDriveForBusiness, Teams, EndpointDevices). The rule is created without it; the YAML is left unchanged." -f `
+                [string]$Hash.notifyUserType, [string]$PolicyName, [string]$Hash.name)
+        }
     }
     if (-not [string]::IsNullOrEmpty([string]$Hash.notifyOverrideRequirements)) {
         $splat.NotifyOverrideRequirements = [string]$Hash.notifyOverrideRequirements
@@ -3048,18 +3166,20 @@ try {
             # visible. Shares its definition with the policy-level
             # hollow guard above -- see Test-DlpRuleIsNotesOnly.
             if (Test-DlpRuleIsNotesOnly -Rule ([hashtable]$dr)) {
-                $rulePlan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; Reason = 'Notes-only pass-through; no Create/Update against tenant.'; Fields = '' })
+                $rulePlan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; PolicyLocations = $d.locations; Reason = 'Notes-only pass-through; no Create/Update against tenant.'; Fields = '' })
                 continue
             }
+            # The parent policy's locations ride on every rule row so the apply
+            # loop can consult the #108 guard without re-resolving the parent.
             if ($tenantRuleByKey.ContainsKey($key)) {
-                $diffs = Compare-DlpRule -Desired $dr -Tenant $tenantRuleByKey[$key]
+                $diffs = Compare-DlpRule -Desired $dr -Tenant $tenantRuleByKey[$key] -PolicyLocations $d.locations
                 if ($diffs.Count -eq 0) {
-                    $rulePlan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; Reason = 'In sync with tenant.'; Fields = '' })
+                    $rulePlan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; PolicyLocations = $d.locations; Reason = 'In sync with tenant.'; Fields = '' })
                 } else {
-                    $rulePlan.Add([pscustomobject]@{ Action = 'Update'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; Reason = ('Drift in: {0}' -f ($diffs -join ', ')); Fields = ($diffs -join ',') })
+                    $rulePlan.Add([pscustomobject]@{ Action = 'Update'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; PolicyLocations = $d.locations; Reason = ('Drift in: {0}' -f ($diffs -join ', ')); Fields = ($diffs -join ',') })
                 }
             } else {
-                $rulePlan.Add([pscustomobject]@{ Action = 'Create'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; Reason = 'Declared in YAML; absent from tenant.'; Fields = '' })
+                $rulePlan.Add([pscustomobject]@{ Action = 'Create'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; PolicyLocations = $d.locations; Reason = 'Declared in YAML; absent from tenant.'; Fields = '' })
             }
         }
 
@@ -3345,7 +3465,7 @@ try {
             'Create' {
                 if ($PSCmdlet.ShouldProcess($target, 'New-DlpComplianceRule')) {
                     try {
-                        $splat = Get-DlpRuleSplat -Hash $row.Desired -PolicyName $row.PolicyName -LabelGuidMap $labelGuidMap
+                        $splat = Get-DlpRuleSplat -Hash $row.Desired -PolicyName $row.PolicyName -LabelGuidMap $labelGuidMap -PolicyLocations $row.PolicyLocations
                         # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule
                         New-DlpComplianceRule @splat -ErrorAction Stop | Out-Null
                         $report.Add([pscustomobject]@{ Category = 'Created'; Kind = 'Rule'; Name = $row.Key; Reason = 'Declared in YAML; absent from tenant.' })
@@ -3359,7 +3479,7 @@ try {
             'Update' {
                 if ($PSCmdlet.ShouldProcess($target, 'Set-DlpComplianceRule')) {
                     try {
-                        $splat = Get-DlpRuleSplat -Hash $row.Desired -PolicyName $row.PolicyName -LabelGuidMap $labelGuidMap -ForSet
+                        $splat = Get-DlpRuleSplat -Hash $row.Desired -PolicyName $row.PolicyName -LabelGuidMap $labelGuidMap -PolicyLocations $row.PolicyLocations -ForSet
                         # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/set-dlpcompliancerule
                         Set-DlpComplianceRule @splat -ErrorAction Stop | Out-Null
                         $report.Add([pscustomobject]@{ Category = 'Updated'; Kind = 'Rule'; Name = $row.Key; Reason = $row.Reason })

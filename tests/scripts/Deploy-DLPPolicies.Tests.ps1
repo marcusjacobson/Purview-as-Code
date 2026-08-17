@@ -79,6 +79,7 @@ BeforeAll {
             'ConvertTo-TenantDlpPolicyHash',
             'ConvertTo-TenantDlpRuleHash',
             'Compare-DlpPolicy',
+            'Test-DlpParameterLocationSupport',
             'Compare-DlpRule',
             'Get-DlpPolicySplat',
             'Get-DlpRuleSplat',
@@ -448,6 +449,150 @@ Describe 'Get-DlpRuleSplat builds correct argument sets' {
             sensitivityLabels = @(@{ displayName = 'Confidential' })
         }
         { Get-DlpRuleSplat -Hash $r -PolicyName 'P1' -LabelGuidMap @{} } | Should -Throw -ExpectedMessage "*Confidential*"
+    }
+}
+
+Describe 'NotifyUserType is gated on the parent policy locations (#108)' {
+
+    # Live failure this closes (dev tenant, 2026-07-27, policy
+    # 'Fabric PII Detection - CoA Demo Workspace', locations.powerBI only):
+    #   Using the 'NotifyUserType' parameter is supported only for Exchange,
+    #   SharePoint, OneDriveForBusiness, Teams, EndpointDevices.
+    # The POLICY created and its rule did not, stranding an enabled ruleless
+    # policy on the tenant. Same class as #92/#93: exports clean, undeployable.
+
+    BeforeAll {
+        $script:NotifyRule = ConvertTo-DesiredDlpRuleHash -Entry @{
+            name               = 'r-notify'
+            sensitiveInfoTypes = @(@{ guid = '50842EB7-EDC8-4019-85DD-5A5C1F2BB085' })
+            notifyUserType     = 'NotSet'
+        }
+    }
+
+    Context 'Test-DlpParameterLocationSupport predicate' {
+
+        It 'returns $false for a policy scoped ONLY to unsupported workloads' -TestCases @(
+            @{ Bucket = 'powerBI' }
+            @{ Bucket = 'onPremisesScanner' }
+            @{ Bucket = 'exchangeOnPremises' }
+            @{ Bucket = 'sharePointServer' }
+            @{ Bucket = 'thirdPartyApp' }
+        ) {
+            param($Bucket)
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' `
+                -PolicyLocations @{ $Bucket = 'All' } | Should -BeFalse
+        }
+
+        # Non-vacuity: the guard MUST NOT fire for the workloads the service
+        # documents as supported. A one-sided test here would pass even if the
+        # predicate returned $false unconditionally.
+        It 'returns $true for each supported workload' -TestCases @(
+            @{ Bucket = 'exchange' }
+            @{ Bucket = 'sharePoint' }
+            @{ Bucket = 'oneDrive' }
+            @{ Bucket = 'teams' }
+            @{ Bucket = 'endpoint' }
+        ) {
+            param($Bucket)
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' `
+                -PolicyLocations @{ $Bucket = 'All' } | Should -BeTrue
+        }
+
+        It 'returns $true for a MIXED policy (one supported bucket is enough)' {
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' `
+                -PolicyLocations @{ exchange = 'All'; powerBI = 'All' } | Should -BeTrue
+        }
+
+        It 'fails OPEN when no parent-policy context is supplied' {
+            Test-DlpParameterLocationSupport -ParameterName 'NotifyUserType' | Should -BeTrue
+        }
+
+        It 'fails OPEN when the policy declares no inclusion bucket' {
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' -PolicyLocations @{} | Should -BeTrue
+        }
+
+        It 'ignores *Exception buckets -- they carve scope out, never turn a workload on' {
+            # sharePointException alone must not make the parameter supported.
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' `
+                -PolicyLocations @{ powerBI = 'All'; sharePointException = @('https://contoso.sharepoint.com/sites/x') } | Should -BeFalse
+        }
+
+        It 'leaves an unrestricted parameter alone' {
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'BlockAccess' `
+                -PolicyLocations @{ powerBI = 'All' } | Should -BeTrue
+        }
+    }
+
+    Context 'Get-DlpRuleSplat write path' {
+
+        It 'OMITS -NotifyUserType for a powerBI-only policy and warns' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Fabric' `
+                -PolicyLocations @{ powerBI = 'All' } -WarningVariable warnings -WarningAction SilentlyContinue
+            $splat.ContainsKey('NotifyUserType') | Should -BeFalse
+            # Silent suppression is the failure mode we are NOT shipping.
+            @($warnings).Count                   | Should -BeGreaterThan 0
+            [string]$warnings[0]                 | Should -BeLike '*NotifyUserType*'
+            [string]$warnings[0]                 | Should -BeLike '*P-Fabric\r-notify*'
+        }
+
+        It 'EMITS -NotifyUserType for an exchange-scoped policy' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Exo' `
+                -PolicyLocations @{ exchange = 'All' }
+            $splat.NotifyUserType | Should -Be 'NotSet'
+        }
+
+        It 'EMITS -NotifyUserType when no parent-policy context is supplied (back-compat)' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Legacy'
+            $splat.NotifyUserType | Should -Be 'NotSet'
+        }
+
+        It 'applies the same guard on the Set path, not just Create' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Fabric' -ForSet `
+                -PolicyLocations @{ powerBI = 'All' } -WarningAction SilentlyContinue
+            $splat.Identity                      | Should -Be 'P-Fabric\r-notify'
+            $splat.ContainsKey('NotifyUserType') | Should -BeFalse
+        }
+
+        It 'suppresses ONLY NotifyUserType -- the rest of the splat is untouched' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Fabric' `
+                -PolicyLocations @{ powerBI = 'All' } -WarningAction SilentlyContinue
+            $splat.Name                                        | Should -Be 'r-notify'
+            $splat.Policy                                      | Should -Be 'P-Fabric'
+            $splat.ContentContainsSensitiveInformation[0].Name | Should -Be '50842eb7-edc8-4019-85dd-5a5c1f2bb085'
+        }
+    }
+
+    Context 'Compare-DlpRule diff path' {
+
+        # Without this the reconciler would plan an Update on every single run
+        # for a drift the apply path is now guaranteed never to satisfy.
+        It 'does NOT report notifyUserType drift for a powerBI-only policy' {
+            $tenant = ConvertTo-DesiredDlpRuleHash -Entry @{
+                name               = 'r-notify'
+                sensitiveInfoTypes = @(@{ guid = '50842EB7-EDC8-4019-85DD-5A5C1F2BB085' })
+                notifyUserType     = 'SiteAdmin'
+            }
+            $diffs = Compare-DlpRule -Desired $script:NotifyRule -Tenant $tenant `
+                -PolicyLocations @{ powerBI = 'All' }
+            @($diffs) -contains 'notifyUserType' | Should -BeFalse
+        }
+
+        It 'DOES report notifyUserType drift for an exchange-scoped policy' {
+            $tenant = ConvertTo-DesiredDlpRuleHash -Entry @{
+                name               = 'r-notify'
+                sensitiveInfoTypes = @(@{ guid = '50842EB7-EDC8-4019-85DD-5A5C1F2BB085' })
+                notifyUserType     = 'SiteAdmin'
+            }
+            $diffs = Compare-DlpRule -Desired $script:NotifyRule -Tenant $tenant `
+                -PolicyLocations @{ exchange = 'All' }
+            @($diffs) -contains 'notifyUserType' | Should -BeTrue
+        }
     }
 }
 
