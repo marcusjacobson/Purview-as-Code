@@ -9,6 +9,17 @@ on:
   pull_request:
     types: [opened, ready_for_review, synchronize, labeled, unlabeled]
 
+# One run per PR at a time (#137). Without this the "sticky" comment is not sticky: `opened` and
+# `labeled` fire together, both runs list the comments before either has posted, both find nothing,
+# and both create -- 3 accumulated on #129, 2 each on #134 and #135. Serialising per PR makes the
+# lookup see the earlier run's comment and update it. `cancel-in-progress` is safe here because the
+# comment is a full restatement of current state, not an increment, so a superseded run has nothing
+# worth finishing.
+# Reference: https://docs.github.com/en/actions/using-jobs/using-concurrency
+concurrency:
+  group: pr-owner-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   pull-requests: write
   statuses: write
@@ -45,10 +56,18 @@ jobs:
 
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
 
-          LABELS=$(gh pr view "$PR_NUMBER" \
+          # Guarded because the step runs under `bash -e`: a bare `VAR=$(gh ...)` aborts the whole
+          # step when the call fails, which red-checks a PR that is otherwise perfectly healthy.
+          # This job only posts an advisory comment -- a transient API blip must degrade to
+          # "say nothing", never to a failed check or a comment built on labels we never read.
+          if ! LABELS=$(gh pr view "$PR_NUMBER" \
             --repo "${{ github.repository }}" \
             --json labels \
-            --jq '.labels[].name')
+            --jq '.labels[].name' 2>&1); then
+            echo "::warning::Could not read labels for PR #$PR_NUMBER; skipping the owner prompt for this run. Response: $LABELS"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           {
             echo "labels<<EOF"
@@ -69,24 +88,41 @@ jobs:
         run: |
           PR_NUMBER="${{ steps.pr-context.outputs.pr_number }}"
 
-          HEAD_SHA=$(gh pr view "$PR_NUMBER" \
+          # Same reason as the labels read above, and this is the one that actually bit: on PR #138
+          # a 503 here aborted the step under `bash -e` BEFORE reaching the guarded rollup call
+          # below, so the first cut of this fix still red-checked the PR. Guarding one call in a
+          # step and not the one above it guards nothing.
+          if ! HEAD_SHA=$(gh pr view "$PR_NUMBER" \
             --repo "${{ github.repository }}" \
             --json headRefOid \
-            --jq '.headRefOid')
+            --jq '.headRefOid' 2>&1); then
+            echo "::warning::Could not resolve the head SHA for PR #$PR_NUMBER; reporting checks as still running. Response: $HEAD_SHA"
+            echo "checks_state=running" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
 
-          CHECKS=$(gh api \
+          # `|| echo ""` LOOKS like a guard but is not: gh writes the error body to stdout, so on
+          # failure $CHECKS was the body followed by an empty string, and the greps below then ran
+          # against a JSON error object. A body matching neither pattern fell through to
+          # `passing` -- reporting "all checks are passing" because the API call FAILED (#137).
+          # Check the status, and degrade to `running`, never to `passing`: "still working" is the
+          # only honest thing to say when the rollup could not be read, and it is the state that
+          # does not invite an approval.
+          if CHECKS=$(gh api \
             "repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs" \
-            --jq '.check_runs[] | select(.name != "Sticky owner approval prompt") | .conclusion' \
-            2>/dev/null || echo "")
-
-          if echo "$CHECKS" | grep -q "failure"; then
-            echo "checks_state=failing" >> "$GITHUB_OUTPUT"
-          elif echo "$CHECKS" | grep -q "null"; then
-            echo "checks_state=running" >> "$GITHUB_OUTPUT"
+            --jq '.check_runs[] | select(.name != "Sticky owner approval prompt") | .conclusion' 2>&1); then
+            if echo "$CHECKS" | grep -q "failure"; then
+              echo "checks_state=failing" >> "$GITHUB_OUTPUT"
+            elif echo "$CHECKS" | grep -q "null"; then
+              echo "checks_state=running" >> "$GITHUB_OUTPUT"
+            else
+              echo "checks_state=passing" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "checks_state=passing" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not read check runs for $HEAD_SHA; reporting as still running. Response: $CHECKS"
+            echo "checks_state=running" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Upsert sticky comment
@@ -121,10 +157,27 @@ jobs:
           ---
           *This comment is maintained automatically by the \`pr-owner-gate\` workflow. It updates on every push and label change. Re-toggle the \`needs-review\` label to refresh after a check completes.*"
 
-          EXISTING_ID=$(gh api \
+          # `gh api` prints the RESPONSE BODY to stdout even on an HTTP error. The previous form
+          # discarded stderr and never checked the exit code, so a failed lookup was captured as
+          # data: during the 2026-08-17 incident a 403 body became $EXISTING_ID and the script
+          # PATCHed `.../issues/comments/{"message":"Resource not accessible...}` (#137).
+          # Capture status explicitly, warn with what actually came back, and fall back to the
+          # SAFE branch -- posting a fresh comment is a cosmetic duplicate; a corrupt PATCH is a
+          # failed job on a PR that is otherwise fine.
+          if LOOKUP_OUT=$(gh api \
             "repos/${{ github.repository }}/issues/$PR_NUMBER/comments" \
-            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" \
-            2>/dev/null | head -1)
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" 2>&1); then
+            EXISTING_ID=$(printf '%s\n' "$LOOKUP_OUT" | head -1)
+          else
+            echo "::warning::Could not list comments on PR #$PR_NUMBER; posting a new prompt instead of updating. Response: $LOOKUP_OUT"
+            EXISTING_ID=""
+          fi
+
+          # Shape guard, independent of the exit code above: a comment id is all digits. Anything
+          # else -- an error blob, a jq diagnostic, a partial line -- can never reach the URL.
+          case "$EXISTING_ID" in
+            ''|*[!0-9]*) EXISTING_ID="" ;;
+          esac
 
           if [ -n "$EXISTING_ID" ]; then
             gh api -X PATCH \
