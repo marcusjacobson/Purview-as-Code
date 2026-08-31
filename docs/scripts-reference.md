@@ -30,6 +30,7 @@ Reconcilers materialize desired-state YAML under `data-plane/` against the live 
 | [Deploy-RetentionPolicies.ps1](../scripts/Deploy-RetentionPolicies.ps1) | Reconcile Microsoft Purview Data Lifecycle Management (DLM) retention compliance policies and their nested rules against `data-plane/data-lifecycle/retention-policies |
 | [Deploy-RoleGroupBackingEntraGroups.ps1](../scripts/Deploy-RoleGroupBackingEntraGroups.ps1) | Provision and reconcile Microsoft Entra security groups that back each Microsoft Purview / Microsoft 365 portal role group declared in data-plane/purview-role-groups/role-groups |
 | [Deploy-Scans.ps1](../scripts/Deploy-Scans.ps1) | Reconcile Microsoft Purview scans, scan rulesets, and triggers against `data-plane/scans/scans |
+| [Deploy-SITRulePackages.ps1](../scripts/Deploy-SITRulePackages.ps1) | Reconcile custom Microsoft Purview Sensitive Information Type (SIT) rule packages against `data-plane/classifications/sit-rule-packages |
 | [Deploy-UnifiedCatalog.ps1](../scripts/Deploy-UnifiedCatalog.ps1) | Reconcile Microsoft Purview Unified Catalog desired state |
 | [Deploy-UnifiedCatalogPolicies.ps1](../scripts/Deploy-UnifiedCatalogPolicies.ps1) | Reconcile Microsoft Purview Unified Catalog data access policies |
 
@@ -70,6 +71,7 @@ Support scripts, smoke-test wrappers, and infrastructure primitives.
 | [New-KvUnlockRbac.ps1](../scripts/New-KvUnlockRbac.ps1) | Deploy the kv-temp-unlock workflow's RBAC grant via infra/modules/kv-unlock-rbac |
 | [New-LocalAutomationCertificate.ps1](../scripts/New-LocalAutomationCertificate.ps1) | Provision a per-machine, per-user signing certificate for the Microsoft Purview data-plane Entra app's interactive dev loop |
 | [New-LogAnalyticsWorkspace.ps1](../scripts/New-LogAnalyticsWorkspace.ps1) | Deploy the lab Log Analytics workspace via infra/modules/law |
+| [New-RepoLabels.ps1](../scripts/New-RepoLabels.ps1) | Seed the GitHub labels this repository's automation depends on (idempotent) |
 | [New-RoleAssignableEntraGroup.ps1](../scripts/New-RoleAssignableEntraGroup.ps1) | Create (idempotently) a Microsoft Entra ID role-assignable security group and, optionally, add a single principal as a member, via Microsoft Graph |
 | [Resolve-EnvTokens.ps1](../scripts/Resolve-EnvTokens.ps1) | Substitute `${env:VAR}` tokens in YAML-derived strings against an explicit allow-list of environment variables |
 | [Set-AuditRetentionPolicy.ps1](../scripts/Set-AuditRetentionPolicy.ps1) | Reconcile Microsoft Purview unified audit log retention policies against `data-plane/audit/retention-policies |
@@ -77,6 +79,7 @@ Support scripts, smoke-test wrappers, and infrastructure primitives.
 | [Sync-SITCatalog.ps1](../scripts/Sync-SITCatalog.ps1) | Reconcile Microsoft Purview / Microsoft 365 Sensitive Information Type (SIT) catalog against `data-plane/classifications/sit-catalog |
 | [Test-DSPMforAIPosture.ps1](../scripts/Test-DSPMforAIPosture.ps1) | Read-only Microsoft Purview Data Security Posture Management (DSPM) for AI posture verifier driven by `data-plane/dspm-ai/dspm-ai-config |
 | [Test-DSPMPosture.ps1](../scripts/Test-DSPMPosture.ps1) | Read-only Microsoft Purview Data Security Posture Management (DSPM) signal-source posture verifier driven by `data-plane/dspm/dspm-config |
+| [Test-IdentifierResidue.ps1](../scripts/Test-IdentifierResidue.ps1) | Read-only identifier-shaped residual scan |
 | [Test-KickoffGuard.ps1](../scripts/Test-KickoffGuard.ps1) | Verify the ADR 0045 no-push-back guard: assert this workspace cannot contribute content back to the source template repository |
 | [Test-M365Licensing.ps1](../scripts/Test-M365Licensing.ps1) | Preflight: verifies that the signed-in Microsoft 365 tenant has the licenses and service plans required by a caller script |
 | [Update-LandingPageEmbeds.ps1](../scripts/Update-LandingPageEmbeds.ps1) | Refresh (or verify) the offline documentation snapshots embedded in the repository landing page, index |
@@ -90,4 +93,4 @@ Support scripts, smoke-test wrappers, and infrastructure primitives.
 
 ---
 
-_Last regenerated: 2026-07-13 09:15:29 UTC by [docs-regen.yml](../.github/workflows/docs-regen.yml)_
+_Last regenerated: 2026-08-31 06:41:20 UTC by [docs-regen.yml](../.github/workflows/docs-regen.yml)_
