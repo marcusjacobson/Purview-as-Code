@@ -16,6 +16,43 @@ To add an entry:
 3. **Bullet.** Add `- **<scope>:** <subject> (#NNN)` at the top of that category, where `<scope>` is the commit scope, `<subject>` is the Conventional-Commit subject without its `type(scope):` prefix, and `#NNN` is the originating issue number. Historical entries reference the squash-merge PR instead; either renders as a link on GitHub.
 4. **Exemption.** A PR whose only change is this file (a manual changelog fix) does not add an entry for itself. Pure upstream mirror-sync PRs that carry only upstream CHANGELOG entries and no repo-local changes may omit a new bullet (the upstream entries already document the imported changes).
 
+## 2026-09-04
+
+### Added
+
+- **irm:** give `Deploy-IRMPolicies.ps1` an `-ExportCurrentState` parameter set, a two-pass `portal-wins` apply with a drift-back pull request, and a local ADR 0060 reverse-sync tool. The reconciler previously had no way to capture live tenant state back into `data-plane/irm/policies.yaml`, so a portal edit could only be reconciled by hand. It now exports through the same `ConvertTo-TenantIRMPolicyHash` normalizer the comparator uses, so a fresh export re-compares all-`NoChange` by construction. The forward workflow (`deploy-irm.yml`) enumerates the objects a `portal-wins` apply skipped, re-exports live state, and opens a drift-back pull request for review — the enumerate pass deliberately runs without a static skip list, because a shared marker is emitted for both a permanent baseline skip and real drift, and folding the two together would make every run look like drift. A companion `scripts/Invoke-LocalIrmDriftSync.ps1` (and its DLP twin, `Invoke-LocalDlpDriftSync.ps1`) gives the same capture path to an operator whose tenant's Key Vault is governance-locked and unreachable from CI, working against an isolated git worktree so the caller's own checkout is never switched. Both share `scripts/modules/ExportDiffFilter.psm1`, a small cosmetic-only-diff classifier extracted so the sync-from-tenant workflows and the local tools cannot drift out of sync on what counts as meaningful drift.
+
+### Changed
+
+- **irm:** bring `sync-irm-from-tenant.yml` into the byte-lockstep and drift-category shape `deploy-irm.yml` and `Deploy-IRMPolicies.ps1` above already assume, in three small, targeted hunks against this otherwise operator-tailored workflow (its `fanout-dev` job is intentionally not ported — see the port notes on the accompanying pull request):
+  - the drift-issue search now matches the full environment-qualified issue title as an exact phrase rather than a bare substring, so an open issue for one environment can no longer silently absorb another environment's drift as a refresh comment (the issue title already carried the environment name; the search guarding against a duplicate did not);
+  - `SKIP_NAMES_IRM` gained the same `||` fallback `deploy-irm.yml` already carries, so a schedule-triggered run (which never populates `inputs.*`) evaluates the real baseline instead of an empty string;
+  - the drift-category list gained `Blocked`, matching the reconciler's new immutable-field classification above — without it, a `scenario` mismatch this leg cannot describe correctly would silently pass as non-drift.
+
+- **ci:** drop `Deploy-IRMPolicies.ps1` and `Deploy-IRMEntityLists.ps1` from `validate.yml`'s full-circle reconciler-contract-guard exempt list — both now declare `SupportsShouldProcess`, `-PruneMissing`, and `-ExportCurrentState`, so neither needs the exemption. `Deploy-IRMEntityLists.ps1` keeps the capability even though the surface itself is parked (see Documentation below): the guard checks shape, not whether the reconciler is currently reconciling anything.
+
+### Fixed
+
+- **ci:** stop `pr-auto-merge.yml`'s `close-linked-issues` step from aborting on the common case of a merged pull request with **no** linked closing issue. The step runs under `bash -e`, and `grep` exits non-zero when it matches nothing — a valid, expected result here — so the assignment aborted the whole step before it ever reached the `-z "$ALL_ISSUES"` guard written for exactly that case. A `|| true` on the pipeline fixes it; the distinction that matters is that no match is a valid outcome, not an error, which the existing guard already encoded three lines below the site that was killing it. Third instance of this shape in this workflow pair: a step under `bash -e` where a non-zero exit is expected, not exceptional.
+
+### Documentation
+
+- **irm:** add [ADR 0064](docs/adr/0064-irm-entity-lists-are-microsoft-managed.md) — the IRM entity-list surface (`Get-InsiderRiskEntityList` and the cmdlet family behind it) is Microsoft-managed tenant configuration, not operator-authored desired state: membership is not readable through any documented API, so a reconciler modelling it as declarative state cannot converge. Supersedes [ADR 0039](docs/adr/0039-irm-entity-list-tracked-fields.md), whose tracked-field model this finding invalidates. `scripts/Deploy-IRMEntityLists.ps1` is retained but parked rather than removed, so the AST-derived contract suites asserting over its shape stay meaningful; `data-plane/irm/entity-lists.yaml` stays permanently empty. Docs corrected to match throughout: `irm-end-to-end-smoke.md`, the IRM solution page, and the `irm-entity-lists.md` solution page all previously described IRM as export-incapable ("Tier-3") — untrue since the reconciler above gained `-ExportCurrentState` and the forward workflow gained its two-pass drift-back job, and one of the corrected sentences is the exact claim that the reverse leg "cannot round-trip tenant state" as a pull request, which contradicted the workflow beside it.
+
+- **instructions:** correct `github-actions.instructions.md`'s Tier-3 (export-incapable) carve-out, which cited `Deploy-IRMPolicies.ps1` and `deploy-irm.yml` as its reference implementation — both graduated out of Tier-3 in the change above. No workflow currently uses the carve-out; it is kept as a specification for whoever writes the first genuinely export-incapable forward workflow, with a caution drawn from IRM's own history: it was classified Tier-3 on the belief that its cmdlet family had no export path, and an exporter turned out to be buildable once someone actually tried. Confirm the limitation against a live probe before claiming it, and note that export-incapable does not automatically mean reconcilable-with-a-carve-out either — ADR 0064 above is the case where the read path for the field carrying operator intent did not exist at all, and the surface was parked instead of given a Tier-3 workflow.
+
+### Tests
+
+- **irm:** make the new "tracked `policies.yaml` is in canonical order" test (`tests/scripts/Deploy-IRMPolicies.Tests.ps1`) skip cleanly rather than fail when the tracked file is empty. As ported it refused to pass vacuously on an empty list by design — correct for the operator repository this test originates in, where the file is always populated — but this template ships `data-plane/irm/policies.yaml` empty on purpose (ADR 0056), which is outside what the assertion means to guard rather than a violation of it.
+
+### CI/CD
+
+- **ci:** share `scripts/modules/ExportDiffFilter.psm1`'s cosmetic-only-diff classifier across `sync-dlp-from-tenant.yml`, `sync-auto-label-policies-from-tenant.yml`, and `sync-label-policies-from-tenant.yml`, replacing each workflow's own inline copy of the same regex-based filter. `sync-irm-from-tenant.yml` and the module itself both shipped with this port; these three still carried the pre-extraction inline logic, which `tests/scripts/ExportDiffFilter.Tests.ps1`'s workflow-parity check (also new in this port) caught as a live gap rather than a hypothetical one.
+
+### Build
+
+- **repo:** gitignore `.claude/settings.json`. Unlike the `.vscode/settings.json` convention just above it, this file accumulates a per-machine tool allowlist and permission mode rather than shared project configuration, so it belongs to each clone rather than the repo.
+
 ## 2026-08-17
 
 ### Added

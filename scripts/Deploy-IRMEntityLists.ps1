@@ -1,10 +1,57 @@
 ﻿#Requires -Version 7.4
 <#
 .SYNOPSIS
-    Reconcile Microsoft Purview Insider Risk Management entity lists
-    against `data-plane/irm/entity-lists.yaml` (desired state).
+    PARKED (ADR 0064) -- Reconcile Microsoft Purview Insider Risk
+    Management entity lists against `data-plane/irm/entity-lists.yaml`.
 
 .DESCRIPTION
+    ##################################################################
+    #  PARKED -- DO NOT RUN, DO NOT UN-PARK WITHOUT A FOLLOW-UP ADR   #
+    ##################################################################
+
+    This reconciler models a surface that does not exist as designed.
+    Retained on disk as the record of an attempted model, and as the
+    reference implementation several AST-derived contract suites assert
+    over (the ADR 0052 gate class map, the issue #13 prune-guard
+    rollout tables, the validate.yml full-circle exempt list). Nothing
+    invokes it: `deploy-irm-entity-lists.yml` was removed under ADR
+    0064, and `data-plane/irm/entity-lists.yaml` ships -- and stays --
+    an empty root list.
+
+    Live findings that parked it (2026-09-03, lab tenant; full evidence
+    ladder in docs/adr/0064-irm-entity-lists-are-microsoft-managed.md):
+
+      1. `Get-InsiderRiskEntityList` REJECTS a bare call -- "Either
+         Identity or Type should be provided as parameter." The read
+         phase below calls it bare and has therefore never once run.
+      2. The ADR 0039 `type` model is fictional. `UserType` /
+         `GroupType` / `SiteType` are not members of the live
+         `IrmEntityListType` enum, which has 23 entirely different
+         values (HveLists, DomainLists, GlobalExclusionSGMapping, ...).
+         `New-InsiderRiskEntityList -Type` takes the same enum, so the
+         Create path could never have succeeded either.
+      3. `-IncludeEntities` is declared by the cmdlet but rejected by
+         the service as not implemented.
+      4. `.Entities` is EMPTY on every list, via per-type enumeration
+         and via a single-object `-Identity` fetch. Membership -- the
+         only field carrying operator intent -- is not readable, so it
+         cannot be converged. This is the decisive finding.
+      5. `.Type` is the constant 'InsiderRiskEntityList'; the real
+         discriminator is `.ListType`.
+      6. `IRM-Lab-Priority-Users`, the ADR 0039 skip-baseline name,
+         does not exist on the tenant.
+      7. All 32 lists on lab are Microsoft-provisioned configuration
+         containers (Irm* / Dspm* / Purview*) -- the IRM settings
+         surface, the analogue of ADR 0036's IRM_Tenant_Setting_*.
+
+    The broken enumerate call is left in place deliberately. Fixing it
+    is a per-type loop, which finding 4 then makes pointless; a future
+    un-parking ADR owns that repair.
+
+    Everything below this block is the original Wave 2d reconciler,
+    unchanged, and is accurate about its own intent -- it is the intent
+    that turned out not to be reachable. Original description:
+
     Wave 2d declarative reconciler for Insider Risk Management entity
     lists (issue #606). The YAML is the central source of truth: add /
     update / remove flows through this script, which converges the live
@@ -134,13 +181,32 @@
     Default `@()`. This script's workflow baseline carries `IRM-Lab-Priority-Users`
     per docs/adr/0039-irm-entity-list-tracked-fields.md.
 
+.PARAMETER ExportCurrentState
+    Round-trip the live tenant's Insider Risk Management entity lists
+    back into the desired-state YAML at `-Path` instead of reconciling
+    against it. Selects the `Export` parameter set: the prune switches
+    (`-PruneMissing`, `-AllowMajorityPrune`, `-MaxPruneRatio`) and
+    `-SkipNames` are not available, because an export neither plans nor
+    writes to the tenant -- it is a read followed by a local file write.
+    `name` and `type` are always emitted (both are schema-required, and
+    `type` is immutable per ADR 0039, so it must survive a round trip to
+    stay available to the Create splat). `entities` is always emitted --
+    lowercased and sorted to match the comparator, with an empty tenant
+    list writing `entities: []`, the declared-empty form. Optional
+    fields the tenant leaves unset are omitted rather than written as
+    empty strings, so a fresh export re-compares `NoChange` by
+    construction. An existing file's leading comment header is
+    preserved; a file that already declares entity-list entries is
+    refused unless `-Force` is passed.
+    Reference: docs/adr/0039-irm-entity-list-tracked-fields.md.
+
 .PARAMETER Force
     Suppress the safety guard on the operation you asked for. This
-    script has one: the ADR 0052 destructive-operation confirmation
+    script has two: the ADR 0052 destructive-operation confirmation
     prompt raised before the `repo-wins` overwrite branch and before
-    the `-PruneMissing` delete branch. It exposes no
-    `-ExportCurrentState`, so there is no YAML-clobber guard to
-    suppress.
+    the `-PruneMissing` delete branch, and -- under
+    `-ExportCurrentState` -- the guard that refuses to clobber a YAML
+    file already declaring entity-list entries.
     `-Force` does NOT authorize overwriting a foreign-authored tenant
     object, and it does NOT suppress `Conflict` rows -- that meaning was
     split out to `-OverwriteForeignAuthor` by ADR 0053 (a switch this
@@ -209,44 +275,72 @@
         Reference:
         https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param(
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidateNotNullOrEmpty()]
     [string]$Path = (Join-Path $PSScriptRoot '..\data-plane\irm\entity-lists.yaml'),
 
+    [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
 
     # Issue #13, guard 2: the prune sanity-ratio override and threshold.
+    [Parameter(ParameterSetName = 'Apply')]
     [switch]$AllowMajorityPrune,
 
+    [Parameter(ParameterSetName = 'Apply')]
     [ValidateRange(0.0000001, 1.0)]
     [double]$MaxPruneRatio = 0.5,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidateSet('audit', 'portal-wins', 'repo-wins')]
     [string]$DirectionPolicy = 'portal-wins',
 
+    [Parameter(ParameterSetName = 'Apply')]
     [string[]]$SkipNames = @(),
 
     # ADR 0052: the operator's "do not ask me" switch. Carries NO default --
     # a default of $true would suppress the confirmation gate on every run,
     # including runs where nobody passed -Force.
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [switch]$Force,
 
+    # Export mode (issue #177). Mandatory in its own parameter set, which is
+    # what makes the set selectable: passing -ExportCurrentState binds Export
+    # and takes the prune switches and -SkipNames off the table entirely.
+    [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
+    [switch]$ExportCurrentState,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidateNotNullOrEmpty()]
     [string]$ParametersFile,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidatePattern('^[A-Za-z][A-Za-z0-9-]{1,22}[A-Za-z0-9]$')]
     [string]$VaultName,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidatePattern('^[a-zA-Z0-9\-]{1,127}$')]
     [string]$CertificateName,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidatePattern('^[A-Za-z][A-Za-z0-9\-]{1,62}[A-Za-z0-9]$')]
     [string]$DataPlaneAppDisplayName,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.\-]{0,253}[A-Za-z0-9]$')]
     [string]$TenantDomain,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [switch]$SkipSchemaValidation
 )
 
@@ -348,6 +442,93 @@ function Compare-EntityList {
     }
 
     return $diffs
+}
+
+function Invoke-IRMEntityListExport {
+    # Round-trip the live tenant's IRM entity lists back into the YAML's
+    # `entityLists:` block (issue #177). Shape copied from
+    # Deploy-DLPPolicies.ps1's Invoke-DlpExport, mirroring
+    # Deploy-IRMPolicies.ps1's Invoke-IRMPolicyExport.
+    #
+    # Rows are normalized through ConvertTo-TenantEntityListHash -- the SAME
+    # function the comparator consumes -- so export and compare can never
+    # disagree about a field's canonical form (notably the lowercased, sorted
+    # `entities` list). That is what makes a freshly exported file re-compare
+    # all-NoChange by construction.
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$TenantEntityLists,
+        [switch]$Force
+    )
+
+    # YAML-clobber guard. An export overwrites the operator's curated
+    # desired state, so a file that already declares entries needs -Force.
+    if (Test-Path -LiteralPath $Path) {
+        $existing = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Yaml
+        if ($existing -and $existing.ContainsKey('entityLists') -and $existing.entityLists -and @($existing.entityLists).Count -gt 0 -and -not $Force.IsPresent) {
+            Write-Error ("Target YAML '{0}' already declares {1} entity-list entries. Re-run with -Force to overwrite." -f $Path, @($existing.entityLists).Count)
+            return
+        }
+    }
+
+    # Preserve the file's curated comment header (every leading blank or
+    # comment line up to the first content line).
+    $headerLines = @()
+    if (Test-Path -LiteralPath $Path) {
+        foreach ($line in (Get-Content -LiteralPath $Path)) {
+            if ($line -match '^\s*$' -or $line -match '^\s*#') {
+                $headerLines += $line
+            } else {
+                break
+            }
+        }
+    }
+
+    $exported = @()
+    foreach ($e in ($TenantEntityLists | Sort-Object { [string]$_.Name })) {
+        $h = ConvertTo-TenantEntityListHash -EntityList $e
+
+        # `type` is schema-required AND immutable after creation (ADR 0039):
+        # it is excluded from the comparator but still feeds the Create splat,
+        # so it must survive the round trip. A tenant row without one cannot
+        # be represented.
+        if ([string]::IsNullOrEmpty($h.type)) {
+            Write-Warning ("Skipping tenant entity list '{0}': it reports no Type, which the schema requires and the Create path needs." -f $h.name)
+            continue
+        }
+
+        # Emit the tracked fields, and only the optional ones the tenant
+        # actually carries. `entities` is always emitted: the tenant-side
+        # normalizer defaults it to @(), which is the declared-empty form the
+        # comparator expects, so omitting it would flip the field to
+        # do-not-manage and silently stop reconciling membership.
+        $entry = [ordered]@{ name = $h.name; type = $h.type }
+        if (-not [string]::IsNullOrEmpty($h.displayName)) { $entry.displayName = $h.displayName }
+        if (-not [string]::IsNullOrEmpty($h.description)) { $entry.description = $h.description }
+        $entry.entities = @($h.entities)
+        $exported += $entry
+    }
+
+    $doc = [ordered]@{ entityLists = $exported }
+    # WithIndentedSequences indents block-sequence items 2 spaces from their
+    # parent key, matching the hand-curated style in the rest of data-plane/
+    # and satisfying the default yamllint indentation rule.
+    # Reference: https://www.powershellgallery.com/packages/powershell-yaml
+    $body = ConvertTo-Yaml $doc -Options WithIndentedSequences
+
+    # Header + body, trailing blanks stripped, explicit LF endings and
+    # exactly one trailing newline so yamllint is satisfied regardless of
+    # host OS.
+    $bodyLines = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in ($body -split "`n")) { $bodyLines.Add($line.TrimEnd()) }
+    while ($bodyLines.Count -gt 0 -and [string]::IsNullOrEmpty($bodyLines[$bodyLines.Count - 1])) {
+        $bodyLines.RemoveAt($bodyLines.Count - 1)
+    }
+    $finalLines = @($headerLines) + @($bodyLines)
+    $content = ($finalLines -join "`n") + "`n"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $content, $utf8NoBom)
+    Write-Information ("Exported {0} tenant entity lists to '{1}'." -f $exported.Count, $Path) -InformationAction Continue
 }
 
 #endregion
@@ -452,6 +633,9 @@ if (-not $CertificateName)         { $CertificateName         = [string]$paramet
 if (-not $DataPlaneAppDisplayName) { $DataPlaneAppDisplayName = [string]$parameters.automation.apps.dataPlane.displayName }
 if (-not $TenantDomain)            { $TenantDomain            = [string]$parameters.automation.tenantDomain }
 
+$mode = if ($ExportCurrentState.IsPresent) { 'Export' } else { 'Apply' }
+
+Write-Information ("Mode            : {0}" -f $mode) -InformationAction Continue
 Write-Information ("Parameters file : {0}" -f $ParametersFile) -InformationAction Continue
 Write-Information ("Environment     : {0}" -f $parameters.environment) -InformationAction Continue
 Write-Information ("Vault           : {0}" -f $VaultName) -InformationAction Continue
@@ -466,60 +650,66 @@ Write-Information ("SkipNames count : {0}" -f $SkipNames.Count) -InformationActi
 
 #region Desired-state load
 
-if (-not (Test-Path -LiteralPath $Path)) {
-    Write-Error ("Desired-state YAML not found at '{0}'." -f $Path)
-    return
-}
-$Path = (Resolve-Path -LiteralPath $Path).Path
-$desiredRoot = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Yaml
-
-# Schema validation (JSON Schema Draft-07).
-# Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
-if (-not $SkipSchemaValidation.IsPresent) {
-    $schemaPath = Join-Path $scriptRoot '..\data-plane\irm\entity-lists.schema.json'
-    if (-not (Test-Path -LiteralPath $schemaPath)) {
-        Write-Error ("Schema file not found at '{0}'." -f $schemaPath)
-        return
-    }
-    $schemaText = Get-Content -LiteralPath $schemaPath -Raw
-    # Depth 100 (the ConvertTo-Json maximum), matching Deploy-DLPPolicies.ps1 (#80):
-    # -Depth 10 can silently truncate a deep desired-state document during
-    # serialization, and Test-Json then rejects the truncated document with an
-    # error pointing at an unrelated shallow field (#90).
-    $docJson = $desiredRoot | ConvertTo-Json -Depth 100
-    try {
-        $null = $docJson | Test-Json -Schema $schemaText -ErrorAction Stop
-    }
-    catch {
-        Write-Error ("Desired-state YAML failed schema validation: {0}" -f $_.Exception.Message)
-        return
-    }
-    Write-Information ("Schema OK       : {0}" -f $schemaPath) -InformationAction Continue
-}
-
+# Apply-only. Export reads the tenant and overwrites $Path, so it neither
+# needs the current desired state nor should fail on a file that does not
+# parse -- that is exactly the file an export exists to (re)generate.
 $desiredEntries = @()
-if ($desiredRoot -and $desiredRoot.ContainsKey('entityLists') -and $desiredRoot.entityLists) {
-    $desiredEntries = @($desiredRoot.entityLists | ForEach-Object { ConvertTo-DesiredEntityListHash -Entry ([hashtable]$_) })
-}
-Write-Information ("Desired lists   : {0}" -f $desiredEntries.Count) -InformationAction Continue
+if ($mode -eq 'Apply') {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Error ("Desired-state YAML not found at '{0}'." -f $Path)
+        return
+    }
+    $Path = (Resolve-Path -LiteralPath $Path).Path
+    $desiredRoot = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Yaml
 
-# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
-#
-# With zero desired entries every live tenant IRM entity list falls out of the
-# orphan match below, so the run would classify the entire set as orphans and
-# delete it. The rationale, the likely causes, and the 2026-07-19 production
-# hit are documented in scripts/modules/PruneGuard.psm1.
-#
-# This script has no Export mode, so the prune switch alone selects the
-# destructive branch. Placed in the desired-state load region so it fires
-# before the tenant is contacted at all -- before `az account show`, before
-# Connect-IPPSSession, and before any write phase.
-if ($PruneMissing.IsPresent) {
-    Assert-PruneDesiredSetNotEmpty `
-        -DesiredCount   $desiredEntries.Count `
-        -ObjectTypeNoun 'IRM entity list' `
-        -SourcePath     $Path `
-        -CollectionKey  'entityLists'
+    # Schema validation (JSON Schema Draft-07).
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
+    if (-not $SkipSchemaValidation.IsPresent) {
+        $schemaPath = Join-Path $scriptRoot '..\data-plane\irm\entity-lists.schema.json'
+        if (-not (Test-Path -LiteralPath $schemaPath)) {
+            Write-Error ("Schema file not found at '{0}'." -f $schemaPath)
+            return
+        }
+        $schemaText = Get-Content -LiteralPath $schemaPath -Raw
+        # Depth 100 (the ConvertTo-Json maximum), matching Deploy-DLPPolicies.ps1 (#80):
+        # -Depth 10 can silently truncate a deep desired-state document during
+        # serialization, and Test-Json then rejects the truncated document with an
+        # error pointing at an unrelated shallow field (#90).
+        $docJson = $desiredRoot | ConvertTo-Json -Depth 100
+        try {
+            $null = $docJson | Test-Json -Schema $schemaText -ErrorAction Stop
+        }
+        catch {
+            Write-Error ("Desired-state YAML failed schema validation: {0}" -f $_.Exception.Message)
+            return
+        }
+        Write-Information ("Schema OK       : {0}" -f $schemaPath) -InformationAction Continue
+    }
+
+    if ($desiredRoot -and $desiredRoot.ContainsKey('entityLists') -and $desiredRoot.entityLists) {
+        $desiredEntries = @($desiredRoot.entityLists | ForEach-Object { ConvertTo-DesiredEntityListHash -Entry ([hashtable]$_) })
+    }
+    Write-Information ("Desired lists   : {0}" -f $desiredEntries.Count) -InformationAction Continue
+
+    # Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+    #
+    # With zero desired entries every live tenant IRM entity list falls out of the
+    # orphan match below, so the run would classify the entire set as orphans and
+    # delete it. The rationale, the likely causes, and the 2026-07-19 production
+    # hit are documented in scripts/modules/PruneGuard.psm1.
+    #
+    # This whole block is Apply-only, so reaching it already implies Apply mode
+    # and the prune switch alone selects the destructive branch. Placed in the
+    # desired-state load region so it fires before the tenant is contacted at
+    # all -- before `az account show`, before Connect-IPPSSession, and before
+    # any write phase.
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneDesiredSetNotEmpty `
+            -DesiredCount   $desiredEntries.Count `
+            -ObjectTypeNoun 'IRM entity list' `
+            -SourcePath     $Path `
+            -CollectionKey  'entityLists'
+    }
 }
 
 #endregion
@@ -600,6 +790,16 @@ try {
     # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/get-insiderriskentitylist
     $tenantLists = @(Get-InsiderRiskEntityList -ErrorAction Stop)
     Write-Information ("Tenant lists    : {0}" -f $tenantLists.Count) -InformationAction Continue
+
+    # Export mode short-circuit (issue #177). Placed after the enumerate and
+    # before any planning: an export is a read plus a local file write, so it
+    # never builds a plan, never reaches the ADR 0052 gate, and never touches
+    # the tenant. The `return` exits through the finally below, so the S&C
+    # session is still disconnected.
+    if ($mode -eq 'Export') {
+        Invoke-IRMEntityListExport -Path $Path -TenantEntityLists $tenantLists -Force:$Force.IsPresent
+        return
+    }
 
     # Index tenant entity lists by Name for O(1) lookup.
     $tenantByName = @{}

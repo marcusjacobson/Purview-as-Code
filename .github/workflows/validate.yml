@@ -226,9 +226,7 @@ jobs:
             'Deploy-Collections.ps1',
             'Deploy-CommunicationCompliance.ps1',
             'Deploy-DataSources.ps1',
-            'Deploy-Glossary.ps1',
-            'Deploy-IRMPolicies.ps1',
-            'Deploy-IRMEntityLists.ps1'
+            'Deploy-Glossary.ps1'
           )
           $required = @('SupportsShouldProcess', 'PruneMissing', 'ExportCurrentState')
           $failures = @()

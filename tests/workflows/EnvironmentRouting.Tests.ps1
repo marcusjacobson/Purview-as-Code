@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.4
+#Requires -Version 7.4
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.5.0' }
 <#
     ENVIRONMENT ROUTING IS A CONTRACT, SO A TEST PINS IT.

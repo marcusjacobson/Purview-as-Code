@@ -137,13 +137,31 @@
     workflow baseline carries the names listed in
     `docs/adr/0036-irm-tenant-setting-immovable.md`.
 
+.PARAMETER ExportCurrentState
+    Round-trip the live tenant's Insider Risk Management policies back
+    into the desired-state YAML at `-Path` instead of reconciling
+    against it. Selects the `Export` parameter set: the prune switches
+    (`-PruneMissing`, `-AllowMajorityPrune`, `-MaxPruneRatio`) and
+    `-SkipNames` are not available, because an export neither plans nor
+    writes to the tenant -- it is a read followed by a local file write.
+    The system-managed `IRM_Tenant_Setting_<tenant-guid>` policy is
+    never exported (ADR 0036: the reconciler classifies it `NoChange`
+    by name-prefix wildcard, and its GUID-bearing name must never reach
+    a committed file). Only the four tracked fields are emitted, and
+    optional fields the tenant leaves unset are omitted rather than
+    written as empty strings, so a fresh export re-compares `NoChange`
+    by construction. An existing file's leading comment header is
+    preserved; a file that already declares policy entries is refused
+    unless `-Force` is passed.
+    Reference: docs/adr/0036-irm-tenant-setting-immovable.md.
+
 .PARAMETER Force
     Suppress the safety guard on the operation you asked for. This
-    script has one: the ADR 0052 destructive-operation confirmation
+    script has two: the ADR 0052 destructive-operation confirmation
     prompt raised before the `repo-wins` overwrite branch and before
-    the `-PruneMissing` delete branch. It exposes no
-    `-ExportCurrentState`, so there is no YAML-clobber guard to
-    suppress.
+    the `-PruneMissing` delete branch, and -- under
+    `-ExportCurrentState` -- the guard that refuses to clobber a YAML
+    file already declaring policy entries.
     `-Force` does NOT authorize overwriting a foreign-authored tenant
     object, and it does NOT suppress `Conflict` rows -- that meaning was
     split out to `-OverwriteForeignAuthor` by ADR 0053 (a switch this
@@ -212,44 +230,72 @@
         Reference:
         https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
 #>
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High', DefaultParameterSetName = 'Apply')]
 param(
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidateNotNullOrEmpty()]
     [string]$Path = (Join-Path $PSScriptRoot '..\data-plane\irm\policies.yaml'),
 
+    [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
 
     # Issue #13, guard 2: the prune sanity-ratio override and threshold.
+    [Parameter(ParameterSetName = 'Apply')]
     [switch]$AllowMajorityPrune,
 
+    [Parameter(ParameterSetName = 'Apply')]
     [ValidateRange(0.0000001, 1.0)]
     [double]$MaxPruneRatio = 0.5,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidateSet('audit', 'portal-wins', 'repo-wins')]
     [string]$DirectionPolicy = 'portal-wins',
 
+    [Parameter(ParameterSetName = 'Apply')]
     [string[]]$SkipNames = @(),
 
     # ADR 0052: the operator's "do not ask me" switch. Carries NO default --
     # a default of $true would suppress the confirmation gate on every run,
     # including runs where nobody passed -Force.
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [switch]$Force,
 
+    # Export mode (issue #177). Mandatory in its own parameter set, which is
+    # what makes the set selectable: passing -ExportCurrentState binds Export
+    # and takes the prune switches and -SkipNames off the table entirely.
+    [Parameter(ParameterSetName = 'Export', Mandatory = $true)]
+    [switch]$ExportCurrentState,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidateNotNullOrEmpty()]
     [string]$ParametersFile,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidatePattern('^[A-Za-z][A-Za-z0-9-]{1,22}[A-Za-z0-9]$')]
     [string]$VaultName,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidatePattern('^[a-zA-Z0-9\-]{1,127}$')]
     [string]$CertificateName,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidatePattern('^[A-Za-z][A-Za-z0-9\-]{1,62}[A-Za-z0-9]$')]
     [string]$DataPlaneAppDisplayName,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.\-]{0,253}[A-Za-z0-9]$')]
     [string]$TenantDomain,
 
+    [Parameter(ParameterSetName = 'Apply')]
+    [Parameter(ParameterSetName = 'Export')]
     [switch]$SkipSchemaValidation
 )
 
@@ -315,6 +361,122 @@ function Compare-IRMPolicy {
     }
 
     return $diffs
+}
+
+function Get-IRMSettableFieldDrift {
+    # Issue #196. Fields that still differ after a create AND that
+    # Set-InsiderRiskPolicy can actually correct.
+    #
+    # `scenario` is deliberately excluded. InsiderRiskScenario is set-once
+    # on New-InsiderRiskPolicy, so a post-create scenario difference is not
+    # something to converge -- it means the create did not do what it was
+    # told, and the caller must report Failed rather than retry a write
+    # that can never succeed.
+    #
+    # This exists because New-InsiderRiskPolicy accepts -Enabled:$false and
+    # creates the policy ENABLED anyway, while Set-InsiderRiskPolicy
+    # honours the same flag. Reproduced on both tenants (issue #196), so it
+    # is cmdlet-level rather than a tenant quirk. The defence is general on
+    # purpose: any tracked field the service quietly declines to apply on
+    # create is invisible to a create-only bootstrap, which is the same
+    # blind spot ADR 0064 records on the read side.
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Desired,
+        [Parameter(Mandatory = $true)][hashtable]$Tenant
+    )
+
+    $all = @(Compare-IRMPolicy -Desired $Desired -Tenant $Tenant)
+    return @($all | Where-Object { $_ -ne 'scenario' })
+}
+
+function Invoke-IRMPolicyExport {
+    # Round-trip the live tenant's IRM policies back into the YAML's
+    # `policies:` block (issue #177). Shape copied from
+    # Deploy-DLPPolicies.ps1's Invoke-DlpExport.
+    #
+    # Rows are normalized through ConvertTo-TenantIRMPolicyHash -- the SAME
+    # function the comparator consumes -- so export and compare can never
+    # disagree about a field's canonical form. That is what makes a freshly
+    # exported file re-compare all-NoChange by construction, and it is the
+    # #20 export-normalize/apply-raw defect class designed out rather than
+    # tested for.
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$TenantPolicies,
+        [switch]$Force
+    )
+
+    # YAML-clobber guard. An export overwrites the operator's curated
+    # desired state, so a file that already declares entries needs -Force.
+    if (Test-Path -LiteralPath $Path) {
+        $existing = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Yaml
+        if ($existing -and $existing.ContainsKey('policies') -and $existing.policies -and @($existing.policies).Count -gt 0 -and -not $Force.IsPresent) {
+            Write-Error ("Target YAML '{0}' already declares {1} policy entries. Re-run with -Force to overwrite." -f $Path, @($existing.policies).Count)
+            return
+        }
+    }
+
+    # Preserve the file's curated comment header (every leading blank or
+    # comment line up to the first content line). The header carries the
+    # field contract and the ADR references; an export must not eat it.
+    $headerLines = @()
+    if (Test-Path -LiteralPath $Path) {
+        foreach ($line in (Get-Content -LiteralPath $Path)) {
+            if ($line -match '^\s*$' -or $line -match '^\s*#') {
+                $headerLines += $line
+            } else {
+                break
+            }
+        }
+    }
+
+    $exported = @()
+    foreach ($t in ($TenantPolicies | Sort-Object { [string]$_.Name })) {
+        # ADR 0036: the per-tenant system-managed container is never
+        # reconciled and must never be written to a committed file -- its
+        # name embeds the real tenant GUID, which the ADR 0055 residue scan
+        # fails closed on. Same name-prefix test the plan builder uses.
+        if ([string]$t.Name -like 'IRM_Tenant_Setting_*') { continue }
+
+        $h = ConvertTo-TenantIRMPolicyHash -Policy $t
+
+        # `scenario` is schema-required. A tenant row without one cannot be
+        # represented, so warn and skip rather than emit an invalid document.
+        if ([string]::IsNullOrEmpty($h.scenario)) {
+            Write-Warning ("Skipping tenant policy '{0}': it reports no InsiderRiskScenario, which the schema requires." -f $h.name)
+            continue
+        }
+
+        # Emit only the tracked fields, and only when the tenant actually
+        # carries them. Writing `description: ''` for an unset Comment would
+        # round-trip as a declared-empty value and plan a perpetual Update.
+        $entry = [ordered]@{ name = $h.name }
+        if (-not [string]::IsNullOrEmpty($h.description)) { $entry.description = $h.description }
+        $entry.scenario = $h.scenario
+        $entry.enabled  = [bool]$h.enabled
+        $exported += $entry
+    }
+
+    $doc = [ordered]@{ policies = $exported }
+    # WithIndentedSequences indents block-sequence items 2 spaces from their
+    # parent key, matching the hand-curated style in the rest of data-plane/
+    # and satisfying the default yamllint indentation rule.
+    # Reference: https://www.powershellgallery.com/packages/powershell-yaml
+    $body = ConvertTo-Yaml $doc -Options WithIndentedSequences
+
+    # Header + body, trailing blanks stripped, explicit LF endings and
+    # exactly one trailing newline so yamllint is satisfied regardless of
+    # host OS. Pattern mirrors Deploy-DLPPolicies.ps1's export branch.
+    $bodyLines = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($line in ($body -split "`n")) { $bodyLines.Add($line.TrimEnd()) }
+    while ($bodyLines.Count -gt 0 -and [string]::IsNullOrEmpty($bodyLines[$bodyLines.Count - 1])) {
+        $bodyLines.RemoveAt($bodyLines.Count - 1)
+    }
+    $finalLines = @($headerLines) + @($bodyLines)
+    $content = ($finalLines -join "`n") + "`n"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $content, $utf8NoBom)
+    Write-Information ("Exported {0} tenant policies to '{1}'." -f $exported.Count, $Path) -InformationAction Continue
 }
 
 #endregion
@@ -419,6 +581,9 @@ if (-not $CertificateName)         { $CertificateName         = [string]$paramet
 if (-not $DataPlaneAppDisplayName) { $DataPlaneAppDisplayName = [string]$parameters.automation.apps.dataPlane.displayName }
 if (-not $TenantDomain)            { $TenantDomain            = [string]$parameters.automation.tenantDomain }
 
+$mode = if ($ExportCurrentState.IsPresent) { 'Export' } else { 'Apply' }
+
+Write-Information ("Mode            : {0}" -f $mode) -InformationAction Continue
 Write-Information ("Parameters file : {0}" -f $ParametersFile) -InformationAction Continue
 Write-Information ("Environment     : {0}" -f $parameters.environment) -InformationAction Continue
 Write-Information ("Vault           : {0}" -f $VaultName) -InformationAction Continue
@@ -433,60 +598,66 @@ Write-Information ("SkipNames count : {0}" -f $SkipNames.Count) -InformationActi
 
 #region Desired-state load
 
-if (-not (Test-Path -LiteralPath $Path)) {
-    Write-Error ("Desired-state YAML not found at '{0}'." -f $Path)
-    return
-}
-$Path = (Resolve-Path -LiteralPath $Path).Path
-$desiredRoot = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Yaml
-
-# Schema validation (JSON Schema Draft-07).
-# Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
-if (-not $SkipSchemaValidation.IsPresent) {
-    $schemaPath = Join-Path $scriptRoot '..\data-plane\irm\policies.schema.json'
-    if (-not (Test-Path -LiteralPath $schemaPath)) {
-        Write-Error ("Schema file not found at '{0}'." -f $schemaPath)
-        return
-    }
-    $schemaText = Get-Content -LiteralPath $schemaPath -Raw
-    # Depth 100 (the ConvertTo-Json maximum), matching Deploy-DLPPolicies.ps1 (#80):
-    # -Depth 10 can silently truncate a deep desired-state document during
-    # serialization, and Test-Json then rejects the truncated document with an
-    # error pointing at an unrelated shallow field (#90).
-    $docJson = $desiredRoot | ConvertTo-Json -Depth 100
-    try {
-        $null = $docJson | Test-Json -Schema $schemaText -ErrorAction Stop
-    }
-    catch {
-        Write-Error ("Desired-state YAML failed schema validation: {0}" -f $_.Exception.Message)
-        return
-    }
-    Write-Information ("Schema OK       : {0}" -f $schemaPath) -InformationAction Continue
-}
-
+# Apply-only. Export reads the tenant and overwrites $Path, so it neither
+# needs the current desired state nor should fail on a file that does not
+# parse -- that is exactly the file an export exists to (re)generate.
 $desiredEntries = @()
-if ($desiredRoot -and $desiredRoot.ContainsKey('policies') -and $desiredRoot.policies) {
-    $desiredEntries = @($desiredRoot.policies | ForEach-Object { ConvertTo-DesiredIRMPolicyHash -Entry ([hashtable]$_) })
-}
-Write-Information ("Desired policies: {0}" -f $desiredEntries.Count) -InformationAction Continue
+if ($mode -eq 'Apply') {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Error ("Desired-state YAML not found at '{0}'." -f $Path)
+        return
+    }
+    $Path = (Resolve-Path -LiteralPath $Path).Path
+    $desiredRoot = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Yaml
 
-# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
-#
-# With zero desired entries every live tenant insider risk management policy
-# falls out of the orphan match below, so the run would classify the entire set
-# as orphans and delete it. The rationale, the likely causes, and the
-# 2026-07-19 production hit are documented in scripts/modules/PruneGuard.psm1.
-#
-# This script has no Export mode, so the prune switch alone selects the
-# destructive branch. Placed in the desired-state load region so it fires
-# before the tenant is contacted at all -- before `az account show`, before
-# Connect-IPPSSession, and before any write phase.
-if ($PruneMissing.IsPresent) {
-    Assert-PruneDesiredSetNotEmpty `
-        -DesiredCount   $desiredEntries.Count `
-        -ObjectTypeNoun 'insider risk management policy' `
-        -SourcePath     $Path `
-        -CollectionKey  'policies'
+    # Schema validation (JSON Schema Draft-07).
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json
+    if (-not $SkipSchemaValidation.IsPresent) {
+        $schemaPath = Join-Path $scriptRoot '..\data-plane\irm\policies.schema.json'
+        if (-not (Test-Path -LiteralPath $schemaPath)) {
+            Write-Error ("Schema file not found at '{0}'." -f $schemaPath)
+            return
+        }
+        $schemaText = Get-Content -LiteralPath $schemaPath -Raw
+        # Depth 100 (the ConvertTo-Json maximum), matching Deploy-DLPPolicies.ps1 (#80):
+        # -Depth 10 can silently truncate a deep desired-state document during
+        # serialization, and Test-Json then rejects the truncated document with an
+        # error pointing at an unrelated shallow field (#90).
+        $docJson = $desiredRoot | ConvertTo-Json -Depth 100
+        try {
+            $null = $docJson | Test-Json -Schema $schemaText -ErrorAction Stop
+        }
+        catch {
+            Write-Error ("Desired-state YAML failed schema validation: {0}" -f $_.Exception.Message)
+            return
+        }
+        Write-Information ("Schema OK       : {0}" -f $schemaPath) -InformationAction Continue
+    }
+
+    if ($desiredRoot -and $desiredRoot.ContainsKey('policies') -and $desiredRoot.policies) {
+        $desiredEntries = @($desiredRoot.policies | ForEach-Object { ConvertTo-DesiredIRMPolicyHash -Entry ([hashtable]$_) })
+    }
+    Write-Information ("Desired policies: {0}" -f $desiredEntries.Count) -InformationAction Continue
+
+    # Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+    #
+    # With zero desired entries every live tenant insider risk management policy
+    # falls out of the orphan match below, so the run would classify the entire set
+    # as orphans and delete it. The rationale, the likely causes, and the
+    # 2026-07-19 production hit are documented in scripts/modules/PruneGuard.psm1.
+    #
+    # This whole block is Apply-only, so reaching it already implies Apply mode
+    # and the prune switch alone selects the destructive branch. Placed in the
+    # desired-state load region so it fires before the tenant is contacted at
+    # all -- before `az account show`, before Connect-IPPSSession, and before
+    # any write phase.
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneDesiredSetNotEmpty `
+            -DesiredCount   $desiredEntries.Count `
+            -ObjectTypeNoun 'insider risk management policy' `
+            -SourcePath     $Path `
+            -CollectionKey  'policies'
+    }
 }
 
 #endregion
@@ -568,6 +739,16 @@ try {
     $tenantPolicies = @(Get-InsiderRiskPolicy -ErrorAction Stop)
     Write-Information ("Tenant policies : {0}" -f $tenantPolicies.Count) -InformationAction Continue
 
+    # Export mode short-circuit (issue #177). Placed after the enumerate and
+    # before any planning: an export is a read plus a local file write, so it
+    # never builds a plan, never reaches the ADR 0052 gate, and never touches
+    # the tenant. The `return` exits through the finally below, so the S&C
+    # session is still disconnected.
+    if ($mode -eq 'Export') {
+        Invoke-IRMPolicyExport -Path $Path -TenantPolicies $tenantPolicies -Force:$Force.IsPresent
+        return
+    }
+
     # Index tenant policies by Name for O(1) lookup.
     $tenantByName = @{}
     foreach ($t in $tenantPolicies) {
@@ -583,6 +764,22 @@ try {
             $diffs = Compare-IRMPolicy -Desired $d -Tenant $tenantByName[$d.name]
             if ($diffs.Count -eq 0) {
                 $plan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $d.name; Desired = $d; Reason = 'In sync with tenant.' })
+            } elseif ($diffs -contains 'scenario') {
+                # InsiderRiskScenario is set-once: it is a parameter on
+                # New-InsiderRiskPolicy but NOT on Set-InsiderRiskPolicy (verified
+                # against a live S&C session, issue #267 -- and see the Update
+                # splat below, which cannot carry it). Planning an Update for
+                # scenario drift would emit a row that can never converge, so the
+                # run would report the same drift forever. Report it as Blocked
+                # instead: visible in the plan, never written, and -- because the
+                # ADR 0052 gate keys on Update rows only -- never counted as an
+                # overwrite the operator is asked to confirm.
+                $plan.Add([pscustomobject]@{
+                    Action  = 'Blocked'
+                    Name    = $d.name
+                    Desired = $d
+                    Reason  = ("Immutable field drift: scenario (YAML '{0}', tenant '{1}'). Set-InsiderRiskPolicy cannot change InsiderRiskScenario; remove the tenant policy and recreate it, or correct the YAML." -f $d.scenario, $tenantByName[$d.name].scenario)
+                })
             } else {
                 $plan.Add([pscustomobject]@{ Action = 'Update'; Name = $d.name; Desired = $d; Reason = ('Drift in: {0}' -f ($diffs -join ', ')) })
             }
@@ -647,7 +844,7 @@ try {
 
     if ($DirectionPolicy -ne 'audit') {
         foreach ($row in $plan) {
-            if ($row.Action -notin @('Create','Update','NoChange','Orphan')) { continue }
+            if ($row.Action -notin @('Create','Update','NoChange','Orphan','Blocked')) { continue }
             $hasDrift = ($row.Action -eq 'Update')
             $decision = Resolve-DirectionPolicyAction `
                 -Policy      $DirectionPolicy `
@@ -798,7 +995,79 @@ try {
                         if (-not [string]::IsNullOrEmpty($row.Desired.description)) { $splat.Comment = $row.Desired.description }
                         if ($null -ne $row.Desired.enabled)  { $splat.Enabled  = [bool]$row.Desired.enabled }
                         New-InsiderRiskPolicy @splat -ErrorAction Stop | Out-Null
-                        $report.Add([pscustomobject]@{ Category = 'Created'; Name = $row.Name; Reason = $row.Reason })
+
+                        # Issue #196: never trust the create to have applied
+                        # what it was handed. New-InsiderRiskPolicy accepts
+                        # -Enabled:$false and creates the policy ENABLED
+                        # anyway; Set- honours the same flag. Read it back and
+                        # converge whatever did not take.
+                        #
+                        # Each failure mode reports honestly and separately: a
+                        # read-back that fails is NOT a failed create, but a
+                        # corrective Set- that fails IS a tenant left holding
+                        # state the repo did not declare.
+                        $verifyReason = $row.Reason
+                        $createVerified = $false
+                        $createFailed = $false
+                        $createdHash = $null
+
+                        try {
+                            $createdHash = ConvertTo-TenantIRMPolicyHash -Policy (Get-InsiderRiskPolicy -Identity $row.Desired.name -ErrorAction Stop)
+                            $createVerified = $true
+                        } catch {
+                            Write-Warning ("Created IRM policy '{0}' but could not read it back to verify: {1}" -f $row.Name, $_.Exception.Message)
+                            $verifyReason = ('{0} Post-create verification could not read the policy back; the declared state is unconfirmed.' -f $row.Reason)
+                        }
+
+                        if ($createVerified) {
+                            $allDrift = @(Compare-IRMPolicy -Desired $row.Desired -Tenant $createdHash)
+                            if ($allDrift -contains 'scenario') {
+                                # Immutable, so unrecoverable in place: the
+                                # service created the policy under a scenario
+                                # other than the one requested.
+                                $createFailed = $true
+                                $report.Add([pscustomobject]@{
+                                        Category = 'Failed'
+                                        Name     = $row.Name
+                                        Reason   = ("Created, but the tenant reports scenario '{0}' where YAML declares '{1}'. InsiderRiskScenario is set-once on New-InsiderRiskPolicy, so it cannot be corrected in place -- remove the tenant policy and re-apply." -f $createdHash.scenario, $row.Desired.scenario)
+                                    })
+                            } else {
+                                $settable = @(Get-IRMSettableFieldDrift -Desired $row.Desired -Tenant $createdHash)
+                                if ($settable.Count -gt 0) {
+                                    Write-Warning ("Create did not honour {0} on IRM policy '{1}' (issue #196); converging with Set-InsiderRiskPolicy." -f ($settable -join ', '), $row.Name)
+                                    try {
+                                        $fixSplat = @{ Identity = $row.Desired.name }
+                                        if (-not [string]::IsNullOrEmpty($row.Desired.description)) { $fixSplat.Comment = $row.Desired.description }
+                                        if ($null -ne $row.Desired.enabled) { $fixSplat.Enabled = [bool]$row.Desired.enabled }
+                                        Set-InsiderRiskPolicy @fixSplat -ErrorAction Stop | Out-Null
+
+                                        $recheckHash = ConvertTo-TenantIRMPolicyHash -Policy (Get-InsiderRiskPolicy -Identity $row.Desired.name -ErrorAction Stop)
+                                        $stillDrifted = @(Get-IRMSettableFieldDrift -Desired $row.Desired -Tenant $recheckHash)
+                                        if ($stillDrifted.Count -gt 0) {
+                                            $createFailed = $true
+                                            $report.Add([pscustomobject]@{
+                                                    Category = 'Failed'
+                                                    Name     = $row.Name
+                                                    Reason   = ('Created, but {0} did not take on either the create or the follow-up Set-InsiderRiskPolicy. The tenant does not hold the declared state.' -f ($stillDrifted -join ', '))
+                                                })
+                                        } else {
+                                            $verifyReason = ('{0} Create did not honour {1}; converged with a follow-up Set- (issue #196).' -f $row.Reason, ($settable -join ', '))
+                                        }
+                                    } catch {
+                                        $createFailed = $true
+                                        $report.Add([pscustomobject]@{
+                                                Category = 'Failed'
+                                                Name     = $row.Name
+                                                Reason   = ('Created, but the follow-up Set-InsiderRiskPolicy that would have converged {0} failed: {1}' -f ($settable -join ', '), $_.Exception.Message)
+                                            })
+                                    }
+                                }
+                            }
+                        }
+
+                        if (-not $createFailed) {
+                            $report.Add([pscustomobject]@{ Category = 'Created'; Name = $row.Name; Reason = $verifyReason })
+                        }
                     } catch {
                         $report.Add([pscustomobject]@{ Category = 'Failed'; Name = $row.Name; Reason = ('Create failed: {0}' -f $_.Exception.Message) })
                     }
@@ -830,6 +1099,12 @@ try {
             }
             'Skip' {
                 $report.Add([pscustomobject]@{ Category = 'Skipped'; Name = $row.Name; Reason = $row.Reason })
+            }
+            'Blocked' {
+                # Reported, never written. No ShouldProcess call: there is no
+                # cmdlet invocation to gate, because the service exposes no way
+                # to satisfy this drift in place.
+                $report.Add([pscustomobject]@{ Category = 'Blocked'; Name = $row.Name; Reason = $row.Reason })
             }
             'Orphan' {
                 if ($PruneMissing.IsPresent) {
@@ -874,5 +1149,9 @@ finally {
 # Emit the categorized plan. Suitable for | Format-Table or capture to
 # $GITHUB_STEP_SUMMARY. Categories: Created / Updated / Removed for
 # completed writes; Create / Update / Orphan for -WhatIf rows; NoChange
-# for in-sync; Failed for caught exceptions.
+# for in-sync; Skipped for ADR 0029 direction-policy skips; Blocked for
+# drift the service cannot satisfy in place (immutable scenario);
+# Failed for caught exceptions.
+#
+# Export mode returns before this point -- it emits no plan.
 $report

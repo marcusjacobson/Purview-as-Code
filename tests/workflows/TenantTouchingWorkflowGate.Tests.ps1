@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.4
+#Requires -Version 7.4
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.5.0' }
 <#
     ADR 0054's SKIP GATE IS A REPO-WIDE INVARIANT, SO A REPO-WIDE TEST PINS IT.
