@@ -228,23 +228,18 @@ jobs:
           # changes are blank lines and comment-only lines. Tracked-field
           # changes (any other line) flow through unchanged and
           # peter-evans/create-pull-request opens the PR as before.
-          # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_regular_expressions
+          # Shared across every sync-<domain>-from-tenant.yml workflow via
+          # scripts/modules/ExportDiffFilter.psm1
+          # (tests/scripts/ExportDiffFilter.Tests.ps1 pins the filter
+          # steps identical modulo $path).
           $path = 'data-plane/information-protection/label-policies.yaml'
           $diff = git diff -U0 -- $path
           if (-not $diff) {
             Write-Host '::notice::No diff after export.'
             return
           }
-          $meaningful = $false
-          foreach ($line in ($diff -split "`n")) {
-            if ($line -notmatch '^[-+]') { continue }
-            if ($line -match '^(---|\+\+\+)') { continue }
-            $payload = $line.Substring(1)
-            if ($payload -match '^\s*$') { continue }
-            if ($payload -match '^\s*#') { continue }
-            $meaningful = $true
-            break
-          }
+          Import-Module ./scripts/modules/ExportDiffFilter.psm1 -Force -ErrorAction Stop
+          $meaningful = Test-ExportDiffMeaningful -DiffText $diff
           if (-not $meaningful) {
             Write-Host '::notice::Diff is cosmetic-only (blank lines + YAML comments). Reverting export and skipping drift-back PR per issue #508.'
             git checkout HEAD -- $path

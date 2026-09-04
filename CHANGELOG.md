@@ -45,6 +45,10 @@ To add an entry:
 
 - **irm:** make the new "tracked `policies.yaml` is in canonical order" test (`tests/scripts/Deploy-IRMPolicies.Tests.ps1`) skip cleanly rather than fail when the tracked file is empty. As ported it refused to pass vacuously on an empty list by design — correct for the operator repository this test originates in, where the file is always populated — but this template ships `data-plane/irm/policies.yaml` empty on purpose (ADR 0056), which is outside what the assertion means to guard rather than a violation of it.
 
+### CI/CD
+
+- **ci:** share `scripts/modules/ExportDiffFilter.psm1`'s cosmetic-only-diff classifier across `sync-dlp-from-tenant.yml`, `sync-auto-label-policies-from-tenant.yml`, and `sync-label-policies-from-tenant.yml`, replacing each workflow's own inline copy of the same regex-based filter. `sync-irm-from-tenant.yml` and the module itself both shipped with this port; these three still carried the pre-extraction inline logic, which `tests/scripts/ExportDiffFilter.Tests.ps1`'s workflow-parity check (also new in this port) caught as a live gap rather than a hypothetical one.
+
 ### Build
 
 - **repo:** gitignore `.claude/settings.json`. Unlike the `.vscode/settings.json` convention just above it, this file accumulates a per-machine tool allowlist and permission mode rather than shared project configuration, so it belongs to each clone rather than the repo.
