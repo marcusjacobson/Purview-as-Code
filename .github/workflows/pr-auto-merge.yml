@@ -348,7 +348,14 @@ jobs:
           PYEOF
           )
 
-          ALL_ISSUES=$(printf '%s\n%s\n' "$FROM_GRAPHQL" "$FROM_BODY" | grep -E '^[0-9]+$' | sort -un)
+          # `|| true` because NO MATCH IS A VALID RESULT HERE, not an error. grep exits 1 when it
+          # matches nothing, and this step runs under `bash -e`, so without it the assignment
+          # aborted the whole step on any PR with no linked issue -- taking down the `-z` guard
+          # three lines below that was written for precisely that case (#154). Observed on #150,
+          # a docs-regen PR that has no `Closes #N` by construction, so it would have failed
+          # every week. Third instance of this shape in this workflow pair after #130 and #137:
+          # a step under `bash -e` where a non-zero exit is an expected outcome.
+          ALL_ISSUES=$(printf '%s\n%s\n' "$FROM_GRAPHQL" "$FROM_BODY" | grep -E '^[0-9]+$' | sort -un || true)
 
           if [ -z "$ALL_ISSUES" ]; then
             echo "PR #$PR_NUMBER has no linked closing issues (checked both closingIssuesReferences and the PR body). Nothing to close."

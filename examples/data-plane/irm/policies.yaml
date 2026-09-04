@@ -2,7 +2,8 @@
 #
 # A worked Insider Risk Management policy for data-plane/irm/policies.yaml, which ships
 # `policies: []` in the template. Copy from here deliberately; prefer running
-# `./scripts/Deploy-IRMPolicies.ps1 -ExportCurrentState` against your own tenant.
+# `./scripts/Deploy-IRMPolicies.ps1 -ExportCurrentState` against your own tenant, which
+# captures live state directly rather than having you hand-transcribe it.
 #
 # An IRM policy PROFILES REAL EMPLOYEES. It is not a thing a public template should create
 # in a stranger's tenant on a first dispatch, which is why `data-plane/irm/policies.yaml`

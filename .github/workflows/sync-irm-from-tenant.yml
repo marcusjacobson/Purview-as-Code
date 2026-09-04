@@ -257,7 +257,7 @@ jobs:
         id: detect
         shell: pwsh
         env:
-          SKIP_NAMES_IRM: ${{ inputs.skip_names_irm }}
+          SKIP_NAMES_IRM: ${{ inputs.skip_names_irm || 'IRM Lab — Data leaks by priority users,IRM Lab — Data theft by departing users,IRM Lab — General data leaks,IRM Lab — Risky AI usage' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -306,7 +306,12 @@ jobs:
           # In audit mode the reconciler emits Create / Update / Orphan
           # for would-be writes, NoChange for in-sync, Failed for caught
           # exceptions. NoChange and Skipped are never drift.
-          $driftCategories = @('Create', 'Update', 'Orphan', 'Failed')
+          # Blocked (issue #177) is drift the service cannot satisfy in
+          # place -- an immutable `scenario` difference, which
+          # Set-InsiderRiskPolicy has no parameter to write. It needs a
+          # human decision (recreate the policy or correct the YAML), so
+          # it must raise an issue rather than pass silently.
+          $driftCategories = @('Create', 'Update', 'Orphan', 'Failed', 'Blocked')
           $drift = @($rows | Where-Object {
             $_.Category -in $driftCategories -and
             -not $skipSet.Contains([string]$_.Name)
@@ -405,15 +410,21 @@ jobs:
 
           # Idempotency guard: if an open drift issue for this surface
           # already exists, refresh it with a comment instead of opening
-          # a duplicate.
+          # a duplicate. The search is scoped to the FULL title (quoted
+          # exact phrase, which GitHub's search syntax treats as a phrase
+          # match) rather than the bare substring "IRM policy drift" --
+          # the bare form has no environment token, so an open `lab`
+          # drift issue would silently absorb `dev`'s drift as a refresh
+          # comment instead of opening its own (issue #190 finding).
           $title = "IRM policy drift detected in the $($env:ENVIRONMENT_NAME) environment tenant"
+          $searchQuery = "`"$title`" in:title"
           # `// empty` so an empty result set yields no output (not the
           # literal string "null", which is truthy in PowerShell).
           $open = (gh issue list `
             --state open `
             --label 'drift-detected' `
             --label 'squad:automation-engineer' `
-            --search 'IRM policy drift in:title' `
+            --search $searchQuery `
             --json number `
             --jq '.[0].number // empty' | Out-String).Trim()
 

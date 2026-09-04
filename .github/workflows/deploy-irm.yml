@@ -24,31 +24,37 @@ name: deploy-irm
 # path for IRM policies; there is no "apply the whole data plane" entry
 # point, and a deploy-all.yml orchestrator is explicitly deferred.
 #
-# Tier-3 surface -- SINGLE apply pass. Unlike the export-capable forward
-# workflows (deploy-labels.yml, deploy-auto-label-policies.yml,
-# deploy-dlp.yml), scripts/Deploy-IRMPolicies.ps1 exposes NO
-# -ExportCurrentState and NO -VerifyPublished switch (the underlying
-# New-/Set-/Get-/Remove-InsiderRiskPolicy cmdlets have no bulk-export or
-# publish-status equivalent). It is on the full-circle
-# reconciler-contract-guard exempt list in validate.yml for exactly this
-# reason. So this workflow does NOT get:
+# Two-pass portal-wins + drift-back PR, as of issue #177.
+# scripts/Deploy-IRMPolicies.ps1 gained -ExportCurrentState, so this
+# workflow now carries the same shape as deploy-dlp.yml:
 #
-#   * the DLP two-pass portal-wins enumerate that parses [ADR0029-SKIP]
-#     markers to build a -SkipNames set. IRM's skip list is the STATIC
-#     ADR 0036 baseline, not drift-derived, so there is nothing to
-#     enumerate.
-#   * a drift-back-pr job. IRM cannot re-export, so there is no YAML to
-#     regenerate and no PR to open. Reverse drift is surfaced as a GitHub
-#     ISSUE by sync-irm-from-tenant.yml, not a PR.
-#   * a Verify-Published step (no such switch -- same omission already
-#     accepted in deploy-dlp.yml).
+#   * a portal-wins ENUMERATE pass that runs the reconciler read-only and
+#     parses `[ADR0029-SKIP] <name>` markers to build the drift-derived
+#     skip set. Note this is DISTINCT from, and additional to, the static
+#     ADR 0036 baseline: the enumerate pass deliberately runs WITHOUT
+#     -SkipNames so its markers are purely drift-derived, and the apply
+#     step then passes the UNION of the baseline and the drift set. Mixing
+#     the two would let baseline names pollute the drift-back PR.
+#   * a RE-EXPORT step and a drift-back-pr job that opens
+#     auto/irm-portal-wins-drift-<environment> with the re-exported YAML,
+#     so a portal edit this run refused to overwrite can be reviewed and
+#     accepted into the repo.
+#
+# It still does NOT get a Verify-Published step (no such switch -- the
+# underlying Get-InsiderRiskPolicy has no publish-status equivalent; the
+# same omission is already accepted in deploy-dlp.yml).
+#
+# Reverse drift on a SCHEDULE remains sync-irm-from-tenant.yml's job. The
+# two are deliberately different mechanisms on different branches:
+# auto/irm-portal-wins-drift-<env> here (push/dispatch-triggered, opened
+# only when this run actually skipped something) versus that workflow's
+# own branch, so the two can never fight over one PR.
 #
 # It keeps everything else from the blessed deploy-dlp.yml shape:
 # workflow_dispatch inputs, the repo-wins typed-confirmation pre-flight
 # gate, read-only audit mode, a push trigger that behaves as
 # dispatch-with-defaults, concurrency, and the temp-open/restore Key Vault
-# firewall window. See the Tier-3 (export-incapable) surfaces carve-out in
-# .github/instructions/github-actions.instructions.md.
+# firewall window.
 #
 # Modes (see docs/adr/0029-source-of-truth-direction-policy.md and
 # docs/runbooks/irm-end-to-end-smoke.md):
@@ -186,7 +192,9 @@ on:
       - 'data-plane/irm/policies.yaml'
       - 'data-plane/irm/policies.schema.json'
       - 'scripts/Deploy-IRMPolicies.ps1'
+      - 'scripts/Get-PurviewIPPSAccessToken.ps1'
       - 'scripts/modules/DirectionPolicy.psm1'
+      - 'infra/parameters/*.yaml'
       - '.github/workflows/deploy-irm.yml'
 
 # Deny-by-default at workflow scope. The single apply job declares the
@@ -241,6 +249,13 @@ jobs:
     permissions:
       id-token: write       # OIDC token for azure/login@v2.
       contents: read        # Checkout only; does not push or open PRs.
+    outputs:
+      # Consumed by the drift-back-pr job's `if:`. The `|| '0'` fallback
+      # matters: the enumerate step does not run under audit / repo-wins, so
+      # the output is unset there and an unguarded comparison would be
+      # ambiguous.
+      skip_count: ${{ steps.enumerate.outputs.skip_count || '0' }}
+      direction_policy: ${{ github.event.inputs.irm_direction_policy || 'portal-wins' }}
     env:
       ENVIRONMENT_NAME: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
       # Reconciler parameters-file override (ADR 0057): every
@@ -337,33 +352,93 @@ jobs:
           # data-plane call. 30s matches the sibling IRM / DLP workflows.
           Start-Sleep -Seconds 30
 
-      # Single idempotent apply pass. IRM is Tier-3: the skip list is the
-      # static ADR 0036 baseline, not a drift-derived set, so there is no
-      # enumerate pass to run first. The reconciler self-connects to
-      # Security & Compliance PowerShell from the Key Vault cert/app config;
-      # only the KV firewall must be open (handled above).
+      # Pass 1 of the portal-wins two-pass (issue #177). Read-only: builds the
+      # DRIFT-DERIVED skip set by parsing `[ADR0029-SKIP] <name>` markers.
+      #
+      # Deliberately runs WITHOUT -SkipNames. The ADR 0036 baseline names would
+      # also emit skip markers (Resolve-DirectionPolicyAction returns Skip for a
+      # skip-listed name exactly as it does for a drifted one), and folding them
+      # in here would make every run look like it had drift and open a
+      # drift-back PR that re-exports nothing new. The apply step below passes
+      # the UNION of this set and the baseline.
+      #
+      # -DirectionPolicy audit cannot be used for this: the audit short-circuit
+      # runs BEFORE the ADR 0029 skip pass, so an audit run emits no markers at
+      # all. portal-wins + -WhatIf is the only marker-emitting read-only
+      # combination. Matches deploy-dlp.yml.
+      # Reference: docs/adr/0029-source-of-truth-direction-policy.md
+      - name: Enumerate skipped objects (portal-wins read-only pass)
+        id: enumerate
+        if: env.IRM_DIRECTION_POLICY == 'portal-wins'
+        shell: pwsh
+        run: |
+          $logFile = Join-Path $env:RUNNER_TEMP 'enumerate-irm.log'
+          ./scripts/Deploy-IRMPolicies.ps1 -DirectionPolicy portal-wins -WhatIf -Confirm:$false `
+            -InformationAction Continue *>&1 | Tee-Object -FilePath $logFile
+          $skipMatches = @(Select-String -Path $logFile -Pattern '^\[ADR0029-SKIP\] (.+)$' -CaseSensitive)
+          $skipNames = @($skipMatches | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() })
+          $json = if ($skipNames.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $skipNames -Compress -AsArray }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "skip_count=$($skipNames.Count)"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "skip_names_json=$json"
+          Write-Host "Drift-derived skip count = $($skipNames.Count)"
+
+      # Pass 2. The reconciler self-connects to Security & Compliance PowerShell
+      # from the Key Vault cert/app config; only the KV firewall must be open
+      # (handled above).
       # Reference: docs/adr/0029-source-of-truth-direction-policy.md
       - name: Apply IRM policies
         shell: pwsh
         env:
           IRM_DIRECTION_POLICY: ${{ env.IRM_DIRECTION_POLICY }}
           SKIP_NAMES_IRM: ${{ env.SKIP_NAMES_IRM }}
+          SKIP_NAMES_JSON: ${{ steps.enumerate.outputs.skip_names_json }}
         run: |
           $applyArgs = @{
             DirectionPolicy   = $env:IRM_DIRECTION_POLICY
             Confirm           = $false
             InformationAction = 'Continue'
           }
-          $skipNames = @($env:SKIP_NAMES_IRM -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+          # Union of the static ADR 0036 baseline and the drift-derived set from
+          # the enumerate pass. Deduplicated case-insensitively because the
+          # reconciler matches -SkipNames case-insensitively.
+          $baseline = @($env:SKIP_NAMES_IRM -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          $drift = @()
+          if (-not [string]::IsNullOrWhiteSpace($env:SKIP_NAMES_JSON) -and $env:SKIP_NAMES_JSON -ne '[]') {
+            $drift = @(ConvertFrom-Json -InputObject $env:SKIP_NAMES_JSON)
+          }
+          $skipNames = @(@($baseline) + @($drift) | Sort-Object -Unique)
           if ($skipNames.Count -gt 0) {
             $applyArgs['SkipNames'] = $skipNames
-            Write-Host "-SkipNames count = $($skipNames.Count) (ADR 0036 baseline + any operator additions)"
+            Write-Host "-SkipNames count = $($skipNames.Count) (ADR 0036 baseline: $($baseline.Count), drift-derived: $($drift.Count))"
           }
           if ($env:IRM_DIRECTION_POLICY -eq 'repo-wins') {
             Write-Host '::warning::repo-wins: IRM policy tenant fields will be OVERWRITTEN with YAML values for shared-property drift. Each overwrite emits a Write-Warning naming the field set. See ADR 0029.'
           }
           Write-Host "Applying with -DirectionPolicy $($env:IRM_DIRECTION_POLICY)"
           ./scripts/Deploy-IRMPolicies.ps1 @applyArgs
+
+      # Re-export so the drift-back PR carries the tenant's real state for the
+      # objects this run refused to overwrite. Only meaningful when the
+      # enumerate pass actually found something.
+      - name: Re-export tenant IRM policies for drift-back PR
+        if: success() && env.IRM_DIRECTION_POLICY == 'portal-wins' && steps.enumerate.outputs.skip_count != '0'
+        shell: pwsh
+        run: |
+          # -Confirm:$false is not load-bearing today (the export write is not
+          # ShouldProcess-gated) but is bound defensively, and -Force is required
+          # because the tracked file is already populated once codified.
+          ./scripts/Deploy-IRMPolicies.ps1 -ExportCurrentState -Force -Confirm:$false `
+            -Path 'data-plane/irm/policies.yaml'
+
+      - name: Upload drift-back YAML
+        if: success() && env.IRM_DIRECTION_POLICY == 'portal-wins' && steps.enumerate.outputs.skip_count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: irm-policies-drift-back-${{ github.run_id }}
+          path: data-plane/irm/policies.yaml
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Restore Key Vault network defaults
         if: always() && steps.kv-open.outputs.opened == 'true'
@@ -382,5 +457,119 @@ jobs:
         shell: pwsh
         env:
           IRM_DIRECTION_POLICY: ${{ env.IRM_DIRECTION_POLICY }}
+          SKIP_COUNT: ${{ steps.enumerate.outputs.skip_count || '0' }}
         run: |
-          Write-Host "::notice::deploy-irm apply pass complete under -DirectionPolicy $($env:IRM_DIRECTION_POLICY). Reverse drift is watched by sync-irm-from-tenant.yml (issue-based, Tier-3)."
+          Write-Host "::notice::deploy-irm apply pass complete under -DirectionPolicy $($env:IRM_DIRECTION_POLICY). Skipped objects: $($env:SKIP_COUNT). Scheduled reverse drift is watched separately by sync-irm-from-tenant.yml."
+
+  # Opens the drift-back PR for objects the portal-wins pass refused to
+  # overwrite. Deliberately carries NO azure/login and NO `environment:` --
+  # it only moves an already-produced artifact into a branch, so it needs no
+  # tenant credentials, and staying credential-free keeps it out of the
+  # TenantTouchingWorkflowGate / EnvironmentRouting contract tables (the
+  # sync-dlp-from-tenant.yml fanout-dev precedent).
+  drift-back-pr:
+    name: Open drift-back PR for skipped IRM objects
+    needs: apply
+    if: |
+      needs.apply.result == 'success' &&
+      needs.apply.outputs.direction_policy == 'portal-wins' &&
+      needs.apply.outputs.skip_count != '0'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # peter-evans/create-pull-request pushes the drift-back branch.
+      pull-requests: write  # peter-evans/create-pull-request opens / updates the PR.
+    env:
+      SKIP_COUNT: ${{ needs.apply.outputs.skip_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download drift-back YAML
+        uses: actions/download-artifact@v4
+        with:
+          name: irm-policies-drift-back-${{ github.run_id }}
+          path: data-plane/irm
+
+      - name: Open or update drift-back PR
+        id: cpr
+        # v8.1.1, pinned by SHA (same pin as the sync-from-tenant workflows).
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1
+        with:
+          add-paths: data-plane/irm/policies.yaml
+          # Distinct from any branch sync-irm-from-tenant.yml uses, so the
+          # scheduled reverse leg and this one can never fight over one PR.
+          branch: auto/irm-portal-wins-drift-${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+          base: ${{ github.ref_name }}
+          delete-branch: false
+          commit-message: 'chore(data-plane): drift-back sync IRM policies skipped under portal-wins'
+          title: 'chore(data-plane): drift-back sync IRM policies skipped under portal-wins'
+          labels: |
+            needs-review
+            squad:automation-engineer
+          body: |
+            Automated drift-back from `.github/workflows/deploy-irm.yml`.
+
+            A `portal-wins` run (per
+            [ADR 0029](../blob/lab/docs/adr/0029-source-of-truth-direction-policy.md))
+            skipped **${{ env.SKIP_COUNT }}** IRM policy/policies because the
+            tenant value disagreed with the committed YAML. This PR re-exports
+            the live tenant state via
+            `scripts/Deploy-IRMPolicies.ps1 -ExportCurrentState`.
+
+            ## Decide which side wins — read this first
+
+            - [ ] **If the YAML value is the intended one, CLOSE this PR.**
+                  Merging it silently reverts the repo to match a tenant you
+                  did not intend to keep. To push the YAML to the tenant
+                  instead: do the tenant write **locally first**, then open a
+                  codify PR second. Dispatching `deploy-irm.yml` with
+                  `irm_direction_policy=repo-wins` from a feature branch does
+                  NOT work — the `dev` Environment's deployment-branch rule
+                  rejects a `workflow_dispatch` from any ref but `dev`, so the
+                  CI repo-wins path is only tenant-first when the intended YAML
+                  is already on `dev`.
+            - [ ] **If the TENANT value is the intended one, merge this PR.**
+                  The next `portal-wins` run then finds no drift and opens no
+                  further PR.
+
+            > This exact decision was got wrong twice in one day on the DLP
+            > surface (#170 and #172 were both merged reflexively, each one
+            > silently reverting an intended YAML change). The checklist order
+            > above is deliberate.
+
+            ## Review checklist
+
+            - [ ] No real tenant or principal identifiers leaked into the diff.
+                  Note the ADR 0055 residue scan is **GUID-shaped only** — it
+                  will flag an unclaimed object ID, but it cannot see a UPN,
+                  group name, or SharePoint site URL. Check those by eye.
+            - [ ] The system-managed `IRM_Tenant_Setting_*` policy does not
+                  appear (the exporter skips it by design, ADR 0036).
+            - [ ] Any `Blocked` row in the run log is understood: that is an
+                  immutable `scenario` difference, which no apply can resolve.
+
+            ## Notes
+
+            - Opened by the Actions `GITHUB_TOKEN`, so this PR does **not**
+              automatically dispatch `validate.yml`. To run validation, close
+              and reopen this PR, or push an empty commit to the branch.
+            - Trigger: run [${{ github.run_id }}](../actions/runs/${{ github.run_id }})
+              of `${{ github.workflow }}` on `${{ github.ref_name }}` at
+              `${{ github.sha }}`.
+
+            Refs: ADR 0029, ADR 0036, issue #177
+
+      - name: Summarize drift-back PR
+        if: always()
+        shell: pwsh
+        env:
+          PR_OP: ${{ steps.cpr.outputs.pull-request-operation }}
+          PR_URL: ${{ steps.cpr.outputs.pull-request-url }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PR_OP)) {
+            Write-Host '::notice::No drift-back PR operation recorded.'
+          } elseif ($env:PR_OP -eq 'none') {
+            Write-Host '::notice::Re-exported YAML matched the committed state; no drift-back PR needed.'
+          } else {
+            Write-Host "::notice::Drift-back PR $($env:PR_OP): $($env:PR_URL)"
+          }

@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.4
+#Requires -Version 7.4
 #Requires -Modules @{ ModuleName = "Pester"; ModuleVersion = "5.5.0" }
 <#
 .SYNOPSIS
@@ -48,7 +48,8 @@ BeforeAll {
     foreach ($fname in @(
             "ConvertTo-DesiredEntityListHash",
             "ConvertTo-TenantEntityListHash",
-            "Compare-EntityList")) {
+            "Compare-EntityList",
+            "Invoke-IRMEntityListExport")) {
         $fnAst = $ast.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -438,5 +439,322 @@ Describe 'Desired-state schema-validation serialization depth is not truncated (
         $warnings = @()
         $null = $script:DeepDoc | ConvertTo-Json -Depth 10 -WarningVariable warnings -WarningAction SilentlyContinue
         $warnings | Should -Not -BeNullOrEmpty
+    }
+}
+
+Describe 'Export parameter set contract — entity lists (#177)' {
+
+    BeforeAll {
+        $script:ElSrcPath = Join-Path $PSScriptRoot ".." ".." "scripts" "Deploy-IRMEntityLists.ps1"
+        $script:ElSrc = Get-Content -LiteralPath $script:ElSrcPath -Raw
+        $errs = $null
+        $script:ElAst = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:ElSrcPath, [ref]$null, [ref]$errs)
+        if ($errs) { throw ("Parse errors: {0}" -f ($errs -join '; ')) }
+
+        function Get-ElParamByName {
+            param([string]$Name)
+            return $script:ElAst.ParamBlock.Parameters |
+                Where-Object { $_.Name.VariablePath.UserPath -eq $Name } |
+                Select-Object -First 1
+        }
+
+        function Get-ElParameterSetNames {
+            param([string]$Name)
+            $p = Get-ElParamByName -Name $Name
+            if (-not $p) { throw "Parameter -$Name not found" }
+            $names = @()
+            foreach ($attr in $p.Attributes) {
+                if ($attr.TypeName.Name -ne 'Parameter') { continue }
+                foreach ($na in $attr.NamedArguments) {
+                    if ($na.ArgumentName -eq 'ParameterSetName') { $names += $na.Argument.Value }
+                }
+            }
+            return $names
+        }
+    }
+
+    It 'exposes -ExportCurrentState as a mandatory switch in the Export parameter set' {
+        $p = Get-ElParamByName -Name 'ExportCurrentState'
+        $p | Should -Not -BeNullOrEmpty
+        $p.StaticType.Name | Should -Be 'SwitchParameter'
+        (Get-ElParameterSetNames -Name 'ExportCurrentState') | Should -Be @('Export')
+    }
+
+    It 'declares Apply as the default parameter set so existing callers bind unchanged' {
+        $cmdletBinding = $script:ElAst.ParamBlock.Attributes |
+            Where-Object { $_.TypeName.Name -eq 'CmdletBinding' } | Select-Object -First 1
+        ($cmdletBinding.NamedArguments |
+            Where-Object { $_.ArgumentName -eq 'DefaultParameterSetName' } |
+            Select-Object -First 1).Argument.Value | Should -Be 'Apply'
+    }
+
+    It 'keeps every prune and skip parameter OUT of the Export set' -ForEach @(
+        @{ ParamName = 'PruneMissing' }
+        @{ ParamName = 'AllowMajorityPrune' }
+        @{ ParamName = 'MaxPruneRatio' }
+        @{ ParamName = 'SkipNames' }
+    ) {
+        $sets = Get-ElParameterSetNames -Name $ParamName
+        $sets | Should -Contain 'Apply'
+        $sets | Should -Not -Contain 'Export'
+    }
+
+    It 'keeps prune guard 1 inside the Apply-only block and ahead of the first tenant contact' {
+        $lines = Get-Content -LiteralPath $script:ElSrcPath
+        $applyWrap = ($lines | Select-String -Pattern "^if \(\`$mode -eq 'Apply'\) \{" | Select-Object -First 1).LineNumber
+        $guard     = ($lines | Select-String -Pattern 'Assert-PruneDesiredSetNotEmpty' | Select-Object -First 1).LineNumber
+        $contact   = ($lines | Select-String -Pattern "^\`$accountJson = az account show" | Select-Object -First 1).LineNumber
+        $applyWrap | Should -BeLessThan $guard
+        $guard     | Should -BeLessThan $contact
+    }
+
+    It 'places the Export short-circuit after the tenant enumerate and before the plan builder' {
+        $enumIdx   = $script:ElSrc.IndexOf('Get-InsiderRiskEntityList -ErrorAction Stop')
+        $exportIdx = $script:ElSrc.IndexOf("if (`$mode -eq 'Export')")
+        $planIdx   = $script:ElSrc.IndexOf('$plan = New-Object')
+        $enumIdx   | Should -BeGreaterThan 0
+        $exportIdx | Should -BeGreaterThan $enumIdx
+        $planIdx   | Should -BeGreaterThan $exportIdx
+    }
+
+    It 'adds no new ADR 0052 confirmation gate' {
+        ([regex]::Matches($script:ElSrc, 'Assert-DestructiveOperationConfirmed @gateArgs')).Count |
+            Should -Be 2 -Because 'ConfirmGate.Tests.ps1 pins this reconciler at exactly 2 gates'
+    }
+}
+
+Describe 'Invoke-IRMEntityListExport round-trips tenant state into schema-valid YAML (#177)' {
+
+    BeforeAll {
+        Import-Module powershell-yaml -ErrorAction Stop
+        $script:ElSchemaPath = Join-Path $PSScriptRoot ".." ".." "data-plane" "irm" "entity-lists.schema.json"
+        $script:ElSchemaText = Get-Content -LiteralPath $script:ElSchemaPath -Raw
+
+        function New-TenantEntityListRow {
+            param(
+                [string]$Name,
+                [string]$Type = 'UserType',
+                [string]$DisplayName = $null,
+                [string]$Description = $null,
+                [string[]]$Entities = @()
+            )
+            return [pscustomobject]@{
+                Name        = $Name
+                Type        = $Type
+                DisplayName = $DisplayName
+                Description = $Description
+                Entities    = $Entities
+            }
+        }
+
+        function Test-ElDocSchemaValid {
+            param([hashtable]$Doc)
+            ($Doc | ConvertTo-Json -Depth 25) | Test-Json -Schema $script:ElSchemaText -ErrorAction Stop | Out-Null
+            foreach ($e in @($Doc.entityLists)) {
+                (@{ entityLists = @($e) } | ConvertTo-Json -Depth 25) |
+                    Test-Json -Schema $script:ElSchemaText -ErrorAction Stop | Out-Null
+            }
+            return $true
+        }
+    }
+
+    It 'always emits name and type, and omits unset optional fields' {
+        $out = Join-Path $TestDrive 'el-tracked.yaml'
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @(
+            (New-TenantEntityListRow -Name 'minimal' -Type 'GroupType')
+        )
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        $entry = @($doc.entityLists)[0]
+        $entry.name | Should -Be 'minimal'
+        $entry.type | Should -Be 'GroupType'
+        $entry.ContainsKey('displayName') | Should -BeFalse
+        $entry.ContainsKey('description') | Should -BeFalse
+        $entry.ContainsKey('entities')    | Should -BeTrue -Because 'entities is always emitted; omitting it would flip membership to do-not-manage'
+    }
+
+    It 'exports entities lowercased and sorted, matching the comparator' {
+        $out = Join-Path $TestDrive 'el-entities.yaml'
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @(
+            (New-TenantEntityListRow -Name 'members' -Entities @('Zoe@Contoso.com', 'adam@CONTOSO.com', 'Mia@contoso.com'))
+        )
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        @(@($doc.entityLists)[0].entities) | Should -Be @('adam@contoso.com', 'mia@contoso.com', 'zoe@contoso.com')
+    }
+
+    It 'emits entities as a declared-empty array when the tenant list has no members' {
+        $out = Join-Path $TestDrive 'el-empty-entities.yaml'
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @(
+            (New-TenantEntityListRow -Name 'no-members' -Entities @())
+        )
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        $entry = @($doc.entityLists)[0]
+        $entry.ContainsKey('entities') | Should -BeTrue
+        @($entry.entities).Count | Should -Be 0
+    }
+
+    It 'produces a document that validates against entity-lists.schema.json, per entry and whole' {
+        $out = Join-Path $TestDrive 'el-schema.yaml'
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @(
+            (New-TenantEntityListRow -Name 'users' -Type 'UserType' -DisplayName 'Users' -Description 'd' -Entities @('a@contoso.com'))
+            (New-TenantEntityListRow -Name 'groups' -Type 'GroupType' -Entities @('sg-x@contoso.com'))
+            (New-TenantEntityListRow -Name 'sites' -Type 'SiteType' -Entities @('https://contoso.sharepoint.com/sites/x'))
+        )
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        { Test-ElDocSchemaValid -Doc $doc } | Should -Not -Throw
+    }
+
+    It 'round-trips NoChange by construction against its source rows' {
+        $rows = @(
+            (New-TenantEntityListRow -Name 'rt-users' -Type 'UserType' -DisplayName 'RT Users' -Description 'desc' -Entities @('B@contoso.com', 'a@contoso.com'))
+            (New-TenantEntityListRow -Name 'rt-bare' -Type 'SiteType' -Entities @())
+        )
+        $out = Join-Path $TestDrive 'el-roundtrip.yaml'
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists $rows
+
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        foreach ($entry in @($doc.entityLists)) {
+            $desired = ConvertTo-DesiredEntityListHash -Entry ([hashtable]$entry)
+            $source  = $rows | Where-Object { $_.Name -eq $entry.name } | Select-Object -First 1
+            $tenant  = ConvertTo-TenantEntityListHash -EntityList $source
+            $diffs   = Compare-EntityList -Desired $desired -Tenant $tenant
+            $diffs.Count | Should -Be 0 -Because "a freshly exported '$($entry.name)' must re-compare clean"
+        }
+    }
+
+    It 'preserves the existing file comment header' {
+        $out = Join-Path $TestDrive 'el-header.yaml'
+        Set-Content -LiteralPath $out -Value @('# Curated one.', '#', '# Curated two.', 'entityLists: []') -Encoding utf8
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @((New-TenantEntityListRow -Name 'after'))
+        $raw = Get-Content -LiteralPath $out -Raw
+        $raw | Should -Match '# Curated one\.'
+        $raw | Should -Match '# Curated two\.'
+        $raw | Should -Match 'after'
+    }
+
+    It 'refuses to clobber a populated file unless -Force is passed' {
+        $out = Join-Path $TestDrive 'el-guard.yaml'
+        Set-Content -LiteralPath $out -Value @(
+            '# header', 'entityLists:', '  - name: pre-existing', '    type: UserType'
+        ) -Encoding utf8
+        $before = Get-Content -LiteralPath $out -Raw
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @((New-TenantEntityListRow -Name 'replacement')) -ErrorAction SilentlyContinue -ErrorVariable elErr
+        $elErr | Should -Not -BeNullOrEmpty
+        (Get-Content -LiteralPath $out -Raw) | Should -Be $before
+    }
+
+    It 'overwrites a populated file when -Force is passed' {
+        $out = Join-Path $TestDrive 'el-force.yaml'
+        Set-Content -LiteralPath $out -Value @(
+            '# header', 'entityLists:', '  - name: pre-existing', '    type: UserType'
+        ) -Encoding utf8
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @((New-TenantEntityListRow -Name 'replacement')) -Force
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        @($doc.entityLists).Count | Should -Be 1
+        @($doc.entityLists)[0].name | Should -Be 'replacement'
+    }
+
+    It 'writes LF endings, UTF-8 without BOM, and exactly one trailing newline' {
+        $out = Join-Path $TestDrive 'el-encoding.yaml'
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @((New-TenantEntityListRow -Name 'enc'))
+        $bytes = [System.IO.File]::ReadAllBytes($out)
+        ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) | Should -BeFalse
+        ($bytes -contains 0x0D) | Should -BeFalse
+        $bytes[$bytes.Length - 1] | Should -Be 0x0A
+        $bytes[$bytes.Length - 2] | Should -Not -Be 0x0A
+    }
+
+    It 'writes an empty entityLists list for an empty tenant, and it stays schema-valid' {
+        $out = Join-Path $TestDrive 'el-empty.yaml'
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @()
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        $doc.ContainsKey('entityLists') | Should -BeTrue
+        @($doc.entityLists).Count | Should -Be 0
+        { Test-ElDocSchemaValid -Doc @{ entityLists = @() } } | Should -Not -Throw
+    }
+
+    It 'warns and skips a tenant entity list that reports no Type' {
+        # type is schema-required AND feeds the immutable Create splat (ADR 0039),
+        # so a row without one cannot be represented or recreated.
+        $out = Join-Path $TestDrive 'el-notype.yaml'
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @(
+            (New-TenantEntityListRow -Name 'valid'),
+            (New-TenantEntityListRow -Name 'typeless' -Type $null)
+        ) -WarningVariable elWarns -WarningAction SilentlyContinue
+        $elWarns | Should -Not -BeNullOrEmpty
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        @($doc.entityLists).Count | Should -Be 1
+        @($doc.entityLists)[0].name | Should -Be 'valid'
+    }
+
+    It 'never emits an empty-string or null scalar' {
+        $out = Join-Path $TestDrive 'el-nonull.yaml'
+        Invoke-IRMEntityListExport -Path $out -TenantEntityLists @(
+            (New-TenantEntityListRow -Name 'n1' -DisplayName $null -Description ''),
+            (New-TenantEntityListRow -Name 'n2' -DisplayName '' -Description $null)
+        )
+        $raw = Get-Content -LiteralPath $out -Raw
+        $raw | Should -Not -Match "displayName:\s*''"
+        $raw | Should -Not -Match "description:\s*''"
+        $raw | Should -Not -Match ':\s*null'
+    }
+}
+
+Describe 'Deploy-IRMEntityLists.ps1 is PARKED (ADR 0064)' {
+
+    # ADR 0064 parked this reconciler: the surface it models does not exist
+    # (Get-InsiderRiskEntityList cannot enumerate bare, the ADR 0039 type enum
+    # is fictional, and membership is not readable through any documented
+    # surface). The script is retained on disk deliberately -- deleting it
+    # would force count reversals in four AST-derived contract suites for no
+    # behavioural gain -- so the ONLY thing stopping someone from wiring it
+    # back up is the marker this suite pins. If these fail, either the park
+    # was undone or a new ADR un-parked the surface; check which before
+    # "fixing" the test.
+
+    BeforeAll {
+        $script:ParkedSrcPath = Join-Path $PSScriptRoot ".." ".." "scripts" "Deploy-IRMEntityLists.ps1"
+        $script:ParkedSrc = Get-Content -LiteralPath $script:ParkedSrcPath -Raw
+    }
+
+    It 'carries the PARKED marker in .SYNOPSIS, so the generated scripts reference shows it' {
+        # docs/scripts-reference.md is machine-generated from .SYNOPSIS by
+        # docs-regen.yml (ADR 0050); the marker has to live there to surface.
+        $synopsis = [regex]::Match($script:ParkedSrc, '(?s)\.SYNOPSIS\s*(.*?)?
+?
+').Groups[1].Value
+        $synopsis | Should -Match 'PARKED \(ADR 0064\)'
+    }
+
+    It 'carries the do-not-run warning block in .DESCRIPTION' {
+        $script:ParkedSrc | Should -Match 'PARKED -- DO NOT RUN, DO NOT UN-PARK WITHOUT A FOLLOW-UP ADR'
+    }
+
+    It 'names the ADR that parked it' {
+        $script:ParkedSrc | Should -Match 'docs/adr/0064-irm-entity-lists-are-microsoft-managed\.md'
+    }
+
+    It 'records the decisive finding: membership is not readable' {
+        # Finding 4. Whoever un-parks this must confront it.
+        $script:ParkedSrc | Should -Match '(?s)\.Entities` is EMPTY on every list'
+    }
+
+    It 'has no workflow driving it' {
+        # ADR 0064 Decision #3 removed deploy-irm-entity-lists.yml. Any workflow
+        # invoking a parked reconciler is a defect.
+        $workflowDir = Join-Path $PSScriptRoot ".." ".." ".github" "workflows"
+        $invokers = @(
+            Get-ChildItem -Path $workflowDir -Filter '*.yml' -File |
+                Where-Object { (Get-Content -LiteralPath $_.FullName -Raw) -match 'Deploy-IRMEntityLists\.ps1' }
+        )
+        $invokers | Should -BeNullOrEmpty -Because 'a parked reconciler must not be reachable from CI'
+    }
+
+    It 'keeps the desired-state YAML empty, as ADR 0064 Decision #1 requires' {
+        Import-Module powershell-yaml -ErrorAction Stop
+        $yamlPath = Join-Path $PSScriptRoot ".." ".." "data-plane" "irm" "entity-lists.yaml"
+        $doc = Get-Content -LiteralPath $yamlPath -Raw | ConvertFrom-Yaml
+        $doc.ContainsKey('entityLists') | Should -BeTrue
+        @($doc.entityLists).Count | Should -Be 0 -Because 'populating this file reconciles Microsoft-managed containers'
     }
 }

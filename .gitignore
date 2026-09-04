@@ -36,6 +36,12 @@ Thumbs.db
 !.vscode/settings.json
 .idea/
 
+# Claude Code local configuration. Deliberately the opposite of the .vscode rule above, and of
+# Claude Code's own convention where settings.json is the shared half: in practice this file
+# accumulates a machine-specific tool allowlist and permission mode, which is per-operator state
+# rather than project configuration. Ignore it and let each clone keep its own.
+.claude/settings.json
+
 # Build / logs
 *.log
 out/

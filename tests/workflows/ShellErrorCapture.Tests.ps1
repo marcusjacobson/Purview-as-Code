@@ -154,3 +154,44 @@ Describe 'Non-vacuity -- the detector flags the defect as it shipped (red-replay
         Get-SwallowedCapture -Text $fine | Should -BeNullOrEmpty
     }
 }
+
+Describe 'A non-zero exit that is a VALID OUTCOME must not abort its step (#154)' {
+
+    # Third instance of one shape in this workflow pair, after #130 and #137: a step running
+    # under `bash -e` where a command's non-zero exit is an expected result rather than an error,
+    # so the failure kills the step before the code written to handle that result can run.
+    #
+    #   close-linked-issues:  ALL_ISSUES=$(... | grep -E '^[0-9]+$' | sort -un)
+    #
+    # grep exits 1 on no-match. The step declares `set -uo pipefail`, and GitHub invokes it as
+    # `bash -e {0}`, so -e and pipefail combine: grep's status propagates through the pipeline,
+    # the assignment fails, and the `-z "$ALL_ISSUES"` guard three lines below -- written for
+    # exactly the no-linked-issues case -- is unreachable. Observed on PR #150, a docs-regen PR
+    # that has no `Closes #N` by construction and would therefore have failed every week.
+    #
+    # NOTE for anyone reproducing this by hand: BOTH settings are required. Without pipefail the
+    # pipeline reports `sort`'s status (0) and grep's failure is masked, which makes the defect
+    # look nonexistent. That false negative cost a wrong "diagnosis cleared" once already.
+    BeforeAll {
+        $script:AutoMergeText = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..' '..' '.github/workflows/pr-auto-merge.yml') -Raw
+    }
+
+    It 'neutralises the no-match exit on the linked-issue collection' {
+        $line = [regex]::Match($script:AutoMergeText, '(?m)^\s*ALL_ISSUES=.*$').Value
+        $line | Should -Not -BeNullOrEmpty -Because 'the linked-issue collection must still exist'
+        $line | Should -Match '\|\|\s*true\s*\)' -Because 'grep exits 1 on no-match, and under bash -e + pipefail that aborts the step before the empty-set guard can run (#154)'
+    }
+
+    It 'still has the empty-set guard the fix exists to make reachable' {
+        # Neutralising the exit is only half of it: the guard must survive too, or an empty
+        # result would fall through into the close loop instead of exiting cleanly.
+        $script:AutoMergeText | Should -Match 'if \[ -z "\$ALL_ISSUES" \]; then' -Because 'the whole point is to reach this'
+        $script:AutoMergeText | Should -Match 'has no linked closing issues'
+    }
+
+    It 'keeps pipefail on the step, so the guard is load-bearing rather than incidental' {
+        # If pipefail were ever dropped the defect would vanish by accident, and the `|| true`
+        # would look like cargo cult to the next reader. Pin the combination that makes it needed.
+        $script:AutoMergeText | Should -Match 'set -uo pipefail'
+    }
+}

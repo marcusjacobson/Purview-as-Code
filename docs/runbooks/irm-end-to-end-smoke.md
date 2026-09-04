@@ -40,6 +40,17 @@ captured output into the PR opened by `@artifact-resolver`.
 
 ## Automated path — `Invoke-IRMSmokeTest.ps1`
 
+> [!WARNING]
+> The wrapper has not kept up with the surface it tests. It resolves
+> `infra/parameters/lab.yaml` unconditionally, authenticates through Key
+> Vault with no ADR 0028 local-certificate path, and asserts a plan shape
+> that assumed an **empty** `data-plane/irm/policies.yaml`. That file is
+> now populated on both branches, so the four `IRM Lab — *` names read
+> `NoChange` rather than `Skipped` unless `-SkipNames` forces otherwise.
+> Treat the expected counts in this section and in Steps 1 and 4 as
+> historical until the rebuild lands. Tracked as
+> [#192](../../../../issues/192); the manual steps below are unaffected.
+
 [`scripts/Invoke-IRMSmokeTest.ps1`](../../scripts/Invoke-IRMSmokeTest.ps1)
 wraps Steps 1–5 below as a single near-unattended operator command,
 prompts for `y/yes/confirm` before the destructive cleanup step, and
@@ -57,28 +68,38 @@ table — `az login`, Key Vault access, clean working tree under
 installed):
 
 ```pwsh
-cd C:\REPO\Purview-as-Code-Generic
+cd <your clone of this repository>
 ./scripts/Invoke-IRMSmokeTest.ps1
 ```
 
 The wrapper:
 
-- Performs an idempotent prefix-only cleanup sweep at start
-  (`Get-InsiderRiskPolicy | Where-Object Name -like 'e2e-irm-smoke-*'
-  | Remove-InsiderRiskPolicy`) with a hard prefix assert before any
-  `Remove-*` runs.
+- Starts with a read-only audit pass
+  (`Deploy-IRMPolicies.ps1 -WhatIf -DirectionPolicy audit`) and asserts
+  the audit short-circuit fired, so no write can follow. It does **not**
+  sweep up leftovers from an earlier aborted run: a stale
+  `e2e-irm-smoke-*` policy on the tenant has to be removed by hand before
+  re-running. (An idempotent prefix-only sweep is part of
+  [#192](../../../../issues/192).)
 - Creates a throwaway policy named
   `e2e-irm-smoke-<YYYYMMDD-HHmm>` with scenario `LeakOfInformation`,
   mode defaulting to disabled.
 - Runs `Get-InsiderRiskPolicy -Identity` on the throwaway and
   asserts shape (name, scenario, IsValid).
 - Runs `Deploy-IRMPolicies.ps1 -WhatIf -DirectionPolicy portal-wins
-  -SkipNames <baseline>` and asserts:
+  -SkipNames <baseline> -PruneMissing` and asserts:
   - the throwaway appears as `Orphan` (would be removed under
     `-PruneMissing`),
   - every name from [ADR 0036](../adr/0036-irm-tenant-setting-immovable.md)
-    appears as `Skipped`,
+    appears as `Skipped` — true only because `-SkipNames` forces it;
+    those four policies are codified now and would otherwise read
+    `NoChange`,
   - no `Update` or `Failed` row mentions any pre-existing live policy.
+
+  Note the `-PruneMissing`, which the wrapper passes and this runbook
+  previously omitted. It is `-WhatIf`-only and never applies, but
+  `-PruneMissing` is otherwise banned on this surface, and the plan-shape
+  contract above is built on it. [#192](../../../../issues/192) removes it.
 - Removes the throwaway and asserts removal via a second
   `Get-InsiderRiskPolicy -Identity` (expects `ManagementObjectNotFoundException`).
 
@@ -118,6 +139,15 @@ Orphan   IRM Lab — General data leaks                            Tenant-only; 
 Audit mode intentionally bypasses `-SkipNames`. Skipped categorisation
 is exercised in Step 4.
 
+> [!NOTE]
+> The sample above predates issue #177. Those four `IRM Lab — *`
+> policies were codified into `data-plane/irm/policies.yaml` in #187, so
+> a run today reports them as `NoChange`, not `Orphan` — a codified
+> policy that matches the tenant is not tenant-only. Expect one
+> `NoChange` row per tracked policy plus one for
+> `IRM_Tenant_Setting_<guid>`. Refreshing this sample is part of
+> [#192](../../../../issues/192).
+
 ## Step 2 — create throwaway
 
 ```pwsh
@@ -155,14 +185,22 @@ $skipBaseline = @(
 
 Expected:
 
-- Exactly **4 `Skipped` rows** — one per skip-baseline name.
+- Exactly **4 `Skipped` rows** — one per skip-baseline name. Since #187
+  codified all four, this now demonstrates that `-SkipNames` overrides a
+  `NoChange` classification rather than that the policies are untracked.
 - Exactly **1 `NoChange` row** — the system-managed
   `IRM_Tenant_Setting_<guid>`, classified via the reconciler's
-  name-prefix wildcard (not via `-SkipNames`).
+  name-prefix wildcard (not via `-SkipNames`) — **plus one per tracked
+  policy in `data-plane/irm/policies.yaml` that is not in the skip
+  baseline**, which the original count omitted because that file was
+  empty when this step was written.
 - Exactly **1 `Orphan` row** — the throwaway from Step 2, reason
   `Tenant-only; will be removed (-PruneMissing).`
 - **Zero `Update`, `Failed`, `Removed` rows.** A row mentioning any
   pre-existing live policy is a bug — escalate.
+- A **`Blocked`** row is possible and is not a bug: it reports an
+  immutable `scenario` difference, which no apply can resolve. It cannot
+  appear for the throwaway, whose scenario the wrapper sets itself.
 
 ## Step 5 — destructive cleanup of throwaway
 
@@ -175,40 +213,66 @@ Remove-InsiderRiskPolicy -Identity $name -Confirm:$false
 Expected: cmdlet returns no output; subsequent `Get-InsiderRiskPolicy -Identity $name`
 throws `ManagementObjectNotFoundException`.
 
-## Scheduled reverse drift-detection (CI, no operator action)
+## Reverse drift detection — two CI paths and one local one
 
-Between manual smoke runs, the reverse companion workflow
-[`.github/workflows/sync-irm-from-tenant.yml`](../../.github/workflows/sync-irm-from-tenant.yml)
-watches the same surface daily (08:00 UTC). Because IRM is a Tier-3
-surface (no `-ExportCurrentState` on
-[`Deploy-IRMPolicies.ps1`](../../scripts/Deploy-IRMPolicies.ps1)), it
-**cannot** open a re-export PR the way the label / auto-label / DLP
-sync workflows do. Instead it runs the reconciler in read-only ADR 0029
-audit mode, captures the returned `[pscustomobject]` rows from stream 1,
-post-filters the ADR 0036 skip baseline, and opens a GitHub **issue**
-(labels `drift-detected`, `needs-review`, `squad:automation-engineer`,
-self-provisioning any that are missing) when a `Create` / `Update` /
-`Orphan` / `Failed` row survives the filter.
+Between manual smoke runs, three mechanisms watch this surface. They are
+easy to confuse, and only the third is unattended.
 
-Relationship to this runbook:
+| Mechanism | Trigger | Produces | Branch |
+|---|---|---|---|
+| [`deploy-irm.yml`](../../.github/workflows/deploy-irm.yml) two-pass apply | push to a tracked path, or dispatch | a drift-back **pull request** carrying the re-export, whenever the portal-wins apply skipped something | `auto/irm-portal-wins-drift-<env>` |
+| [`scripts/Invoke-LocalIrmDriftSync.ps1`](../../scripts/Invoke-LocalIrmDriftSync.ps1) | operator, interactively | a drift-back **pull request** | `auto/irm-drift-sync-<env>` |
+| [`sync-irm-from-tenant.yml`](../../.github/workflows/sync-irm-from-tenant.yml) | daily schedule, or dispatch | a drift-detection **issue** | none |
 
-- The workflow is the automated watch loop; **this runbook is the
-  operator response** when it fires. Triage with Step 1
-  (`-DirectionPolicy audit`), then reconcile per the issue's "Next
-  steps": **accept into YAML** (edit
-  [`data-plane/irm/policies.yaml`](../../data-plane/irm/policies.yaml),
-  then re-apply forward via
-  [`deploy-irm.yml`](../../.github/workflows/deploy-irm.yml) — the
-  per-solution forward companion, and the only forward-apply path for IRM
-  since [ADR 0051](../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md)
-  retired the monolithic workflow), **`repo-wins` overwrite** (dispatch `deploy-irm.yml` with
-  `irm_direction_policy=repo-wins` and the typed
-  `confirm_overwrite_irm=overwrite portal` token), or **extend the skip
-  baseline + ADR 0036**.
-- The workflow never writes to the tenant and never mutates a
-  pre-existing live policy, so it is safe to leave enabled during the
-  issue #603 mid-testing window.
-- To trigger it on demand: `gh workflow run sync-irm-from-tenant.yml`.
+The scheduled leg runs the reconciler in read-only ADR 0029 audit mode,
+captures the returned `[pscustomobject]` rows from stream 1, post-filters
+the ADR 0036 skip baseline, and opens (or refreshes) a GitHub issue
+labelled `drift-detected` / `needs-review` / `squad:automation-engineer`,
+self-provisioning any label that is missing, when a `Create` / `Update` /
+`Orphan` / `Failed` / `Blocked` row survives the filter.
+
+It opens an issue rather than a PR **by choice, not by inability**.
+`Deploy-IRMPolicies.ps1` has had `-ExportCurrentState` since issue #177.
+What makes a third PR-producer undesirable is that this one fires
+unattended on a cron while the other two are caused by a human who is
+present; see that workflow's header for the full reasoning and for the
+one filtering asymmetry any future conversion would have to handle.
+
+Two gates decide whether the scheduled leg reaches the tenant at all:
+
+- **ADR 0060 (`vars.CI_DATA_PLANE_ENABLED`).** Set to `false` on a
+  governance-locked environment, it skips *scheduled* runs only — a
+  manual `workflow_dispatch` still attempts the tenant call. Lab has been
+  in this state since 2026-08-16, so lab's scheduled IRM sync has been a
+  preflight no-op ever since. Use the local drift-sync script there
+  instead ([`irm-local-drift-sync.md`](irm-local-drift-sync.md)).
+- **`vars.DEV_SCHEDULED_SYNC_ENABLED`.** A cron fires only on the default
+  branch (`lab` under ADR 0057), so the workflow's `fanout-dev` job
+  re-dispatches itself against `dev` after each scheduled run. That job
+  has no `needs:`, so it fans out even when lab's own preflight no-ops.
+  Setting this repository variable to `false` pauses the dev leg without
+  touching lab's schedule.
+
+Relationship to this runbook: the workflows are the automated watch loop;
+**this runbook is the operator response** when one of them fires. Triage
+with Step 1 (`-DirectionPolicy audit`), then reconcile per the issue's
+"Next steps": accept into YAML and let `deploy-irm.yml` converge on
+merge; overwrite the portal by dispatching `deploy-irm.yml` with
+`irm_direction_policy=repo-wins` and the typed
+`confirm_overwrite_irm=overwrite portal` token; ratify the deviation by
+extending the skip baseline and ADR 0036; or let one of the two
+PR-opening producers carry it.
+
+Neither reverse mechanism ever writes to the tenant, and neither mutates
+a pre-existing live policy.
+
+To trigger the scheduled leg on demand, naming the environment
+explicitly — the `environment` input's declared default (`lab`) beats the
+branch fallback, so `--ref dev` alone binds the **lab** environment:
+
+```bash
+gh workflow run sync-irm-from-tenant.yml --ref dev -f environment=dev
+```
 
 ## Safety constraints
 
@@ -236,3 +300,5 @@ Relationship to this runbook:
 - Forward companion workflow (preferred): [`deploy-irm.yml`](../../.github/workflows/deploy-irm.yml)
 - Reverse companion workflow: [`sync-irm-from-tenant.yml`](../../.github/workflows/sync-irm-from-tenant.yml)
 - [Sibling runbook: records-end-to-end-smoke.md](records-end-to-end-smoke.md)
+- [Runbook: IRM end-to-end synchronisation test](irm-sync-loop-e2e.md) — proves the repo/tenant plumbing in both directions, which this runbook does not cover
+- [Runbook: Local IRM drift sync](irm-local-drift-sync.md) — the reverse path for a governance-locked tenant

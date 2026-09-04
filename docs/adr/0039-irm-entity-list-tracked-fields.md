@@ -1,5 +1,5 @@
 # 0039 - IRM entity-list tracked fields and Set-InsiderRiskPolicyLite coverage decision
-- **Status:** Accepted
+- **Status:** Superseded by [ADR 0064](0064-irm-entity-lists-are-microsoft-managed.md)
 - **Date:** 2026-06-16
 - **Gates:** Closes issue #606 "IRM -- add reconciler coverage for `InsiderRiskEntityList` and `Set-InsiderRiskPolicyLite`" from the §5.9 follow-up queue. Governs the field surface and default `-SkipNames` baseline for [`scripts/Deploy-IRMEntityLists.ps1`](../../scripts/Deploy-IRMEntityLists.ps1) and the CI inputs shipped under this issue. Documents why `Set-InsiderRiskPolicyLite` is not covered by any current reconciler. Does not gate any other item.
 - **Deciders:** @contoso
