@@ -261,6 +261,49 @@ jobs:
           # Brief settle window for the firewall change to propagate.
           sleep 10
 
+      - name: Verify the open actually stuck (read back)
+        # Deliberately a SEPARATE step from `open`: if this verification
+        # fails, `open`'s outcome stays 'success', so the always() re-lock
+        # below still runs and the vault is never left half-open.
+        #
+        # Why verify at all: an Azure Policy `modify` effect (for example an
+        # MG-scoped Key Vault publicNetworkAccess modify policy in a governed
+        # tenant) REWRITES the open PUT's value inside the same operation --
+        # `az keyvault update` exits 0, the hold window elapses, and the
+        # operator's one-off task fails mysteriously. Observed live
+        # downstream. See the 'Governed tenants' section of
+        # docs/runbooks/kv-temp-unlock.md for the bounded-exemption
+        # procedure.
+        # Reference: https://learn.microsoft.com/en-us/azure/governance/policy/concepts/effect-modify
+        id: openverify
+        run: |
+          set -euo pipefail
+          STATE=$(az keyvault show \
+            --name "$KEY_VAULT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --query "{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}" \
+            -o tsv)
+          PNA=$(echo "$STATE" | cut -f1)
+          DA=$(echo "$STATE" | cut -f2)
+          # publicNetworkAccess is the gating layer. When it reads back != Enabled
+          # after an `az keyvault update` that exited 0, an Azure Policy `modify`
+          # effect most likely rewrote it inside the same operation (the
+          # governed-tenant failure mode).
+          if [ "$PNA" != "Enabled" ]; then
+            echo "::error::Key Vault open did not stick (publicNetworkAccess=$PNA; expected Enabled). Since 'az keyvault update' exited 0, an Azure Policy 'modify' effect most likely rewrote publicNetworkAccess inside the same operation -- check the Activity Log for a Microsoft.Authorization/policies/modify/action event at the 'Open Key Vault firewall' timestamp, and see the 'Governed tenants' section of docs/runbooks/kv-temp-unlock.md for the bounded policy-exemption procedure." >&2
+            exit 1
+          fi
+          # Enabling public access with an all-Allow / no-rules ACL makes Azure
+          # normalize networkAcls.defaultAction to null (read back as "None" via
+          # -o tsv): publicNetworkAccess=Enabled with defaultAction Allow OR None
+          # is open (allow-all). Only a *persisting* Deny with no allow rules
+          # keeps the data plane unreachable while publicNetworkAccess is Enabled.
+          if [ "$DA" = "Deny" ]; then
+            echo "::error::Key Vault publicNetworkAccess is Enabled but networkAcls.defaultAction is still Deny with no allow rules -- the data plane stays unreachable. A policy 'modify' effect may have re-Denied the ACL after the open. See the 'Governed tenants' section of docs/runbooks/kv-temp-unlock.md." >&2
+            exit 1
+          fi
+          echo "Open verified: publicNetworkAccess=Enabled, defaultAction=${DA:-None} (Enabled with a non-Deny ACL is open)."
+
       - name: Hold the vault open for the approved duration
         id: hold
         env:
@@ -313,6 +356,7 @@ jobs:
           BOUNDS_OUTCOME: ${{ steps.bounds.outcome }}
           PRE_OUTCOME: ${{ steps.pre.outcome }}
           OPEN_OUTCOME: ${{ steps.open.outcome }}
+          OPENVERIFY_OUTCOME: ${{ steps.openverify.outcome }}
           HOLD_OUTCOME: ${{ steps.hold.outcome }}
           RELOCK_OUTCOME: ${{ steps.relock.outcome }}
           ASSERT_OUTCOME: ${{ steps.assert.outcome }}
@@ -329,6 +373,7 @@ jobs:
             echo "| Validate bounds | $BOUNDS_OUTCOME |"
             echo "| Pre-unlock state guard | $PRE_OUTCOME |"
             echo "| Open vault firewall | $OPEN_OUTCOME |"
+            echo "| Verify open (read back) | $OPENVERIFY_OUTCOME |"
             echo "| Hold window | $HOLD_OUTCOME |"
             echo "| Re-lock vault firewall | $RELOCK_OUTCOME |"
             echo "| Assert final locked state | $ASSERT_OUTCOME |"

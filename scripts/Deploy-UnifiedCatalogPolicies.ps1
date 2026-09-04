@@ -43,6 +43,40 @@
       ADR 0053:
         docs/adr/0053-overwrite-foreign-author-switch.md
 
+.PARAMETER PruneMissing
+    Revoke tenant Unified Catalog role assignments (principals) that are not
+    declared in the YAML. A revoke is folded into the per-policy PUT that
+    rewrites that policy's assignment set. Default `$false`.
+
+    Two issue #13 guards stand in front of this switch, both implemented in
+    `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against an empty
+        desired set would classify every live assignment as orphaned and
+        revoke it.
+      * The prune must not exceed `-MaxPruneRatio` of the live role
+        assignments without `-AllowMajorityPrune`. The denominator is the
+        full live assignment set. Under `-DirectionPolicy audit` the plan is
+        emptied upstream, so there is no revoke to ratio-check and the guard
+        passes trivially.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would revoke more than `-MaxPruneRatio` of the
+    live role assignments is refused before any write. Supply it when a large
+    prune is genuinely intended (a deliberate consolidation); the ratio is
+    then reported as a warning and the run proceeds. Has no effect on the
+    empty-desired-set guard, which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live Unified Catalog role assignments `-PruneMissing`
+    may revoke without `-AllowMajorityPrune`, as a fraction in (0, 1].
+    Default 0.5. A prune exactly at the threshold passes; only a strictly
+    larger share is refused. Set to 1 to disable the ratio guard for a single
+    run.
+
 .PARAMETER Force
     Suppress the safety guard on the operation you asked for. In the
     Export parameter set that guard is `-ExportCurrentState`'s refusal to
@@ -71,6 +105,13 @@ param(
 
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -127,6 +168,11 @@ if (-not (Get-Module -ListAvailable -Name 'powershell-yaml')) {
 Import-Module 'powershell-yaml' -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules\DirectionPolicy.psm1') -Force -Scope Local -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules\ConfirmGate.psm1') -Force -Scope Local -ErrorAction Stop
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set refusal,
+# which prevents a prune against a zero-entry desired state from classifying
+# every live tenant object as an orphan. Shared with the other Deploy-*.ps1
+# reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules\PruneGuard.psm1') -Force -Scope Local -ErrorAction Stop
 #endregion
 
 $script:UnifiedCatalogApiVersion = '2026-03-20-preview'
@@ -1164,6 +1210,28 @@ Write-Information ("Force           : {0}" -f $Force.IsPresent) -InformationActi
 # the run log shows exactly which guard the operator suppressed.
 Write-Information ("OverwriteForeignAuthor : {0}" -f $OverwriteForeignAuthor.IsPresent) -InformationAction Continue
 
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# -Path here is a FOLDER; the desired set is the `items:` block of the single
+# file data-access-policies.yaml inside it, so the guard reports $yamlPath
+# rather than $Path -- that is the file a wrong -Path would have mis-selected.
+#
+# With zero desired items every live data-access policy assignment falls out of
+# the orphan match below and the run would revoke the whole set. The rationale,
+# the likely causes, and the 2026-07-19 production hit are documented in
+# scripts/modules/PruneGuard.psm1.
+#
+# Placed immediately after the desired-state load and before
+# Get-UnifiedCatalogApiContext, which is this script's first tenant contact
+# (it acquires the Purview data-plane token via az account get-access-token).
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   @($desiredItems).Count `
+        -ObjectTypeNoun 'data access policy assignment' `
+        -SourcePath     $yamlPath `
+        -CollectionKey  'items'
+}
+
 if ($WhatIfPreference -and $mode -eq 'Export') {
     Write-Information '-WhatIf specified with -ExportCurrentState. Planned behaviour (no remote calls made):' -InformationAction Continue
     Write-Information '  Export Unified Catalog policy assignments -> data-access-policies.yaml' -InformationAction Continue
@@ -1243,6 +1311,33 @@ if ($blockedRows.Count -gt 0) {
     throw ("Reconciliation aborted: {0} blocked item(s)." -f $blockedRows.Count)
 }
 
+# ---- Issue #13, guard 2: prune sanity ratio ----
+# Guard 1 (desired-state load region) catches only the total wipe. This
+# catches the near-total one: a desired set that lost most of its assignments
+# to a bad merge, or a -Path pointing at a smaller environment's tree, both of
+# which leave a non-zero desired count and so clear guard 1.
+#
+# Keyed on $prunePlan -- the Remove entries the ADR 0052 prune gate below also
+# reads, so the guard and the prompt cannot disagree -- over the full live
+# assignment set. Hoisted here so it fires before BOTH ADR 0052 gates: the
+# operator is never prompted to confirm an overwrite for a plan whose prune
+# the guard would refuse anyway.
+#
+# No audit gate is needed: Invoke-DirectionPolicyPlan clears $plan under
+# `-DirectionPolicy audit` (it owns that decision), so $prunePlan is empty
+# under audit and the guard's PruneCount is 0 -- Assert-PruneRatioWithinThreshold
+# returns early on a zero prune, never refusing a read-only run.
+# Reference: scripts/modules/PruneGuard.psm1
+$prunePlan = @($plan | Where-Object { $_.Action -eq 'Remove' })
+if ($PruneMissing.IsPresent) {
+    Assert-PruneRatioWithinThreshold `
+        -PruneCount     @($prunePlan).Count `
+        -LiveCount      @($tenantAssignments).Count `
+        -ObjectTypeNoun 'Unified Catalog role assignment' `
+        -MaxPruneRatio  $MaxPruneRatio `
+        -Allow:$AllowMajorityPrune
+}
+
 # ---- ADR 0052: destructive-operation confirmation gate ----
 # The last point before the write loop at which nothing has been PUT.
 # `Invoke-DirectionPolicyPlan` has already run, so `$plan` and
@@ -1288,7 +1383,6 @@ if ($script:RepoWinsOverwrites.Count -gt 0) {
     }
 }
 
-$prunePlan = @($plan | Where-Object { $_.Action -eq 'Remove' })
 if ($prunePlan.Count -gt 0) {
     $pruneNames = @($prunePlan | ForEach-Object { [string]$_.Name } | Sort-Object -Unique)
     $pruneQuery = "-PruneMissing will REVOKE {0} orphan Unified Catalog role assignment(s) from the tenant: {1}. The principals holding them lose access. This cannot be undone. Continue?" -f `
@@ -1300,6 +1394,21 @@ if ($prunePlan.Count -gt 0) {
 
 $planByPolicy = @($plan | Group-Object { if ($_.Desired) { [string]$_.Desired.PolicyId } else { [string]$_.Tenant.PolicyId } })
 $finalAssignmentsByPolicy = Get-FinalRoleAssignmentsByPolicy -TenantAssignments $tenantAssignments -PlanEntries $plan.ToArray()
+
+# Issue #13: the failure reporter, at POLICY granularity. Unlike the per-orphan
+# delete reconcilers, revokes here are folded into a single per-policy PUT that
+# rewrites the whole assignment set, so the reporting unit is the policy PUT,
+# not an individual assignment. The variable keeps the shared $pruneFailures
+# name (the rollout tripwire and lift harness anchor on it) even though each
+# entry names a policy. Previously an $ErrorActionPreference='stop' PUT failure
+# terminated the run on the first failed policy so the rest were never
+# attempted; now each failure is reported via Write-PruneFailure and collected,
+# and a single aggregate throw after the loop names every failed policy so a
+# failed run still exits non-zero. NOTE: a policy PUT carries grants AND revokes
+# together, so this reporter fires on any failed policy update, not only
+# revoke-bearing ones -- a failed grant-only PUT exiting 0 is the same defect
+# class, so the wider net is deliberate.
+$pruneFailures = New-Object 'System.Collections.Generic.List[string]'
 
 foreach ($policyGroup in $planByPolicy) {
     $policyId = [string]$policyGroup.Name
@@ -1317,14 +1426,30 @@ foreach ($policyGroup in $planByPolicy) {
     $target = ("Unified Catalog policy '{0}'" -f $policy.name)
     $action = 'Update grant/revoke-sensitive policy assignments'
     if ($PSCmdlet.ShouldProcess($target, $action)) {
-        $uri = "$($context.Endpoint)/datagovernance/catalog/policies/$policyId?api-version=$($script:UnifiedCatalogApiVersion)"
+        # ${policyId} is brace-delimited deliberately: unbraced, PowerShell reads
+        # the `?` as part of the variable name, so `$policyId?api-version` parses
+        # as the (undefined) variable `${policyId?api}` and the URI collapses to
+        # `.../policies/-version=...` -- no policy id, no `?` query separator.
+        # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_quoting_rules
+        $uri = "$($context.Endpoint)/datagovernance/catalog/policies/${policyId}?api-version=$($script:UnifiedCatalogApiVersion)"
         # api-version justification: the Policies operation group is preview-only
         # as of issue #47 and Policies - Update documents the pinned 2026-03-20-preview
         # PUT contract, including the CatalogValue request body with decisionRules /
         # attributeRules.
         # Reference: https://learn.microsoft.com/en-us/rest/api/purview/purview-unified-catalog/policies/update?view=rest-purview-purview-unified-catalog-2026-03-20-preview
-        [void](Invoke-UnifiedCatalogRestMethod -Method PUT -Uri $uri -Headers $context.Headers -Body $payload)
+        try {
+            [void](Invoke-UnifiedCatalogRestMethod -Method PUT -Uri $uri -Headers $context.Headers -Body $payload)
+        }
+        catch {
+            Write-PruneFailure ("PUT policy '{0}' (grant/revoke update) failed: {1}" -f $policy.name, $_.Exception.Message)
+            $pruneFailures.Add(("policy '{0}'" -f $policy.name)) | Out-Null
+            continue
+        }
     }
+}
+
+if ($pruneFailures.Count -gt 0) {
+    throw ("Reconciliation aborted: {0} Unified Catalog policy update(s) could not be applied: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
 }
 
 return $report.ToArray()

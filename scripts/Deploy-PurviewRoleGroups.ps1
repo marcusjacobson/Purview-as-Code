@@ -26,6 +26,18 @@
         signing helper that supplies the access token; same auth path as
         the Grant- primitive (ADR 0011 Decision #3 supersession).
 
+    Member resolution (ADR 0023 Category 3, issue #95): each `members:`
+    entry is EITHER a raw Entra group object ID string (legacy-but-
+    supported, used as-is) OR a mapping `{ displayName: <name> }`,
+    resolved to an objectId via `scripts/Get-EntraPrincipalIdByDisplayName.ps1`.
+    Resolution is FAIL-CLOSED: a not-found or ambiguous displayName aborts
+    the whole run before any tenant write -- it never silently drops the
+    member and shrinks the desired set (which is what would let
+    `-PruneMissing` mistake "resolution failed" for "revoke everything").
+    `-ExportCurrentState` always writes the displayName shape for a
+    freshly exported member, never a raw OID, so re-committing an export
+    can never re-introduce the disclosure #92 fixed.
+
     Drift contract (per
     `.github/instructions/powershell.instructions.md` "Drift report
     format"):
@@ -52,9 +64,14 @@
       * Role groups NOT listed in the YAML are left untouched. The
         reconciler does not attempt to enumerate every tenant role group.
       * Within a listed role group, only members whose
-        `ExternalDirectoryObjectId` matches an Entra group OID are
-        considered. User members, on-prem recipients (no Entra OID), and
-        non-group principals are ignored on read and never written.
+        `RecipientTypeDetails` is `MailNonUniversalGroup` or
+        `MailUniversalSecurityGroup` (the documented Entra-security-group
+        values -- issue #57; `'Group'` is not a real value in this enum
+        under any auth mode) are considered a group member. The Entra
+        objectId is read from `ExternalDirectoryObjectId` when populated,
+        otherwise resolved via the same displayName-resolution helper
+        used for `members:` entries (ADR 0023 Category 3). User members
+        and non-group principals are ignored on read and never written.
         Enforces security instruction rule #4 (least privilege -- assign
         to groups, not users).
       * `-PruneMissing` is required to revoke Entra-group members that are
@@ -279,6 +296,132 @@ function Test-IsGuid {
     return [System.Guid]::TryParse($Value, [ref]([guid]::Empty))
 }
 
+# Issue #65 F4: role groups that `Get-RoleGroup` returns but that cannot take an
+# Entra-group member -- `Add-RoleGroupMember` rejects them with
+# `EntityValidation CheckIsUserRole, Role with isUserRole not allowed`.
+# `DefaultRoleAssignmentPolicy` is an Exchange RBAC role-assignment *policy*, not a
+# bindable role group; it was dropped from role-groups.yaml in #61. This denylist
+# keeps `-ExportCurrentState` from ever writing such a role group back into the
+# desired set. Kept as an explicit list rather than a Get-RoleGroup property probe
+# because the discriminating field is undocumented; add names here if a future
+# tenant surfaces additional non-bindable role groups (see #65 F4).
+$script:NonBindableRoleGroups = @('DefaultRoleAssignmentPolicy')
+
+function Test-IsNonBindableRoleGroup {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$RoleGroupName)
+    return ($script:NonBindableRoleGroups -contains $RoleGroupName)
+}
+
+# Issue #65 F5: confirm a just-added role-group member is visible, tolerating
+# Security & Compliance replication lag. The immediate post-Add read frequently
+# misses a member that a moments-later read sees -- proven benign on #61 (every
+# such warning cleared on a later -WhatIf). Retries the caller-supplied reader a
+# few times with a short backoff and returns whether the member OID became
+# visible, so the caller only warns after genuine non-persistence. The reader is
+# injected (not hard-coded to Get-RoleGroupMember) purely so this stays
+# unit-testable without a live S&C session.
+function Wait-RoleGroupMemberVisible {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Reader,
+        [Parameter(Mandatory = $true)][string]$Oid,
+        [int]$MaxAttempts = 3,
+        [int]$DelaySeconds = 2
+    )
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            $rows = @(& $Reader)
+            if (@($rows | Where-Object { $_.ExternalDirectoryObjectId -ieq $Oid }).Count -gt 0) {
+                return $true
+            }
+        }
+        catch {
+            Write-Verbose ("[verify-add] post-Add read attempt {0}/{1} failed: {2}" -f $attempt, $MaxAttempts, $_.Exception.Message)
+        }
+        if ($attempt -lt $MaxAttempts -and $DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
+    }
+    return $false
+}
+
+function Test-IsRoleMemberShapeValid {
+    <#
+    .SYNOPSIS
+        Validate a single `members:` list entry against the ADR 0023
+        Category 3 dual-shape contract (issue #95): either a raw Entra
+        group object ID (GUID) string -- the legacy-but-still-supported
+        shape -- or a mapping `{ displayName: <name> }`. Pure shape
+        check; no Graph calls.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory = $true)][AllowNull()]$Value)
+    if ($Value -is [string]) {
+        return (Test-IsGuid -Value $Value)
+    }
+    if ($Value -is [hashtable] -or $Value -is [System.Collections.IDictionary]) {
+        return ($Value.Contains('displayName') -and -not [string]::IsNullOrWhiteSpace([string]$Value['displayName']))
+    }
+    return $false
+}
+
+function Resolve-DesiredRoleGroupMemberIds {
+    <#
+    .SYNOPSIS
+        Normalize a role group's `members:` list to a flat array of Entra
+        group object IDs, per the ADR 0023 Category 3 dual-shape contract
+        (issue #95).
+
+    .DESCRIPTION
+        A plain string entry is a raw Entra group object ID (legacy-but-
+        supported; used as-is, unchanged behaviour). A mapping entry
+        `{ displayName: <name> }` is resolved to an objectId now, via the
+        caller-supplied -Resolver script block (production callers pass a
+        closure over `scripts/Get-EntraPrincipalIdByDisplayName.ps1`).
+
+        FAIL-CLOSED CONTRACT (issue #95's single most important acceptance
+        criterion): a resolution failure -- not-found, ambiguous, or a
+        transport error -- THROWS. It is never caught-and-`continue`d
+        here, because swallowing it would silently shrink the returned
+        member list, and an emptied desired set is exactly what
+        `-PruneMissing` reads as "revoke every real member of this role
+        group". Callers MUST let this throw propagate to a run-aborting
+        `Write-Error; return` before any write -- never downgrade it to a
+        per-member skip.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Function returns an array of resolved objectIds; plural is the accurate return shape.')]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Members,
+        [Parameter(Mandatory = $true)][scriptblock]$Resolver
+    )
+    $result = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($m in @($Members)) {
+        if ($m -is [string]) {
+            $trimmed = $m.Trim()
+            if ($trimmed) { [void]$result.Add($trimmed) }
+            continue
+        }
+        if ($m -is [hashtable] -or $m -is [System.Collections.IDictionary]) {
+            $displayName = [string]$m['displayName']
+            if ([string]::IsNullOrWhiteSpace($displayName)) {
+                throw "Members entry is missing the required 'displayName' field."
+            }
+            $resolvedId = & $Resolver $displayName
+            if ([string]::IsNullOrWhiteSpace([string]$resolvedId)) {
+                throw ("Resolver returned an empty objectId for displayName '{0}'." -f $displayName)
+            }
+            [void]$result.Add([string]$resolvedId)
+            continue
+        }
+        throw ("Members entry '{0}' is not a valid shape. Expected a raw Entra group object ID (GUID) string or an object with 'displayName'." -f $m)
+    }
+    return , $result.ToArray()
+}
+
 #endregion
 
 #region Module dependencies
@@ -307,6 +450,13 @@ Import-Module $module -ErrorAction Stop
 # entered unattended from a local terminal.
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 #endregion
@@ -404,6 +554,25 @@ if ($desiredRoot -and $desiredRoot.ContainsKey('roleGroups') -and $desiredRoot.r
     $desiredRoleGroups = @($desiredRoot.roleGroups)
 }
 
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# With zero desired entries every live custom Purview role group falls out of
+# the orphan match below, so the run would classify the entire set as orphans
+# and delete it -- revoking every permission those groups conferred. The
+# rationale, the likely causes, and the 2026-07-19 production hit are
+# documented in scripts/modules/PruneGuard.psm1.
+#
+# Placed in the desired-state load region so it fires before the tenant is
+# contacted at all -- before `az account show`, before Connect-IPPSSession,
+# and before any write phase.
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desiredRoleGroups.Count `
+        -ObjectTypeNoun 'role group' `
+        -SourcePath     $Path `
+        -CollectionKey  'roleGroups'
+}
+
 # Validate desired state: every member must be a parseable GUID. User
 # UPNs and individual-object IDs are rejected at this boundary per
 # security rule #4.
@@ -416,8 +585,8 @@ if ($mode -eq 'Apply') {
         $members = @()
         if ($rg.ContainsKey('members') -and $rg.members) { $members = @($rg.members) }
         foreach ($m in $members) {
-            if (-not (Test-IsGuid -Value ([string]$m))) {
-                Write-Error ("Role group '{0}' member '{1}' is not a valid Entra group object ID. Per role-groups.yaml header, only Entra security-group OIDs are accepted." -f $rg.name, $m)
+            if (-not (Test-IsRoleMemberShapeValid -Value $m)) {
+                Write-Error ("Role group '{0}' has a members entry that is neither a valid Entra group object ID (GUID) string (legacy-but-supported) nor an object shaped '{{ displayName: <name> }}' (ADR 0023 Category 3). Value: '{1}'" -f $rg.name, $m)
                 return
             }
         }
@@ -531,6 +700,17 @@ try {
         Write-Information ("Connected to Security & Compliance PowerShell as app '{0}'." -f $DataPlaneAppDisplayName) -InformationAction Continue
     }
 
+    # Resolve the ADR 0023 Category 3 helper (issue #95) used to turn a
+    # displayName-shape `members:` entry -- and, per issue #57, a tenant
+    # member row whose `ExternalDirectoryObjectId` is blank -- into an
+    # Entra objectId. Checked once, up front, shared by both -Export and
+    # -Apply below, so a missing helper fails loudly before any read.
+    $resolvePrincipalScript = Join-Path $scriptRoot 'Get-EntraPrincipalIdByDisplayName.ps1'
+    if (-not (Test-Path -LiteralPath $resolvePrincipalScript)) {
+        Write-Error ("Helper not found: '{0}'." -f $resolvePrincipalScript)
+        return
+    }
+
     if ($mode -eq 'Export') {
 
         #region -ExportCurrentState
@@ -553,6 +733,15 @@ try {
         $exportEntries = New-Object 'System.Collections.Generic.List[hashtable]'
         $exportStamp   = [DateTime]::UtcNow.ToString('yyyy-MM-dd')
         foreach ($rg in $allRoleGroups | Sort-Object Name) {
+            # Issue #65 F4: never write a non-bindable role group into the desired
+            # set. `Get-RoleGroup` returns entries like `DefaultRoleAssignmentPolicy`
+            # (an Exchange RBAC role-assignment policy) that `Add-RoleGroupMember`
+            # rejects; exporting them would re-introduce the #61 bind failure on the
+            # next apply. Skip on export so a fresh role-groups.yaml stays applyable.
+            if (Test-IsNonBindableRoleGroup -RoleGroupName $rg.Name) {
+                Write-Warning ("Skipping non-bindable role group '{0}' on export: it cannot take an Entra-group member (Add-RoleGroupMember rejects it with EntityValidation CheckIsUserRole). See issue #65 F4." -f $rg.Name)
+                continue
+            }
             try {
                 $members = @(Get-RoleGroupMember -Identity $rg.Name -ResultSize Unlimited -ErrorAction Stop)
             }
@@ -569,17 +758,62 @@ try {
                 $exportEntries.Add($entry)
                 continue
             }
-            $groupOids = @($members |
-                Where-Object { $_.RecipientTypeDetails -eq 'Group' -and $_.ExternalDirectoryObjectId } |
-                Select-Object -ExpandProperty ExternalDirectoryObjectId -Unique |
-                Sort-Object)
-            $userCount = @($members | Where-Object { $_.RecipientTypeDetails -ne 'Group' }).Count
+            # ADR 0023 Category 3 (issue #95): a fresh export writes the
+            # displayName shape, never a raw OID, so re-committing an
+            # export can never re-introduce the #92 disclosure.
+            # Get-RoleGroupMember already returns the recipient's display
+            # name on `.Name` -- no extra Graph round-trip needed. A
+            # member with a blank `.Name` falls back to the legacy
+            # raw-OID shape with a warning rather than being dropped.
+            $seenOids = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $memberEntries = New-Object 'System.Collections.Generic.List[hashtable]'
+            # Issue #57: `RecipientTypeDetails -eq 'Group'` is not a real
+            # value in Microsoft's documented enum (Get-Recipient /
+            # Get-RoleGroupMember) under any auth mode -- this filter has
+            # never matched a real Entra security group. The documented
+            # values are 'MailNonUniversalGroup' and
+            # 'MailUniversalSecurityGroup'.
+            # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-recipient?view=exchange-ps
+            foreach ($m in ($members | Where-Object { $_.RecipientTypeDetails -in @('MailNonUniversalGroup', 'MailUniversalSecurityGroup') } | Sort-Object Name)) {
+                $memberDisplayName = [string]$m.Name
+                $oid = [string]$m.ExternalDirectoryObjectId
+                if ([string]::IsNullOrWhiteSpace($oid)) {
+                    # Issue #57: `ExternalDirectoryObjectId` is empirically
+                    # blank for `MailNonUniversalGroup` rows -- Microsoft's
+                    # docs do not document population rules for this
+                    # property on Get-RoleGroupMember output, so it cannot
+                    # be trusted directly. Resolve the real Entra objectId
+                    # via the same displayName-resolution helper every
+                    # other reconciler in this repo uses (ADR 0023
+                    # Category 3), rather than inventing a new mechanism.
+                    if ([string]::IsNullOrWhiteSpace($memberDisplayName)) {
+                        Write-Warning ("Role group '{0}': a member had both a blank displayName and a blank ExternalDirectoryObjectId during export; skipping (cannot identify the principal). Reference: docs/adr/0023-identifier-resolution.md." -f $rg.Name)
+                        continue
+                    }
+                    try {
+                        $oid = & $resolvePrincipalScript -DisplayName $memberDisplayName -Kind 'Group'
+                    }
+                    catch {
+                        Write-Warning ("Role group '{0}': failed to resolve member '{1}' to an Entra group objectId during export: {2}. Skipping this member." -f $rg.Name, $memberDisplayName, $_.Exception.Message)
+                        continue
+                    }
+                }
+                if (-not $seenOids.Add($oid)) { continue }
+                if ([string]::IsNullOrWhiteSpace($memberDisplayName)) {
+                    Write-Warning ("Role group '{0}': a member's displayName was blank during export; exporting the raw object ID instead (legacy-but-supported shape). Reference: docs/adr/0023-identifier-resolution.md." -f $rg.Name)
+                    $memberEntries.Add(@{ Shape = 'oid'; Value = $oid })
+                }
+                else {
+                    $memberEntries.Add(@{ Shape = 'displayName'; Value = $memberDisplayName })
+                }
+            }
+            $userCount = @($members | Where-Object { $_.RecipientTypeDetails -notin @('MailNonUniversalGroup', 'MailUniversalSecurityGroup') }).Count
             $entry = @{
                 name        = [string]$rg.Name
                 description = "Exported from $TenantDomain on $exportStamp."
-                members     = @($groupOids)
+                members     = @($memberEntries)
                 userCount   = [int]$userCount
-                groupCount  = [int]$groupOids.Count
+                groupCount  = [int]$memberEntries.Count
                 note        = $null
             }
             $exportEntries.Add($entry)
@@ -626,8 +860,14 @@ try {
                 }
                 else {
                     $newBlock.Add('    members:')
-                    foreach ($oid in $entry.members) {
-                        $newBlock.Add(("      - {0}" -f $oid))
+                    foreach ($member in $entry.members) {
+                        if ($member.Shape -eq 'displayName') {
+                            $escapedName = ([string]$member.Value).Replace('\', '\\').Replace('"', '\"')
+                            $newBlock.Add('      - displayName: "' + $escapedName + '"')
+                        }
+                        else {
+                            $newBlock.Add(("      - {0}" -f $member.Value))
+                        }
                     }
                 }
             }
@@ -674,11 +914,34 @@ try {
 
     # ---- Phase 1: Read + categorize ----
     $plan = New-Object 'System.Collections.Generic.List[object]'
+    # Issue #61 F6: role groups whose CURRENT membership could not be read
+    # (Get-RoleGroupMember threw -- e.g. an orphaned member whose backing
+    # principal was deleted). Collected here so one unreadable group no longer
+    # aborts the whole reconcile; the aggregate throw after the write phase
+    # still exits the run non-zero once every group has been tried.
+    $readFailures = New-Object 'System.Collections.Generic.List[string]'
     foreach ($rg in $desiredRoleGroups) {
         $rgName = [string]$rg.name
+        # Normalize `members:` to a flat objectId array (ADR 0023 Category
+        # 3, issue #95): a raw OID string is used as-is; a
+        # `{ displayName: }` entry is resolved now via
+        # Get-EntraPrincipalIdByDisplayName.ps1, which itself fails closed
+        # on not-found/ambiguous. A resolution failure here aborts the
+        # WHOLE run (return, before any write) -- it never degrades into
+        # an empty $desiredMembers that -PruneMissing would read as
+        # "revoke every real member of this role group".
         $desiredMembers = @()
         if ($rg.ContainsKey('members') -and $rg.members) {
-            $desiredMembers = @($rg.members | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+            try {
+                $desiredMembers = Resolve-DesiredRoleGroupMemberIds -Members @($rg.members) -Resolver {
+                    param($displayName)
+                    & $resolvePrincipalScript -DisplayName $displayName -Kind 'Group'
+                }
+            }
+            catch {
+                Write-Error ("Failed to resolve declared member(s) for role group '{0}': {1}" -f $rgName, $_.Exception.Message)
+                return
+            }
         }
 
         # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/get-rolegroupmember
@@ -686,30 +949,86 @@ try {
             $tenantMembers = @(Get-RoleGroupMember -Identity $rgName -ResultSize Unlimited -ErrorAction Stop)
         }
         catch {
-            Write-Error ("Get-RoleGroupMember -Identity '{0}' failed: {1}. Verify the role-group name is exactly correct (case-sensitive) and the workload SP holds 'View-Only Recipients'." -f $rgName, $_.Exception.Message)
-            return
+            # Issue #61 F6: collect-and-continue on the READ leg, mirroring the
+            # Phase 3 bind/revoke catches. A single orphaned/unresolvable member
+            # (e.g. a role-group member whose backing principal was deleted --
+            # it surfaces with an identity of "<tenantId>\") makes
+            # Get-RoleGroupMember throw for that ONE role group; under
+            # $ErrorActionPreference='stop' the old `Write-Error; return` aborted
+            # the ENTIRE reconcile on the first such group. Report via
+            # Write-PruneFailure (Write-Warning + '::error::', never Write-Error,
+            # so it does not terminate the loop), record the role group, skip it
+            # (no plan row is added, so the write phase never touches it), and
+            # keep reading the rest. The aggregate throw after the write phase
+            # still fails the run non-zero once every group has been tried.
+            $report.Add([pscustomobject]@{
+                Category  = 'Failed'
+                Kind      = 'RoleGroupMember'
+                Name      = ("{0} :: <members>" -f $rgName)
+                Reason    = ('Get-RoleGroupMember read failed; role group skipped: {0}' -f $_.Exception.Message)
+                RoleGroup = $rgName
+            })
+            Write-PruneFailure ("Get-RoleGroupMember -Identity '{0}' failed: {1}. Role group skipped (unreadable current membership); verify the name is exactly correct (case-sensitive), the workload SP holds 'View-Only Recipients', and the role group has no orphaned members." -f $rgName, $_.Exception.Message)
+            $readFailures.Add($rgName)
+            continue
         }
 
-        # Read-phase diagnostic (issue #401): when the app-only IPPS session
-        # returns membership with stripped RecipientTypeDetails or null
-        # ExternalDirectoryObjectId, the filter below silently drops every
-        # row and the empty $tenantGroupOids breaks both Revoke detection
-        # (empty $desiredSet ∩ empty $tenantSet = no plan row) and Create
+        # Read-phase diagnostic: the '#401' reference this comment
+        # previously carried was a dead issue number (never existed in
+        # this repo or upstream). The real, confirmed root cause was
+        # issue #57 -- the `RecipientTypeDetails -eq 'Group'` filter
+        # below never matched any real Entra group, so $tenantGroupOids
+        # was always empty, which broke both Revoke detection (empty
+        # $desiredSet ∩ empty $tenantSet = no plan row) and Create
         # accounting (everything reported as Create then downgraded to
-        # NoChange via MemberAlreadyExistsException). Visible with -Verbose
-        # or ACTIONS_STEP_DEBUG=true in CI.
+        # NoChange via MemberAlreadyExistsException). Fixed per issue #57;
+        # this raw-row dump remains useful for diagnosing any future
+        # classification drift. Visible with -Verbose or
+        # ACTIONS_STEP_DEBUG=true in CI.
         Write-Verbose ("[read] '{0}': Get-RoleGroupMember returned {1} raw member(s)." -f $rgName, $tenantMembers.Count)
         foreach ($m in $tenantMembers) {
             Write-Verbose ("[read] '{0}': member Name='{1}' RecipientTypeDetails='{2}' ExternalDirectoryObjectId='{3}'" -f $rgName, $m.Name, $m.RecipientTypeDetails, $m.ExternalDirectoryObjectId)
         }
 
         # Match domain: only tenant members that are Entra security
-        # groups with a non-null ExternalDirectoryObjectId. Anything else
-        # (users, on-prem recipients) is ignored on read and never
-        # written.
-        $tenantGroupOids = @($tenantMembers |
-            Where-Object { $_.RecipientTypeDetails -eq 'Group' -and $_.ExternalDirectoryObjectId } |
-            Select-Object -ExpandProperty ExternalDirectoryObjectId -Unique)
+        # groups. Anything else (users, on-prem recipients) is ignored on
+        # read and never written.
+        #
+        # Issue #57: `RecipientTypeDetails -eq 'Group'` is not a real
+        # value in Microsoft's documented enum (Get-Recipient /
+        # Get-RoleGroupMember) under any auth mode -- the documented
+        # values are 'MailNonUniversalGroup' and
+        # 'MailUniversalSecurityGroup'. This filter has never matched a
+        # real Entra group, permanently defeating idempotency. Also,
+        # `ExternalDirectoryObjectId` is empirically blank for
+        # `MailNonUniversalGroup` rows and its population rules are not
+        # documented for Get-RoleGroupMember output, so it cannot be
+        # trusted directly: fall back to the same displayName-resolution
+        # helper used for desired members above (only when
+        # ExternalDirectoryObjectId is genuinely populated do we skip the
+        # extra Graph round-trip).
+        # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-recipient?view=exchange-ps
+        $tenantGroupMemberRows = @($tenantMembers | Where-Object { $_.RecipientTypeDetails -in @('MailNonUniversalGroup', 'MailUniversalSecurityGroup') })
+        $tenantOidSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($gm in $tenantGroupMemberRows) {
+            $gmOid = [string]$gm.ExternalDirectoryObjectId
+            if ([string]::IsNullOrWhiteSpace($gmOid)) {
+                $gmDisplayName = [string]$gm.Name
+                if ([string]::IsNullOrWhiteSpace($gmDisplayName)) {
+                    Write-Warning ("[read] '{0}': a tenant group member had both a blank ExternalDirectoryObjectId and a blank Name; cannot resolve, skipping." -f $rgName)
+                    continue
+                }
+                try {
+                    $gmOid = & $resolvePrincipalScript -DisplayName $gmDisplayName -Kind 'Group'
+                }
+                catch {
+                    Write-Error ("Failed to resolve tenant role-group member '{0}' (role group '{1}') to an Entra group objectId: {2}" -f $gmDisplayName, $rgName, $_.Exception.Message)
+                    return
+                }
+            }
+            [void]$tenantOidSet.Add($gmOid)
+        }
+        $tenantGroupOids = @($tenantOidSet)
         Write-Verbose ("[read] '{0}': after filter, {1} Entra group OID(s) remain." -f $rgName, $tenantGroupOids.Count)
 
         $desiredSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -869,6 +1188,32 @@ try {
     }
 
     # ---- Phase 3: Write ----
+    $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+    # Issue #61: Add (bind) failures are collected and continued exactly like
+    # revoke failures below, rather than aborting the run on the first one. A
+    # single non-bindable role group (e.g. an Exchange RBAC role-assignment
+    # policy such as `DefaultRoleAssignmentPolicy`, which rejects
+    # Add-RoleGroupMember with `EntityValidation CheckIsUserRole`) must not
+    # prevent every other declared bind from being attempted. The aggregate
+    # throw after the Phase 3 loop names every failed add + revoke, so the run
+    # still exits non-zero, but only after every plan row has been tried.
+    $addFailures = New-Object 'System.Collections.Generic.List[string]'
+
+    # Issue #13: in-loop revoke failures are reported via Write-PruneFailure
+    # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+    # '::error::' workflow command rather than Write-Error. The revoke catch
+    # previously did Write-Error + return, which under shell: pwsh's
+    # $ErrorActionPreference='stop' terminated the run on the first failed
+    # revoke so the rest were never attempted. The aggregate `throw` after the
+    # Phase 3 loop -- inside the enclosing try, so the finally still
+    # disconnects the IPPS session -- is the terminal outcome, so a failed
+    # prune still exits non-zero. Principal object IDs are never named (the
+    # '<oid>' redaction the drift report already uses): the reporter names the
+    # role group plus the tenant's own error text only. The issue #13 ratio
+    # guard (guard 2) is deliberately NOT wired here: role-group membership
+    # churn is legitimately high-ratio and this reconciler does not capture a
+    # single live-member denominator (owner decision), so only guard 1 and
+    # this reporter protect the revoke path.
     foreach ($entry in $plan) {
         $rgName = $entry.RoleGroup
 
@@ -893,19 +1238,19 @@ try {
                     # to confirm the Add actually persisted server-side. Diagnoses the
                     # silent non-persistence hypothesis where Exchange / S&C returns 2xx
                     # but the row never lands.
+                    # Issue #65 F5: the immediate post-Add read routinely misses the new
+                    # member to S&C replication lag (proven benign on #61 -- every such
+                    # warning cleared on a later -WhatIf). Wait-RoleGroupMemberVisible
+                    # retries a few times with a short backoff, so the warning below now
+                    # fires only after genuine non-persistence, not on the first lagging
+                    # read.
                     # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/get-rolegroupmember
-                    try {
-                        $verify = @(Get-RoleGroupMember -Identity $rgName -ResultSize Unlimited -ErrorAction Stop |
-                            Where-Object { $_.ExternalDirectoryObjectId -ieq $oid })
-                        if ($verify.Count -gt 0) {
-                            Write-Verbose ("[verify-add] '{0}': post-Add read confirmed member present." -f $rgName)
-                        }
-                        else {
-                            Write-Warning ("[verify-add] '{0}': Add returned success but post-Add read did NOT see the member. Possible silent non-persistence or replication lag." -f $rgName)
-                        }
+                    $verifyReader = { Get-RoleGroupMember -Identity $rgName -ResultSize Unlimited -ErrorAction Stop }
+                    if (Wait-RoleGroupMemberVisible -Reader $verifyReader -Oid $oid) {
+                        Write-Verbose ("[verify-add] '{0}': post-Add read confirmed member present." -f $rgName)
                     }
-                    catch {
-                        Write-Verbose ("[verify-add] '{0}': post-Add read failed: {1}" -f $rgName, $_.Exception.Message)
+                    else {
+                        Write-Warning ("[verify-add] '{0}': Add returned success but post-Add read did NOT see the member after retries. Possible silent non-persistence." -f $rgName)
                     }
                 }
                 catch {
@@ -918,8 +1263,18 @@ try {
                         Write-Information ("Role group '{0}' already contains the desired member; treating as no-op." -f $rgName) -InformationAction Continue
                         continue
                     }
-                    Write-Error ("Add-RoleGroupMember -Identity '{0}' failed: {1}" -f $rgName, $_.Exception.Message)
-                    return
+                    # Issue #61: collect-and-continue (same shape as the revoke
+                    # catch below) instead of Write-Error + return. Report via
+                    # Write-PruneFailure (Write-Warning + '::error::', never
+                    # Write-Error, so shell: pwsh's $ErrorActionPreference='stop'
+                    # does not terminate the loop), record the role group, and
+                    # keep binding the rest. The aggregate throw at the end of
+                    # Phase 3 fails the run non-zero once every row is tried.
+                    $reportRow.Category = 'Failed'
+                    $reportRow.Reason   = ('Add failed: {0}' -f $_.Exception.Message)
+                    Write-PruneFailure ("Add-RoleGroupMember -Identity '{0}' failed: {1}" -f $rgName, $_.Exception.Message)
+                    $addFailures.Add(("{0} :: <oid>" -f $rgName))
+                    continue
                 }
             }
         }
@@ -953,11 +1308,32 @@ try {
                         Write-Information ("Role group '{0}' did not contain the member; treating as no-op." -f $rgName) -InformationAction Continue
                         continue
                     }
-                    Write-Error ("Remove-RoleGroupMember -Identity '{0}' failed: {1}" -f $rgName, $_.Exception.Message)
-                    return
+                    $reportRow.Category = 'Failed'
+                    $reportRow.Reason   = ('Revoke failed: {0}' -f $_.Exception.Message)
+                    Write-PruneFailure ("Remove-RoleGroupMember -Identity '{0}' failed: {1}" -f $rgName, $_.Exception.Message)
+                    $pruneFailures.Add(("{0} :: <oid>" -f $rgName))
+                    continue
                 }
             }
         }
+    }
+
+    # Issue #61: one aggregate throw covering read (F6), add, and revoke
+    # failures, so a failed member read, bind, or revoke still exits the run
+    # non-zero -- but only after every role group has been tried, never on the
+    # first failure.
+    if ($readFailures.Count -gt 0 -or $addFailures.Count -gt 0 -or $pruneFailures.Count -gt 0) {
+        $parts = @()
+        if ($readFailures.Count -gt 0) {
+            $parts += ('{0} role-group member read(s) failed: {1}' -f $readFailures.Count, ($readFailures -join ', '))
+        }
+        if ($addFailures.Count -gt 0) {
+            $parts += ('{0} role-group member add(s) failed: {1}' -f $addFailures.Count, ($addFailures -join ', '))
+        }
+        if ($pruneFailures.Count -gt 0) {
+            $parts += ('{0} role-group member revoke(s) failed: {1}' -f $pruneFailures.Count, ($pruneFailures -join ', '))
+        }
+        throw ("Reconciliation completed with failures: {0}. See errors above." -f ($parts -join '; '))
     }
 
     #endregion

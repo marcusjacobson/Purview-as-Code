@@ -32,8 +32,8 @@ entries:
     relatedIssue: 367
     url: https://learn.microsoft.com/en-us/purview/communication-compliance-policies
     signal: updated-since
-    baseline: '2026-06-01'
-    lastVerified: '2026-06-20'
+    baseline: '2026-06-23'
+    lastVerified: '2026-07-18'
 
   - id: adr-0022-q11-dspm-for-ai
     adr: docs/adr/0022-dspm-for-ai-authoring-surface.md
@@ -41,8 +41,8 @@ entries:
     relatedIssue: 368
     url: https://learn.microsoft.com/en-us/purview/dspm-for-ai
     signal: updated-since
-    baseline: '2026-05-01'
-    lastVerified: '2026-06-20'
+    baseline: '2026-06-25'
+    lastVerified: '2026-07-18'
 
   - id: adr-0027-q14-label-autoapply-article
     adr: docs/adr/0027-autoapplication-removal-watch-list.md
@@ -50,8 +50,8 @@ entries:
     relatedIssue: 512
     url: https://learn.microsoft.com/en-us/purview/apply-sensitivity-label-automatically
     signal: updated-since
-    baseline: '2026-06-17'
-    lastVerified: '2026-06-20'
+    baseline: '2026-06-25'
+    lastVerified: '2026-07-18'
 
   - id: adr-0027-q14-label-autoapply-set-label
     adr: docs/adr/0027-autoapplication-removal-watch-list.md
@@ -68,8 +68,8 @@ entries:
     relatedIssue: 364
     url: https://learn.microsoft.com/en-us/purview/file-plan-manager
     signal: updated-since
-    baseline: '2026-04-30'
-    lastVerified: '2026-06-20'
+    baseline: '2026-06-25'
+    lastVerified: '2026-07-18'
 
   - id: adr-0035-q15-records-remove-fileplanproperty
     adr: docs/adr/0035-records-seed-content-immovable.md

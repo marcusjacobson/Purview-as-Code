@@ -60,6 +60,19 @@
 .PARAMETER PruneMissing
     Remove tenant terms not present in YAML. Default `$false`.
 
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live glossary terms is refused before any tenant write. Supply it
+    when a large prune is genuinely intended (a deliberate consolidation);
+    the ratio is then reported as a warning and the run proceeds. Has no
+    effect on the empty-desired-set guard, which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live glossary terms `-PruneMissing` may delete
+    without `-AllowMajorityPrune`, as a fraction in (0, 1]. Default 0.5.
+    Reference: scripts/modules/PruneGuard.psm1 (issue #13, guard 2).
+
 .PARAMETER Force
     Suppress the safety guard on the operation you asked for. In the
     Export parameter set that guard is `-ExportCurrentState`'s refusal
@@ -153,6 +166,14 @@ param(
 
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
+
+    # Issue #13, guard 2: the prune sanity-ratio override and threshold.
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [Parameter(ParameterSetName = 'Apply')]
     [ValidateSet('audit', 'portal-wins', 'repo-wins')]
@@ -497,6 +518,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 $scriptRoot = Split-Path -Parent $PSCommandPath
 $repoRoot = Split-Path -Parent $scriptRoot
 
@@ -556,6 +584,25 @@ if ($mode -eq 'Apply') {
     $desiredGlossaryName = [string]$desiredRoot.glossary
     $desiredTerms = @($desiredRoot.terms | ForEach-Object { ConvertTo-DesiredTermHash -Term ([hashtable]$_) })
     Write-Information ("Desired         : glossary '{0}' with {1} term(s)" -f $desiredGlossaryName, $desiredTerms.Count) -InformationAction Continue
+
+    # Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+    #
+    # The prune compares live terms in the named glossary against `terms`, so
+    # `terms` is the desired set the guard must key on -- not the `glossary`
+    # scalar, which only selects the container. With zero desired terms every
+    # live term falls out of the orphan match below and the run would delete
+    # the whole glossary's contents. The rationale, the likely causes, and the
+    # 2026-07-19 production hit are documented in scripts/modules/PruneGuard.psm1.
+    #
+    # Placed in the desired-state load region so it fires before the tenant is
+    # contacted at all -- before `az account show` and before any write phase.
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneDesiredSetNotEmpty `
+            -DesiredCount   $desiredTerms.Count `
+            -ObjectTypeNoun 'glossary term' `
+            -SourcePath     $Path `
+            -CollectionKey  'terms'
+    }
 }
 
 # Reference: https://learn.microsoft.com/en-us/cli/azure/account#az-account-show
@@ -761,6 +808,31 @@ if ($DirectionPolicy -ne 'audit') {
 
 #endregion
 
+#region Issue #13, guard 2: prune sanity ratio
+
+# Guard 1 (desired-state load region) catches only the total wipe. This
+# catches the near-total one: a glossary.yaml that lost most of its terms to
+# a bad merge, or a -Path pointing at a smaller environment's file, both of
+# which leave a non-zero desired count and so clear guard 1.
+#
+# Keyed on the Term orphan set this run would delete against the live tenant
+# term count. Gated on $DirectionPolicy -ne 'audit': this script implements
+# audit mode by flipping $WhatIfPreference (it does NOT empty the orphan
+# rows), so a read-only `-DirectionPolicy audit -PruneMissing` run must not
+# be refused by the ratio guard. Fires before the ADR 0052 gate and the
+# apply loops: the last point at which nothing has been written.
+# Reference: scripts/modules/PruneGuard.psm1
+if ($PruneMissing.IsPresent -and $DirectionPolicy -ne 'audit') {
+    Assert-PruneRatioWithinThreshold `
+        -PruneCount     @($plan | Where-Object { $_.Kind -eq 'Term' -and $_.Action -eq 'Orphan' }).Count `
+        -LiveCount      @($tenantTermsRaw).Count `
+        -ObjectTypeNoun 'glossary term' `
+        -MaxPruneRatio  $MaxPruneRatio `
+        -Allow:$AllowMajorityPrune
+}
+
+#endregion
+
 #region ADR 0052 destructive-operation confirmation gate
 
 # The last point before the apply loops at which nothing has been written.
@@ -897,6 +969,13 @@ foreach ($row in $plan) {
     }
 }
 
+# Issue #13: orphan prune failures are reported via Write-PruneFailure
+# (Write-Warning plus an '::error::' annotation, not Write-Error, which
+# shell: pwsh's $ErrorActionPreference='stop' would promote to terminating
+# and abandon the remaining orphans) and collected here; a single aggregate
+# throw after the loop names every failure so a failed prune exits non-zero.
+$pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
 foreach ($row in $plan) {
     if ($row.Kind -ne 'Term') { continue }
     $target = "Purview glossary term '$($row.Name)'"
@@ -959,7 +1038,10 @@ foreach ($row in $plan) {
                     Invoke-TermDelete -TenantRaw $tenantRawByName[$row.Name.ToLowerInvariant()]
                     $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Term'; Name = $row.Name; Reason = 'Deleted (-PruneMissing).' }) | Out-Null
                 } catch {
-                    $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Term'; Name = $row.Name; Reason = ("Delete failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_)) }) | Out-Null
+                    $reason = Format-PurviewRestError -ErrorRecord $_
+                    $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Term'; Name = $row.Name; Reason = ("Delete failed: {0}" -f $reason) }) | Out-Null
+                    Write-PruneFailure ("Remove glossary term '{0}' failed: {1}" -f $row.Name, $reason)
+                    $pruneFailures.Add([string]$row.Name)
                 }
             } else {
                 $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Term'; Name = $row.Name; Reason = 'Would be deleted (-PruneMissing).' }) | Out-Null
@@ -967,6 +1049,12 @@ foreach ($row in $plan) {
             continue
         }
     }
+}
+
+# Issue #13: a failed prune now exits non-zero (behaviour change) -- the
+# aggregate throw fires after every orphan has been attempted, naming them all.
+if ($pruneFailures.Count -gt 0) {
+    throw ("Reconciliation aborted: {0} orphan glossary term(s) could not be removed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
 }
 
 $report

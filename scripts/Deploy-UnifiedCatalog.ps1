@@ -53,6 +53,40 @@
       ADR 0053:
         docs/adr/0053-overwrite-foreign-author-switch.md
 
+.PARAMETER PruneMissing
+    Delete tenant Unified Catalog objects (business domains, data products,
+    objectives, key results, critical data elements, terms) that are not
+    declared in the YAML. Default `$false`.
+
+    Two issue #13 guards stand in front of this switch, both implemented in
+    `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against empty
+        `items:` blocks would classify the entire live catalog as orphaned.
+      * The prune must not exceed `-MaxPruneRatio` of the live objects
+        without `-AllowMajorityPrune`. The ratio is checked PER KIND --
+        orphan business domains against live domains, orphan terms against
+        live terms, and so on -- because a blended ratio can mask a
+        single-collection wipe. Not enforced under `-DirectionPolicy audit`,
+        which never writes.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of the
+    live objects of any one kind is refused before any write. Supply it when
+    a large prune is genuinely intended (a deliberate consolidation); the
+    ratio is then reported as a warning and the run proceeds. Has no effect
+    on the empty-desired-set guard, which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest per-kind share of the live Unified Catalog objects `-PruneMissing`
+    may delete without `-AllowMajorityPrune`, as a fraction in (0, 1].
+    Default 0.5. A prune exactly at the threshold passes; only a strictly
+    larger share is refused. Set to 1 to disable the ratio guard for a
+    single run.
+
 .PARAMETER Force
     Suppress the safety guard on the operation you asked for. In the
     Export parameter set that guard is `-ExportCurrentState`'s refusal to
@@ -81,6 +115,13 @@ param(
 
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -140,6 +181,11 @@ Import-Module (Join-Path $PSScriptRoot 'modules\DirectionPolicy.psm1') -Force -S
 # -PruneMissing delete) can be entered unattended from a local terminal.
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules\ConfirmGate.psm1') -Force -Scope Local -ErrorAction Stop
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set refusal,
+# which prevents a prune against a zero-entry desired state from classifying
+# every live tenant object as an orphan. Shared with the other Deploy-*.ps1
+# reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules\PruneGuard.psm1') -Force -Scope Local -ErrorAction Stop
 #endregion
 
 $script:UnifiedCatalogApiVersion = '2026-03-20-preview'
@@ -746,6 +792,30 @@ function Invoke-UnifiedCatalogRestMethod {
         return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $Headers -Body $json -ErrorAction Stop
     }
     return Invoke-RestMethod -Method $Method -Uri $Uri -Headers $Headers -ErrorAction Stop
+}
+
+function Test-UCDeleteAlreadyGone {
+    <#
+    .SYNOPSIS
+        Returns $true when a DELETE failed with HTTP 404 Not Found.
+    .DESCRIPTION
+        Issue #13: Unified Catalog is a containment hierarchy and deleting a
+        parent cascades its children server-side. When the -PruneMissing loop
+        then issues an explicit DELETE for a child the parent already removed,
+        the API answers 404. That is idempotent-delete success (already gone),
+        not a prune failure -- so the caller treats it as success. PS7's
+        Invoke-RestMethod surfaces HTTP failures as an HttpResponseException
+        whose Response.StatusCode carries the code. Only 404 is tolerated here;
+        every other status is a real failure the caller must rethrow. This
+        mirrors the 404 idiom in Deploy-Scans.ps1.
+        Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/invoke-restmethod
+    #>
+    param([Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    $responseProperty = $ErrorRecord.Exception.PSObject.Properties['Response']
+    if (-not $responseProperty -or -not $responseProperty.Value) { return $false }
+    $statusProperty = $responseProperty.Value.PSObject.Properties['StatusCode']
+    if (-not $statusProperty) { return $false }
+    try { return ([int]$statusProperty.Value -eq 404) } catch { return $false }
 }
 
 function Get-PagedContinuationUri {
@@ -1544,6 +1614,35 @@ foreach ($concept in $script:UnifiedCatalogConcepts) {
     $desiredDocs[$concept.Kind] = @(Get-DesiredItem -YamlPath $yamlPath -SchemaPath $schemaPath)
 }
 
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# -Path here is a FOLDER, and this reconciler manages one collection per concept
+# in $script:UnifiedCatalogConcepts (business domains, data products, OKRs,
+# critical data elements, glossary terms), each in its own YAML file with an
+# `items:` block. The guard is therefore keyed on the TOTAL across all five: a
+# prune is only catastrophic when NOTHING at all is declared, and declaring
+# domains but no OKRs is an entirely normal state that must stay prunable.
+#
+# With a zero total, every live Unified Catalog item falls out of the orphan
+# match below and the run would delete the whole catalog. The rationale, the
+# likely causes, and the 2026-07-19 production hit are documented in
+# scripts/modules/PruneGuard.psm1.
+#
+# Placed immediately after the desired-state load and before
+# Get-UnifiedCatalogApiContext, which is this script's first tenant contact
+# (it acquires the Purview data-plane token via az account get-access-token).
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    $desiredTotal = 0
+    foreach ($concept in $script:UnifiedCatalogConcepts) {
+        $desiredTotal += @($desiredDocs[$concept.Kind]).Count
+    }
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desiredTotal `
+        -ObjectTypeNoun 'Unified Catalog item' `
+        -SourcePath     $Path `
+        -CollectionKey  'items'
+}
+
 if ($WhatIfPreference -and $mode -eq 'Export') {
     Write-Information '-WhatIf specified with -ExportCurrentState. Planned behaviour (no remote calls made):' -InformationAction Continue
     foreach ($concept in $script:UnifiedCatalogConcepts) {
@@ -1738,6 +1837,47 @@ Show-PlanSummary -Report $report.ToArray()
 
 if ($blockedRows.Count -gt 0) {
     throw ("Reconciliation aborted: {0} blocked item(s)." -f $blockedRows.Count)
+}
+
+# ---- Issue #13, guard 2: prune sanity ratio (per kind) ----
+# Guard 1 (desired-state load region) catches only the total wipe. This
+# catches the near-total one: a catalog YAML set that lost most of its items
+# to a bad merge, or a -Path pointing at a smaller environment's tree, both
+# of which leave a non-zero desired count and so clear guard 1.
+#
+# The ratio is checked PER KIND -- orphan business domains against the live
+# domains, orphan terms against the live terms, and so on -- because a
+# blended ratio across the six Unified Catalog kinds can mask a single-kind
+# wipe. Denominators come from the same $tenantState.* collections the plan
+# was built from; the key-result denominator is $keyResultTenant, the flat
+# list of every tenant key result across all objectives assembled above (the
+# containment hierarchy has no single tenant key-result collection, but this
+# flat projection is the population its orphans are drawn from).
+#
+# AUDIT TRAP: this script implements audit by flipping $WhatIfPreference
+# above, which leaves $orphans fully populated (so the delete loop still
+# WALKS it to render "What if:" previews). Gate guard 2 on
+# $DirectionPolicy -ne 'audit' so a read-only audit run is not refused for a
+# delete it can never perform. Fires before the ADR 0052 gate: the last point
+# at which nothing has been written.
+# Reference: scripts/modules/PruneGuard.psm1
+if ($PruneMissing.IsPresent -and $DirectionPolicy -ne 'audit') {
+    $guard2Tiers = @(
+        @{ Kind = 'BusinessDomain';      Noun = 'Unified Catalog business domain';       Live = @($tenantState.Domains).Count }
+        @{ Kind = 'DataProduct';         Noun = 'Unified Catalog data product';          Live = @($tenantState.DataProducts).Count }
+        @{ Kind = 'Okr';                 Noun = 'Unified Catalog objective';             Live = @($tenantState.Objectives).Count }
+        @{ Kind = 'OkrKeyResult';        Noun = 'Unified Catalog key result';           Live = @($keyResultTenant).Count }
+        @{ Kind = 'CriticalDataElement'; Noun = 'Unified Catalog critical data element'; Live = @($tenantState.CriticalDataElements).Count }
+        @{ Kind = 'Term';                Noun = 'Unified Catalog term';                  Live = @($tenantState.Terms).Count }
+    )
+    foreach ($tier in $guard2Tiers) {
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     @($orphans | Where-Object { $_.Kind -eq $tier.Kind }).Count `
+            -LiveCount      $tier.Live `
+            -ObjectTypeNoun $tier.Noun `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
+    }
 }
 
 # ---- ADR 0052: destructive-operation confirmation gate ----
@@ -1961,51 +2101,108 @@ foreach ($kind in $writeOrder) {
 }
 
 if ($PruneMissing.IsPresent) {
-    foreach ($entry in $orphans.ToArray()) {
+    # Issue #13: in-loop prune failures are reported via Write-PruneFailure
+    # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+    # '::error::' workflow command rather than Write-Error. The delete catch
+    # previously rethrew on any non-404 error, terminating the run on the first
+    # failed delete so the rest were never attempted. The aggregate `throw` at
+    # the END of this block is the terminal outcome, so a failed prune still
+    # exits non-zero; both the declaration and the throw sit inside this
+    # -PruneMissing block so the whole reporter travels with the delete loop.
+    # The idempotent post-cascade 404 (Test-UCDeleteAlreadyGone) is still
+    # treated as already-gone success, unchanged: only the non-404 error path
+    # changes from rethrow-immediately to collect-and-continue.
+    $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+    # Issue #13 (part C prerequisite -- prune delete-order safety):
+    # Unified Catalog objects form a containment hierarchy, and deleting a
+    # parent cascades its descendants server-side:
+    #   * a Business Domain contains its Data Products, Objectives, Critical
+    #     Data Elements, and Terms;
+    #   * an Objective contains its Key Results.
+    # $orphans is assembled parent-first (Business Domains are added before
+    # their children), so a flat pass over it could reach a parent, cascade its
+    # children away, and THEN issue an explicit DELETE for a child that is
+    # already gone -- which the API answers with a spurious 404. Two guards,
+    # belt-and-braces, because cross-kind cascade timing is not fully
+    # controllable:
+    #   1. Sort orphans deepest-child-first so parents are always deleted LAST
+    #      (the same depth-descending orphan sort Deploy-Labels.ps1 uses, #154).
+    #   2. Tolerate a post-cascade 404 as already-gone (idempotent-delete), via
+    #      Test-UCDeleteAlreadyGone. Non-404 errors still surface.
+    $pruneDepthByKind = @{
+        'OkrKeyResult'        = 3  # Key Result -> Objective -> Business Domain (deepest, first)
+        'DataProduct'         = 2  # Data Product -> Business Domain
+        'Okr'                 = 2  # Objective -> Business Domain
+        'CriticalDataElement' = 2  # Critical Data Element -> Business Domain
+        'Term'                = 2  # Term -> Business Domain
+        'BusinessDomain'      = 1  # top-level (last)
+    }
+    $sortedOrphans = @($orphans.ToArray() | Sort-Object -Property `
+            @{ Expression = { $pruneDepthByKind[[string]$_.Kind] }; Descending = $true }, `
+            @{ Expression = { [string]$_.Kind }; Descending = $false }, `
+            @{ Expression = { [string]$_.Item.id }; Descending = $false })
+    foreach ($entry in $sortedOrphans) {
+        $target = $null
+        $action = $null
+        $deleteAction = $null
         switch ($entry.Kind) {
             'OkrKeyResult' {
                 $target = "Key result '$($entry.Item.__objectiveName)/$($entry.Item.definition)'"
                 $action = 'Remove orphan key result'
-                if ($PSCmdlet.ShouldProcess($target, $action)) {
-                    [void](Invoke-UCKeyResultDelete -Context $context -ObjectiveId ([string]$entry.Item.__objectiveId) -KeyResultId ([string]$entry.Item.id))
-                }
+                $deleteAction = { Invoke-UCKeyResultDelete -Context $context -ObjectiveId ([string]$entry.Item.__objectiveId) -KeyResultId ([string]$entry.Item.id) }
             }
             'Term' {
                 $target = "Term '$($entry.Item.name)'"
                 $action = 'Remove orphan term'
-                if ($PSCmdlet.ShouldProcess($target, $action)) {
-                    [void](Invoke-UCTermDelete -Context $context -TermId ([string]$entry.Item.id))
-                }
+                $deleteAction = { Invoke-UCTermDelete -Context $context -TermId ([string]$entry.Item.id) }
             }
             'CriticalDataElement' {
                 $target = "Critical data element '$($entry.Item.name)'"
                 $action = 'Remove orphan critical data element'
-                if ($PSCmdlet.ShouldProcess($target, $action)) {
-                    [void](Invoke-UCCriticalDataElementDelete -Context $context -CriticalDataElementId ([string]$entry.Item.id))
-                }
+                $deleteAction = { Invoke-UCCriticalDataElementDelete -Context $context -CriticalDataElementId ([string]$entry.Item.id) }
             }
             'Okr' {
                 $target = "Objective '$($entry.Item.definition)'"
                 $action = 'Remove orphan objective'
-                if ($PSCmdlet.ShouldProcess($target, $action)) {
-                    [void](Invoke-UCObjectiveDelete -Context $context -ObjectiveId ([string]$entry.Item.id))
-                }
+                $deleteAction = { Invoke-UCObjectiveDelete -Context $context -ObjectiveId ([string]$entry.Item.id) }
             }
             'DataProduct' {
                 $target = "Data product '$($entry.Item.name)'"
                 $action = 'Remove orphan data product'
-                if ($PSCmdlet.ShouldProcess($target, $action)) {
-                    [void](Invoke-UCDataProductDelete -Context $context -DataProductId ([string]$entry.Item.id))
-                }
+                $deleteAction = { Invoke-UCDataProductDelete -Context $context -DataProductId ([string]$entry.Item.id) }
             }
             'BusinessDomain' {
                 $target = "Business domain '$($entry.Item.name)'"
                 $action = 'Remove orphan business domain'
-                if ($PSCmdlet.ShouldProcess($target, $action)) {
-                    [void](Invoke-UCBusinessDomainDelete -Context $context -DomainId ([string]$entry.Item.id))
+                $deleteAction = { Invoke-UCBusinessDomainDelete -Context $context -DomainId ([string]$entry.Item.id) }
+            }
+        }
+        if ($deleteAction -and $PSCmdlet.ShouldProcess($target, $action)) {
+            try {
+                [void](& $deleteAction)
+            }
+            catch {
+                if (Test-UCDeleteAlreadyGone -ErrorRecord $_) {
+                    # Issue #13: a parent's cascade already removed this child, so
+                    # the explicit DELETE returned 404. That is already-gone, not
+                    # a prune failure -- log and continue.
+                    Write-Information ("[prune] {0} was already removed by a parent cascade (HTTP 404); treating as already-gone." -f $target) -InformationAction Continue
+                }
+                else {
+                    # Issue #13: a real (non-404) delete failure. Report it and
+                    # continue so every remaining orphan is still attempted; the
+                    # aggregate throw below fails the run non-zero.
+                    Write-PruneFailure ("{0} delete failed: {1}" -f $target, $_.Exception.Message)
+                    $pruneFailures.Add($target) | Out-Null
+                    continue
                 }
             }
         }
+    }
+
+    if ($pruneFailures.Count -gt 0) {
+        throw ("Reconciliation aborted: {0} orphan Unified Catalog object(s) could not be deleted: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
     }
 }
 

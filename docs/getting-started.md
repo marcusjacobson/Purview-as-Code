@@ -28,6 +28,28 @@ app per workflow file**, not a single shared app:
 > [ADR 0010](adr/0010-automation-identity-subject-model.md) single-credential-per-subject
 > invariant is unchanged.
 
+> [!IMPORTANT]
+> **Repositories created on or after 2026-07-15 mint a different subject.** GitHub's
+> [immutable subject claims](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/)
+> embed the numeric owner and repository IDs:
+> `repo:<org>@<ownerId>/<repo>@<repoId>:environment:<env>` (for example
+> `repo:octo-org@123456/octo-repo@456789:environment:lab`). This applies to every spin-off
+> created after that date, to repositories renamed or transferred after it, and to older
+> repositories that opt in via the OIDC settings — a classic name-only credential then fails
+> `azure/login` with `AADSTS700213`. Per
+> [ADR 0058](adr/0058-immutable-oidc-subject-claims.md) the provisioning scripts detect this
+> automatically (`-SubjectFormat auto`), resolve the numeric IDs at runtime, and mint the
+> matching format; verification accepts either format. For a hand-rolled credential, resolve the
+> IDs first:
+>
+> ```bash
+> gh api "repos/<org>/<repo>" --jq .id        # repository ID
+> gh api "users/<org>" --jq .id               # owner ID
+> ```
+>
+> and use the ID-embedded subject in the `az ad app federated-credential create` call below. See
+> the [GitHub OIDC reference](https://docs.github.com/en/actions/reference/security/oidc).
+
 The recommended path is the idempotent provisioning script
 [`scripts/New-AutomationEntraApp.ps1`](../scripts/New-AutomationEntraApp.ps1), which reads the app
 display names and subject shape from [`infra/parameters/lab.yaml`](../infra/parameters/lab.yaml)
@@ -44,7 +66,10 @@ az ad app create --display-name "gh-oidc-purview-control-plane"
 APP_ID=$(az ad app list --display-name "gh-oidc-purview-control-plane" --query "[0].appId" -o tsv)
 az ad sp create --id "$APP_ID"
 
-# Add the GitHub OIDC federated credential (replace <org>/<repo>; keep the :environment: subject)
+# Add the GitHub OIDC federated credential (replace <org>/<repo>; keep the :environment: subject).
+# Repositories created on/after 2026-07-15 need the ID-embedded subject instead (ADR 0058), e.g.
+# "repo:contoso@123456/Purview-as-Code-Generic@456789:environment:lab" — resolve the IDs with the
+# gh api commands shown above.
 az ad app federated-credential create --id "$APP_ID" --parameters '{
   "name": "gh-env-lab",
   "issuer": "https://token.actions.githubusercontent.com",
@@ -84,8 +109,8 @@ Under **Settings → Secrets and variables → Actions**:
 - Secrets (Environment: `kv-unlock`):
   - `AZURE_CLIENT_ID_KV_UNLOCK` = the **kv-unlock** app's `appId` (consumed by [`kv-temp-unlock.yml`](../.github/workflows/kv-temp-unlock.yml)).
   - `AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID` — the unlock job runs under this Environment, so it reads these from here.
-- Variables (Environment: `lab` — per [ADR 0057](adr/0057-multi-environment-and-branch-model.md) the workflows read every tenant-specific non-secret value from the selected Environment's variables and fail fast when one is unset):
-  - `PURVIEW_ACCOUNT_NAME` = `purview-contoso-lab` (or your actual account name)
+- Variables (Environment: `lab` — per [ADR 0057](adr/0057-multi-environment-and-branch-model.md) the workflows read tenant-specific non-secret values from the selected Environment's variables; each workflow's fail-fast guard checks exactly the variables that workflow consumes):
+  - `PURVIEW_ACCOUNT_NAME` = your **classic** Purview account name — **omit this variable on a unified-only tenant.** No workflow fail-fast guard requires it (guards are scoped to what each workflow consumes; [`validate-oidc-auth.yml`](../.github/workflows/validate-oidc-auth.yml) runs green without it, by design). It is consumed only by data-plane reconcilers resolving `${env:PURVIEW_ACCOUNT_NAME}` tokens ([ADR 0023](adr/0023-identifier-resolution.md) Category 2), which fail with a named unset-token error if such a token is reached without the variable — the correct fail-closed outcome on a unified-only tenant, where classic reconcilers cannot run anyway ([ADR 0047](adr/0047-unified-catalog-preview-api-coexistence.md)/[ADR 0048](adr/0048-purview-account-discovery-gate.md)). Never set it to the shipped placeholder as if real, and never to a pay-as-you-go metering resource's name (ADR 0048).
   - `PURVIEW_RG` = `rg-purview-lab` (or your actual resource group)
   - `KEY_VAULT_NAME` = your automation Key Vault name
   - `TENANT_DOMAIN` = your tenant primary domain (for example `contoso.onmicrosoft.com`)
@@ -105,7 +130,7 @@ Create the `lab` environment and the `kv-unlock` environment (Settings → Envir
 Single-environment operation needs nothing beyond the above — every workflow defaults to `lab`. To run a second environment per [ADR 0057](adr/0057-multi-environment-and-branch-model.md):
 
 1. **Create the `dev` and `kv-unlock-dev` GitHub Environments** (Settings → Environments), each with the same secret/variable set as its `lab` / `kv-unlock` counterpart, holding the dev tenant's or dev resource set's values. If your repo carries a `dev` branch, add a deployment branch policy pinning environment `dev` → branch `dev` (and `lab` → your lab-deploying branch) per [Deployment branch policies](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments#deployment-branches-and-tags).
-2. **Add the `dev` federated credentials**: on each Entra app, one additional credential with subject `repo:<org>/<repo>:environment:dev` — and on the kv-unlock app, `repo:<org>/<repo>:environment:kv-unlock-dev` (same `az ad app federated-credential create` shape as §1).
+2. **Add the `dev` federated credentials**: on each Entra app, one additional credential with subject `repo:<org>/<repo>:environment:dev` — and on the kv-unlock app, `repo:<org>/<repo>:environment:kv-unlock-dev` (same `az ad app federated-credential create` shape as §1). The subject **format** is per-repository, not per-environment: a repository that mints immutable (ID-embedded) subjects per [ADR 0058](adr/0058-immutable-oidc-subject-claims.md) needs the ID-embedded form on the `dev` / `kv-unlock-dev` credentials too.
 3. **Copy the per-environment configuration files**: `infra/main.bicepparam` → `infra/main.dev.bicepparam` and `infra/parameters/lab.yaml` → `infra/parameters/dev.yaml`, then edit the copies with the dev values. The template ships no dev scaffolds on purpose; `deploy-infra` fails fast if `infra/main.dev.bicepparam` is missing, and the scripts receive `infra/parameters/dev.yaml` through the `PURVIEW_PARAMETERS_FILE` environment variable the workflows set.
 4. **Verify**: dispatch [`validate-oidc-auth.yml`](../.github/workflows/validate-oidc-auth.yml) with `environment: dev`. Every tenant-touching workflow then accepts `environment: dev` on manual dispatch, and pushes to a `dev` branch route there automatically.
 
@@ -132,6 +157,17 @@ The `contoso-lab` account already holds live state in the template's worked exam
 
 1. Edit [`infra/main.bicepparam`](../infra/main.bicepparam) so `purviewAccountName` and `location` match the existing account.
 2. Edit [`data-plane/collections/collections.yaml`](../data-plane/collections/collections.yaml) so `rootCollection` equals the existing account name (root collection shares the account name).
+
+### Unified-only path (tenant-level Unified Catalog, no classic account)
+
+If discovery per [ADR 0048](adr/0048-purview-account-discovery-gate.md) confirmed the tenant is on the tenant-level Unified Catalog experience — no classic `Microsoft.Purview/accounts` governance resource exists, and any discovered pay-as-you-go metering resource must **never** be targeted — deploy the control-plane stack **without** the classic account, using the same canonical command:
+
+```bash
+az deployment group create -g rg-purview-lab -f infra/main.bicep -p infra/main.bicepparam \
+  --parameters deployPurviewAccount=false
+```
+
+This still deploys [`infra/modules/role-definitions.bicep`](../infra/modules/role-definitions.bicep) (the KV firewall-toggler custom role that `kv-temp-unlock.yml` depends on) while skipping the `Microsoft.Purview/accounts` resource entirely ([conditional deployment](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/conditional-resource-deployment)). Leave `purviewAccountName` at the shipped placeholder (ADR 0048 outcome matrix) and omit the `PURVIEW_ACCOUNT_NAME` Environment variable (§2). The classic §4 export/deploy flow does not apply — classic reconcilers cannot drive the unified data plane ([ADR 0047](adr/0047-unified-catalog-preview-api-coexistence.md)).
 
 ## 4. First deploy
 

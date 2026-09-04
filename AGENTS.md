@@ -57,7 +57,7 @@ changes. Every gate runs without a tenant:
 | `dspm-posture` | `pwsh ./scripts/Test-DSPMPosture.ps1` |
 | `dspm-ai-posture` | `pwsh ./scripts/Test-DSPMforAIPosture.ps1` |
 | `full-circle-contract-guard` | no standalone script — an inline `pwsh` step in `validate.yml` that fails when a non-exempt `scripts/Deploy-*.ps1` lacks any of the `SupportsShouldProcess`, `PruneMissing`, or `ExportCurrentState` contract tokens |
-| `landing-page-embeds` | `pwsh ./scripts/Update-LandingPageEmbeds.ps1 -Check` |
+| `landing-page-embeds` | `pwsh ./scripts/Update-LandingPageEmbeds.ps1 -Check`; repeat with `-IndexPath <page>.html` for any additional landing page present in the copy |
 
 Canonical deploy commands live in
 [`.github/instructions/build-deploy.instructions.md`](.github/instructions/build-deploy.instructions.md)

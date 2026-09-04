@@ -86,6 +86,20 @@ Per [`docs/project-plan.md`](../project-plan.md#4-per-feature-lifecycle-review--
 
 The next re-verification fires on the next §5.2 item that touches label-attached `Conditions` state, or quarterly under the v2 [#376](../../issues/376) surface-completeness review, whichever comes first.
 
+### 2026-07-18 re-verification
+
+Watch-list issue [#3](../../issues/3) flagged this entry: the tracked article page's `updated_at` advanced from the recorded baseline (`2026-06-17`) to `2026-06-25`. This is a **second, later** dated re-verification, appended below the 2026-06-01 one above without editing it. Re-checked all five of that table's triggers on 2026-07-18:
+
+| Trigger | Status (2026-07-18) | Evidence |
+|---|---|---|
+| 1. `Set-Label -Conditions` clearing sentinel documented | Not fired | Full-text search of the re-fetched [Set-Label](https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-label) page for clearing/removal terminology (`ClearConditions`, `RemoveConditions`, `clear.*condition`, `Conditions.*null`) returned zero matches. |
+| 2. `-ClearConditions` / `-RemoveConditions` partner parameter | Not fired | Same search as above, zero matches. |
+| 3. Apply-sensitivity-label-automatically programmatic-removal section | Not fired | The tracked page, [Apply a sensitivity label to content automatically](https://learn.microsoft.com/en-us/purview/apply-sensitivity-label-automatically) (fetch 2026-07-18, updated_at 2026-06-25 — the update that triggered this flag), remains creation/configuration-only; no programmatic-removal section added. |
+| 4. Graph `sensitivityLabel.autoApplicationOf` resource with DELETE/PATCH | Not independently re-searched this pass | ADR 0027's own 2026-06-01 table already confirmed zero `sensitivityLabel` mentions on the Graph `security-api-overview` / resources pages, and the same `security-api-overview` page was re-fetched on 2026-07-18 for the sibling ADR 0019/0022 re-verifications (same watch-list issue [#3](../../issues/3)) and still shows no such resource. |
+| 5. Natural spike (real-tenant `Conditions` block in flight) | Not fired | `gh pr list --search "conditions"` and `gh issue list --search "conditions autoApplicationOf label"` against this repository turned up no label-`Conditions`-related activity since 2026-06-01. The one substantive PR the search surfaced, [#57](../../pull/57) ("make auto-label reconciler round-trip exportable state," merged 2026-07-12), touches `Deploy-AutoLabelPolicies.ps1` — the service-side `New-/Set-AutoSensitivityLabelPolicy` surface (Surface 2) — not label-attached `Set-Label -Conditions` (Surface 1, this ADR's scope). Unchanged from the 2026-06-01 finding. |
+
+**Verdict: zero movement since the 2026-06-01 re-verification.** The 2026-06-25 page update was non-material. Project plan §8 Q14 stays unticked — it remains a standing watch-list row by design (distinct from the already-closed §5.2 row for [#429](../../issues/429), which was ticked in the 2026-06-01 section above on its own, separate basis). `docs/adr/watch-list.yml`'s `adr-0027-q14-label-autoapply-article` entry is re-baselined to `baseline: '2026-06-25'`, `lastVerified: '2026-07-18'`.
+
 ## Consequences
 
 **Easier:**

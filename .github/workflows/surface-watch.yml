@@ -19,8 +19,25 @@ name: surface-watch
 # change signals drift. Use GitHub's issue search API to de-duplicate
 # before filing.
 #
+# Additions detection (new features on Learn, not in §3): a raw crawl of
+# the full /purview/ Learn TOC is too noisy for §3's one-row-per-feature
+# grain -- 357 leaf pages observed 2026-07-17, spanning individual
+# third-party-connector articles down to command references. Instead this
+# resolves the CURRENT Learn entry-point URL for a small, low-maintenance,
+# curated list of feature names (the workloads named in
+# .squad/memory/context.md's "Microsoft solution scope", plus Unified
+# Catalog, the governance-plane surface tracked via decisions.md Q7)
+# against the live Learn TOC (toc.json), so a Learn IA reshuffle changes
+# the RESOLVED URL, not the curated list. Any resolved URL not already
+# present in §3 is reported. See the "Discover new Learn pages" block
+# below for the resolution algorithm.
+#
 # References (Microsoft Learn, GitHub Docs):
 #   https://learn.microsoft.com/en-us/purview/
+#   https://learn.microsoft.com/en-us/purview/toc.json (fetched 2026-07-17;
+#     confirmed live machine-readable TOC for the /purview/ doc set --
+#     HTTP 200, application/json, items[].children[] tree keyed by
+#     toc_title/href)
 #   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
 #   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
 
@@ -156,7 +173,100 @@ jobs:
             
             Write-Host "::endgroup::"
           }
-          
+
+          # --- Discover NEW Learn pages not yet in §3 (curated feature-hub
+          # diff against the live Learn TOC). See the header comment
+          # "Additions detection" for why a raw full-TOC crawl is not used.
+          $curatedFeatures = @(
+            'Information protection', 'Data loss prevention', 'Insider risk management',
+            'Communication compliance', 'Audit', 'Data lifecycle & records management',
+            'Data Map', 'Data Security Posture Management', 'Unified Catalog'
+          )
+          $tocUrl = 'https://learn.microsoft.com/en-us/purview/toc.json'
+
+          function Find-TocNodeByTitle {
+            param($Nodes, [string]$Title)
+            foreach ($node in $Nodes) {
+              if ([string]$node.toc_title -eq $Title) { return $node }
+              if ($node.children) {
+                $found = Find-TocNodeByTitle -Nodes $node.children -Title $Title
+                if ($found) { return $found }
+              }
+            }
+            return $null
+          }
+
+          function Get-FeatureEntryHref {
+            # Resolve a feature TOC node to its Learn entry-point href: the
+            # node's own href if it has one, else the nearest descendant
+            # child titled like "Learn about ...", "Overview", or "What is
+            # ..." that carries a real href (depth-first, first match wins).
+            param($Node)
+            if ($Node.href -and [string]$Node.href -notmatch '^https?://' -and [string]$Node.href -ne './') {
+              return $Node.href
+            }
+            if ($Node.children) {
+              foreach ($child in $Node.children) {
+                if ($child.href -and [string]$child.toc_title -match '(?i)^(learn about|overview$|what is)') {
+                  return $child.href
+                }
+              }
+              foreach ($child in $Node.children) {
+                $found = Get-FeatureEntryHref -Node $child
+                if ($found) { return $found }
+              }
+            }
+            return $null
+          }
+
+          function ConvertTo-AbsoluteLearnUrl {
+            param([string]$Href)
+            if ($Href -match '^https?://') { return $Href }
+            if ($Href.StartsWith('/')) { return "https://learn.microsoft.com$Href" }
+            return "https://learn.microsoft.com/en-us/purview/$Href"
+          }
+
+          function Get-NormalizedUrl {
+            # Strip query/fragment and trailing slash, lower-case, so §3 and
+            # TOC-resolved URLs compare equal despite cosmetic differences.
+            param([string]$Url)
+            ($Url -replace '[?#].*$', '').TrimEnd('/').ToLowerInvariant()
+          }
+
+          $existingNormalized = [System.Collections.Generic.HashSet[string]]::new()
+          foreach ($invItem in $inventory) { [void]$existingNormalized.Add((Get-NormalizedUrl $invItem.Url)) }
+
+          Write-Host "::group::Discovering new Learn features (curated feature-hub diff)"
+          try {
+            $tocResponse = Invoke-WebRequest -Uri $tocUrl -TimeoutSec 15 -ErrorAction Stop
+            $toc = $tocResponse.Content | ConvertFrom-Json
+
+            foreach ($featureName in $curatedFeatures) {
+              $node = Find-TocNodeByTitle -Nodes $toc.items -Title $featureName
+              if (-not $node) {
+                Write-Host "::warning::Curated feature '$featureName' not found in the Learn TOC (renamed on Learn? update the curated list in surface-watch.yml)"
+                continue
+              }
+              $href = Get-FeatureEntryHref -Node $node
+              if (-not $href) {
+                Write-Host "::warning::Could not resolve a Learn entry-point URL for '$featureName'"
+                continue
+              }
+              $featureUrl = ConvertTo-AbsoluteLearnUrl -Href $href
+              if ($existingNormalized.Contains((Get-NormalizedUrl $featureUrl))) {
+                Write-Host "::notice::$featureName — already in §3"
+              } else {
+                Write-Host "::warning::New feature on Learn not in §3: $featureName ($featureUrl)"
+                $additionsReport += "- **$featureName**: Documented on Learn but not yet tracked in the §3 inventory ([link]($featureUrl))"
+                $driftDetected = $true
+              }
+            }
+          }
+          catch {
+            Write-Host "::warning::Learn TOC discovery failed: $($_.Exception.Message). Additions detection skipped this run; removals/changes detection above is unaffected."
+          }
+          Write-Host "::endgroup::"
+
           # Write drift status to output for the issue-creation step.
           if ($driftDetected) {
             Add-Content -Path $env:GITHUB_OUTPUT -Value "drift=true"

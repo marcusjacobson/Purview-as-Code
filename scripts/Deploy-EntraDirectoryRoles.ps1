@@ -39,8 +39,19 @@
          in some tenants). If the row omits `templateId:`, fall back to
          the legacy `displayName` filter against
          `/v1.0/roleManagement/directory/roleDefinitions`.
-      2. Validate every declared member as a Microsoft Entra group with
-         `securityEnabled=true` and `isAssignableToRole=true` per
+      2. Normalize `members:` to a flat objectId list per
+         [ADR 0023](../docs/adr/0023-identifier-resolution.md) Category 3
+         (issue #95): each entry is EITHER a raw Entra group object ID
+         string (legacy-but-supported, used as-is) OR a mapping
+         `{ displayName: <name> }`, resolved to an objectId via
+         `scripts/Get-EntraPrincipalIdByDisplayName.ps1`. Resolution is
+         FAIL-CLOSED: a not-found or ambiguous displayName aborts the
+         WHOLE run before any tenant write -- it never silently drops
+         the member and shrinks the desired set (which is what would let
+         `-PruneMissing` mistake "resolution failed" for "revoke
+         everything"). Then validate every resulting objectId as a
+         Microsoft Entra group with `securityEnabled=true` and
+         `isAssignableToRole=true` per
          `.github/instructions/security.instructions.md` rule #4.
       3. Read the current assignments at the requested `directoryScopeId`
          filtered by `roleDefinitionId` from
@@ -68,7 +79,12 @@
     at directory scope `/` and rewrites the `directoryRoles:` block of
     the YAML, preserving the header comments via line splicing. AU-scoped
     assignments are not exported until ADR 0002 ships AU support;
-    encountering one is a hard error.
+    encountering one is a hard error. Per ADR 0023 Category 3 (issue #95),
+    a fresh export writes the `{ displayName: <name> }` shape for every
+    member -- never a raw object ID -- so re-committing an export can
+    never re-introduce the disclosure #92 fixed. A member whose
+    displayName cannot be read back falls back to the legacy raw-OID
+    shape with a warning rather than being dropped from the export.
 
     Authentication uses the data-plane Entra app's Key Vault-resident
     certificate per ADR 0010 / ADR 0011: this script delegates to
@@ -119,6 +135,36 @@
     Allow revocation of tenant assignments that are not declared in the
     YAML. Without this switch, orphan assignments are reported as `NoOp`
     rows and skipped. Destructive; defaults to `$false`.
+
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against an empty
+        `directoryRoles:` list would classify every live in-scope
+        assignment as orphaned and revoke it.
+      * The prune must not exceed `-MaxPruneRatio` of the live in-scope
+        assignments without `-AllowMajorityPrune`. The denominator is the
+        count of live assignments on the roles/scopes the YAML declares
+        (the only population this reconciler can revoke from), accumulated
+        during Phase 1.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would revoke more than `-MaxPruneRatio` of
+    the live in-scope directory-role assignments is refused before any
+    write. Supply it when a large prune is genuinely intended (a
+    deliberate consolidation); the ratio is then reported as a warning
+    and the run proceeds. Has no effect on the empty-desired-set guard,
+    which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live in-scope directory-role assignments
+    `-PruneMissing` may revoke without `-AllowMajorityPrune`, as a
+    fraction in (0, 1]. Default 0.5. A prune exactly at the threshold
+    passes; only a strictly larger share is refused. Set to 1 to disable
+    the ratio guard for a single run.
 
 .PARAMETER Force
     Two independent meanings, one per parameter set (ADR 0052 section 6 /
@@ -226,6 +272,13 @@ param(
     [switch]$PruneMissing,
 
     [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
+
+    [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
     [switch]$Force,
 
@@ -321,6 +374,83 @@ function Test-IsScopeShape {
         return $true
     }
     return $false
+}
+
+function Test-IsRoleMemberShapeValid {
+    <#
+    .SYNOPSIS
+        Validate a single `members:` list entry against the ADR 0023
+        Category 3 dual-shape contract (issue #95): either a raw Entra
+        group object ID (GUID) string -- the legacy-but-still-supported
+        shape -- or a mapping `{ displayName: <name> }`. This is a pure
+        shape check (no Graph calls); actual displayName resolution
+        happens later, once an access token exists.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory = $true)][AllowNull()]$Value)
+    if ($Value -is [string]) {
+        return (Test-IsGuid -Value $Value)
+    }
+    if ($Value -is [hashtable] -or $Value -is [System.Collections.IDictionary]) {
+        return ($Value.Contains('displayName') -and -not [string]::IsNullOrWhiteSpace([string]$Value['displayName']))
+    }
+    return $false
+}
+
+function Resolve-DesiredRoleMemberIds {
+    <#
+    .SYNOPSIS
+        Normalize a role-assignment row's `members:` list to a flat array
+        of Entra group object IDs, per the ADR 0023 Category 3 dual-shape
+        contract (issue #95).
+
+    .DESCRIPTION
+        A plain string entry is a raw Entra group object ID (legacy-but-
+        supported; used as-is, unchanged behaviour). A mapping entry
+        `{ displayName: <name> }` is resolved to an objectId now, via the
+        caller-supplied -Resolver script block (production callers pass a
+        closure over `scripts/Get-EntraPrincipalIdByDisplayName.ps1`).
+
+        FAIL-CLOSED CONTRACT (issue #95's single most important acceptance
+        criterion): a resolution failure -- not-found, ambiguous, or a
+        transport error -- THROWS. It is never caught-and-`continue`d
+        here, because swallowing it would silently shrink the returned
+        member list, and an emptied desired set is exactly what
+        `-PruneMissing` reads as "revoke every real assignment for this
+        role". Callers MUST let this throw propagate to a run-aborting
+        `Write-Error; return` (or an uncaught terminating error) before
+        any Phase 3 write -- never downgrade it to a per-member skip.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Function returns an array of resolved objectIds; plural is the accurate return shape.')]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Members,
+        [Parameter(Mandatory = $true)][scriptblock]$Resolver
+    )
+    $result = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($m in @($Members)) {
+        if ($m -is [string]) {
+            $trimmed = $m.Trim()
+            if ($trimmed) { [void]$result.Add($trimmed) }
+            continue
+        }
+        if ($m -is [hashtable] -or $m -is [System.Collections.IDictionary]) {
+            $displayName = [string]$m['displayName']
+            if ([string]::IsNullOrWhiteSpace($displayName)) {
+                throw "Members entry is missing the required 'displayName' field."
+            }
+            $resolvedId = & $Resolver $displayName
+            if ([string]::IsNullOrWhiteSpace([string]$resolvedId)) {
+                throw ("Resolver returned an empty objectId for displayName '{0}'." -f $displayName)
+            }
+            [void]$result.Add([string]$resolvedId)
+            continue
+        }
+        throw ("Members entry '{0}' is not a valid shape. Expected a raw Entra group object ID (GUID) string or an object with 'displayName'." -f $m)
+    }
+    return , $result.ToArray()
 }
 
 function Invoke-EntraGraphRequest {
@@ -464,6 +594,34 @@ function Test-IsRoleAssignableGroup {
     return $true
 }
 
+function Get-GroupDisplayName {
+    <#
+    .SYNOPSIS
+        GET /groups/{id}?$select=id,displayName -- used only by
+        -ExportCurrentState (issue #95) to hydrate the ADR 0023 Category 3
+        displayName shape for a freshly exported member, without a second
+        round-trip: this is a separate, narrowly-scoped read from
+        Test-IsRoleAssignableGroup (which returns a bool, consumed by the
+        Apply-mode validation path and cached independently).
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][string]$PrincipalId,
+        [Parameter(Mandatory = $true)][string]$AccessToken
+    )
+    # Reference: https://learn.microsoft.com/en-us/graph/api/group-get
+    $escaped = [System.Uri]::EscapeDataString($PrincipalId)
+    $uri = ('{0}/groups/{1}?$select=id,displayName' -f $graphBase, $escaped)
+    try {
+        $group = Invoke-EntraGraphRequest -Method GET -Uri $uri -AccessToken $AccessToken
+    }
+    catch {
+        return $null
+    }
+    return [string]$group.displayName
+}
+
 function Get-AssignmentsForRoleScope {
     <#
     .SYNOPSIS
@@ -502,6 +660,13 @@ Import-Module 'powershell-yaml' -ErrorAction Stop
 # entered unattended from a local terminal.
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 #endregion
@@ -592,6 +757,24 @@ if ($desiredRoot -and $desiredRoot.ContainsKey('directoryRoles') -and $desiredRo
     $desiredEntries = @($desiredRoot.directoryRoles)
 }
 
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# With zero desired entries every live tenant directory-role assignment falls
+# out of the orphan match below, so the run would classify the entire set as
+# orphans and remove it. The rationale, the likely causes, and the 2026-07-19
+# production hit are documented in scripts/modules/PruneGuard.psm1.
+#
+# Placed in the desired-state load region so it fires before the tenant is
+# contacted at all -- before `az account show`, before any Graph token
+# acquisition, and before any write phase.
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desiredEntries.Count `
+        -ObjectTypeNoun 'directory role assignment' `
+        -SourcePath     $Path `
+        -CollectionKey  'directoryRoles'
+}
+
 if ($mode -eq 'Apply') {
     foreach ($row in $desiredEntries) {
         if (-not $row.ContainsKey('name') -or [string]::IsNullOrWhiteSpace([string]$row.name)) {
@@ -626,8 +809,8 @@ if ($mode -eq 'Apply') {
         $members = @()
         if ($row.ContainsKey('members') -and $row.members) { $members = @($row.members) }
         foreach ($m in $members) {
-            if (-not (Test-IsGuid -Value ([string]$m))) {
-                Write-Error ("Role '{0}' member '{1}' is not a valid Entra group object ID. Per role-assignments.yaml header, only role-assignable Entra group OIDs are accepted." -f $rowName, $m)
+            if (-not (Test-IsRoleMemberShapeValid -Value $m)) {
+                Write-Error ("Role '{0}' has a members entry that is neither a valid Entra group object ID (GUID) string (legacy-but-supported) nor an object shaped '{{ displayName: <name> }}' (ADR 0023 Category 3). Value: '{1}'" -f $rowName, $m)
                 return
             }
         }
@@ -770,12 +953,32 @@ try {
                 }
             }
 
+            # ADR 0023 Category 3 (issue #95): a fresh export writes the
+            # displayName shape, never a raw OID, so re-committing an
+            # export can never re-introduce the #92 disclosure. Each
+            # group already passed the role-assignable probe above; one
+            # more GET resolves its displayName for the YAML. On the rare
+            # failure to read a displayName back (e.g. a transient Graph
+            # error), fall back to the legacy-but-supported raw-OID shape
+            # with a warning rather than losing the member from the export.
+            $memberEntries = New-Object 'System.Collections.Generic.List[hashtable]'
+            foreach ($oid in ($groupOids | Sort-Object -Unique)) {
+                $groupDisplayName = Get-GroupDisplayName -PrincipalId $oid -AccessToken $accessToken
+                if ([string]::IsNullOrWhiteSpace($groupDisplayName)) {
+                    Write-Warning ("Group principal resolved as role-assignable but its displayName could not be read during export; exporting the raw object ID instead (legacy-but-supported shape). Reference: docs/adr/0023-identifier-resolution.md.")
+                    $memberEntries.Add(@{ Shape = 'oid'; Value = $oid })
+                }
+                else {
+                    $memberEntries.Add(@{ Shape = 'displayName'; Value = $groupDisplayName })
+                }
+            }
+
             $entry = @{
                 name        = $roleName
                 templateId  = $roleTemplateId
                 description = "Exported from $TenantDomain on $exportStamp."
                 scope       = '/'
-                members     = @($groupOids | Sort-Object -Unique)
+                members     = @($memberEntries)
                 otherCount  = [int]$userOrAppCount
             }
             $exportEntries.Add($entry)
@@ -818,8 +1021,14 @@ try {
                 }
                 else {
                     $newBlock.Add('    members:')
-                    foreach ($oid in $entry.members) {
-                        $newBlock.Add(("      - {0}" -f $oid))
+                    foreach ($member in $entry.members) {
+                        if ($member.Shape -eq 'displayName') {
+                            $escapedName = ([string]$member.Value).Replace('\', '\\').Replace('"', '\"')
+                            $newBlock.Add('      - displayName: "' + $escapedName + '"')
+                        }
+                        else {
+                            $newBlock.Add(("      - {0}" -f $member.Value))
+                        }
                     }
                 }
             }
@@ -872,6 +1081,15 @@ try {
         return @()
     }
 
+    # Resolve the ADR 0023 Category 3 helper (issue #95) used to turn a
+    # displayName-shape `members:` entry into an objectId. Checked once,
+    # up front, so a missing helper fails loudly before any Phase 1 read.
+    $resolvePrincipalScript = Join-Path $scriptRoot 'Get-EntraPrincipalIdByDisplayName.ps1'
+    if (-not (Test-Path -LiteralPath $resolvePrincipalScript)) {
+        Write-Error ("Helper not found: '{0}'." -f $resolvePrincipalScript)
+        return
+    }
+
     # Cache role-definition ids and group-assignability lookups so the
     # script issues each Graph read at most once per (role, principal).
     $roleDefIdCache  = @{}
@@ -879,6 +1097,18 @@ try {
 
     # ---- Phase 1: Read + categorize (no remote writes) ----
     $plan = New-Object 'System.Collections.Generic.List[object]'
+
+    # Issue #13, guard 2: live-assignment denominator accumulator. The
+    # sanity-ratio guard needs the count of live assignments this run could
+    # possibly revoke, and unlike the single-collection reconcilers this
+    # script never materializes that count in one place -- it reads
+    # assignments per (role, scope) row inside the loop below. Accumulate it
+    # here, adding each row's live-assignment count as $tenantMap is built, so
+    # the denominator is the union of live assignments on exactly the
+    # roles/scopes the YAML declares (the only population a -PruneMissing run
+    # can revoke from; assignments on undeclared roles are out of scope by
+    # design and never appear in the orphan/$revoke set).
+    $liveAssignmentCount = 0
     foreach ($row in $desiredEntries) {
         $rowName  = [string]$row.name
         $rowScope = if ($row.ContainsKey('scope') -and -not [string]::IsNullOrWhiteSpace([string]$row.scope)) {
@@ -887,9 +1117,25 @@ try {
         $rowTemplateId = if ($row.ContainsKey('templateId') -and -not [string]::IsNullOrWhiteSpace([string]$row.templateId)) {
             [string]$row.templateId
         } else { $null }
+        # Normalize `members:` to a flat objectId array (ADR 0023 Category 3,
+        # issue #95): a raw OID string is used as-is; a `{ displayName: }`
+        # entry is resolved now via Get-EntraPrincipalIdByDisplayName.ps1,
+        # which itself fails closed on not-found/ambiguous. A resolution
+        # failure here aborts the WHOLE run (return, before Phase 3 ever
+        # starts) -- it never degrades into an empty $desiredMembers that
+        # -PruneMissing would read as "revoke everything for this role".
         $desiredMembers = @()
         if ($row.ContainsKey('members') -and $row.members) {
-            $desiredMembers = @($row.members | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+            try {
+                $desiredMembers = Resolve-DesiredRoleMemberIds -Members @($row.members) -Resolver {
+                    param($displayName)
+                    & $resolvePrincipalScript -DisplayName $displayName -Kind 'Group'
+                }
+            }
+            catch {
+                Write-Error ("Failed to resolve declared member(s) for role '{0}': {1}" -f $rowName, $_.Exception.Message)
+                return
+            }
         }
 
         # Resolve role-definition id (cached). Cache key includes the
@@ -955,6 +1201,12 @@ try {
                 $tenantMap[$principalOid] = [string]$a.id
             }
         }
+
+        # Issue #13, guard 2: accumulate this row's live-assignment count into
+        # the denominator. Counted here rather than as `$currentAssigns.Count`
+        # so it matches $tenantMap -- the deduplicated principal set the
+        # $toRevoke computation below actually draws orphans from.
+        $liveAssignmentCount += $tenantMap.Count
 
         $desiredSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($oid in $validatedMembers) { [void]$desiredSet.Add($oid) }
@@ -1074,6 +1326,30 @@ try {
     $revokes = @(foreach ($p in $plan) {
             foreach ($oid in $p.ToRevoke) { ("{0} @ {1}" -f $p.RowName, $p.RowScope) }
         })
+
+    # ---- Issue #13, guard 2: prune sanity ratio ----
+    # Guard 1 (desired-state load region) catches only the total wipe. This
+    # catches the near-total one: a role-assignments.yaml that lost most of its
+    # members to a bad merge, or a -Path pointing at a smaller environment's
+    # file, both of which leave a non-zero desired count and so clear guard 1.
+    #
+    # Keyed on $revokes -- the flattened set the Phase 3 revoke loop iterates --
+    # over $liveAssignmentCount, the Phase 1 accumulator (live assignments on
+    # the declared roles/scopes). Fires before the ADR 0052 gate and before
+    # Phase 3: the last point at which nothing has been written. This script is
+    # Class B with no -DirectionPolicy, so there is no audit mode to gate on;
+    # the Apply-mode -WhatIf short-circuit returns before Phase 1, so the guard
+    # is unreached under -WhatIf (same as the ADR 0052 gate below).
+    # Reference: scripts/modules/PruneGuard.psm1
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     $revokes.Count `
+            -LiveCount      $liveAssignmentCount `
+            -ObjectTypeNoun 'directory role assignment' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
+    }
+
     if ($PruneMissing.IsPresent -and $revokes.Count -gt 0) {
         $revokeSummary = @($revokes | Group-Object | Sort-Object Name |
                 ForEach-Object { '{0} ({1} assignment(s))' -f $_.Name, $_.Count })
@@ -1085,6 +1361,19 @@ try {
     }
 
     # ---- Phase 3: Write, over the SAME plan Phase 1 built ----
+    $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+    # Issue #13: in-loop revoke failures are reported via Write-PruneFailure
+    # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+    # '::error::' workflow command rather than Write-Error. The revoke catch
+    # previously did Write-Error + return, which under shell: pwsh's
+    # $ErrorActionPreference='stop' terminated the run on the first failed
+    # revoke so the rest were never attempted. The aggregate `throw` after the
+    # Phase 3 loop -- inside the enclosing try, so the finally still scrubs the
+    # access token -- is the terminal outcome, so a failed prune still exits
+    # non-zero. Principal object IDs are never named (the '<oid>' redaction the
+    # drift report and prompt already use): the reporter names role @ scope
+    # plus the tenant's own error text only.
     foreach ($entry in $plan) {
         $rowName   = $entry.RowName
         $rowScope  = $entry.RowScope
@@ -1159,11 +1448,18 @@ try {
                         Write-Information ("Role '{0}' did not have the assignment at '{1}'; treating as no-op." -f $rowName, $rowScope) -InformationAction Continue
                         continue
                     }
-                    Write-Error ("DELETE roleAssignments failed for role '{0}' at scope '{1}': {2}" -f $rowName, $rowScope, $_.Exception.Message)
-                    return
+                    $reportRow.Category = 'Failed'
+                    $reportRow.Reason   = ('Revoke failed: {0}' -f $_.Exception.Message)
+                    Write-PruneFailure ("DELETE roleAssignments for role '{0}' at scope '{1}' failed: {2}" -f $rowName, $rowScope, $_.Exception.Message)
+                    $pruneFailures.Add(("{0} @ {1}" -f $rowName, $rowScope))
+                    continue
                 }
             }
         }
+    }
+
+    if ($pruneFailures.Count -gt 0) {
+        throw ("Reconciliation aborted: {0} directory-role assignment revoke(s) failed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
     }
 
     #endregion

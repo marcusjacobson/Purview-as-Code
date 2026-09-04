@@ -503,3 +503,272 @@ Describe 'Get-AdaptiveScopeSplat (splat hashtable for New-/Set-AdaptiveScope)' {
         { Get-AdaptiveScopeSplat -Desired $d -Operation 'Create' } | Should -Throw
     }
 }
+
+Describe 'Prune guard 2 and failure reporter wiring (issue #13, part C)' {
+
+    # Source-text and ordering assertions that the two issue #13 part-C
+    # mirrors were wired into this reconciler the same way Deploy-Labels.ps1
+    # wires them: the sanity-ratio guard after the audit short-circuit and
+    # before the ADR 0052 gate, and the collect-then-throw reporter in the
+    # prune loop. The BEHAVIOUR of both is proven by executing the lifted
+    # regions in the two Describes below; these assertions pin the placement
+    # that the execution tests cannot see.
+    #
+    # Reference: issue #13
+    # Reference: scripts/modules/PruneGuard.psm1
+
+    BeforeAll {
+        $script:AsSource = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:AsSource | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+
+    It 'still calls guard 1 (empty-desired-set) -- part B is not regressed' {
+        $script:AsSource | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+
+    It 'calls the sanity-ratio guard with the adaptive-scope noun' {
+        $script:AsSource | Should -Match 'Assert-PruneRatioWithinThreshold'
+        $script:AsSource | Should -Match ([regex]::Escape("-ObjectTypeNoun 'adaptive scope'"))
+    }
+
+    It 'passes the orphan count and the live tenant count to guard 2' {
+        $script:AsSource | Should -Match ([regex]::Escape('-PruneCount     $orphanScopes.Count'))
+        $script:AsSource | Should -Match ([regex]::Escape('-LiveCount      @($tenantScopes).Count'))
+    }
+
+    It 'surfaces the ratio override and threshold as Apply-set parameters' {
+        $script:AsSource | Should -Match '\[switch\]\$AllowMajorityPrune'
+        $script:AsSource | Should -Match '\[double\]\$MaxPruneRatio\s*=\s*0\.5'
+    }
+
+    It 'places guard 2 after the audit short-circuit and before the ADR 0052 gate' {
+        # Guard 2 must sit AFTER the audit short-circuit that empties
+        # $orphanScopes (so audit runs cannot trip it) and BEFORE the ADR 0052
+        # gate that CI suppresses with -Confirm:$false (so it refuses before
+        # any write).
+        $auditIdx = $script:AsSource.IndexOf('$orphanScopes.Clear()')
+        $ratioIdx = $script:AsSource.IndexOf('Assert-PruneRatioWithinThreshold')
+        $gateIdx  = $script:AsSource.IndexOf('Assert-DestructiveOperationConfirmed @gateArgs')
+        $auditIdx | Should -BeGreaterThan 0
+        $ratioIdx | Should -BeGreaterThan 0
+        $gateIdx  | Should -BeGreaterThan 0
+        $auditIdx | Should -BeLessThan $ratioIdx
+        $ratioIdx | Should -BeLessThan $gateIdx
+    }
+}
+
+Describe 'Prune sanity-ratio guard executed through the script wiring (issue #13, part C)' {
+
+    # WHY THE GUARD-2 REGION IS EXTRACTED AND EXECUTED
+    # ------------------------------------------------
+    # The module's boundary behaviour is pinned directly in
+    # PruneGuard.Tests.ps1. What THIS reconciler must additionally prove is
+    # that the wiring feeds the guard the right numerator (orphan count) and
+    # denominator (live tenant count) so the threshold means what the operator
+    # thinks it means. The `if ($PruneMissing.IsPresent)` region that calls the
+    # guard is lifted from the source by brace matching and executed against
+    # the REAL module, so a mis-wired argument surfaces here.
+    #
+    # Reference: issue #13
+    # Reference: scripts/modules/PruneGuard.psm1
+
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'PruneGuard.psm1') -Force -ErrorAction Stop
+
+        $lines = @(Get-Content -LiteralPath $script:ScriptPath)
+
+        # Both the guard-2 block and the reporter block open with a bare
+        # `if ($PruneMissing.IsPresent) {` line, so select the region by the
+        # marker it must contain.
+        function Get-PruneRegion {
+            param([string[]]$SourceLines, [string]$MustContain)
+            $start = 0
+            while ($start -lt $SourceLines.Count) {
+                if ($SourceLines[$start] -match '^\s*if \(\$PruneMissing\.IsPresent\) \{\s*$') {
+                    $depth = 0; $end = -1
+                    for ($i = $start; $i -lt $SourceLines.Count; $i++) {
+                        $depth += ([regex]::Matches($SourceLines[$i], '\{')).Count
+                        $depth -= ([regex]::Matches($SourceLines[$i], '\}')).Count
+                        if ($depth -le 0) { $end = $i; break }
+                    }
+                    if ($end -lt 0) { throw 'Unbalanced braces while extracting a -PruneMissing region.' }
+                    $region = ($SourceLines[$start..$end] -join [Environment]::NewLine)
+                    if ($region -match [regex]::Escape($MustContain)) { return $region }
+                    $start = $end + 1
+                }
+                else { $start++ }
+            }
+            throw "Could not locate a -PruneMissing region containing '$MustContain' in Deploy-AdaptiveScopes.ps1; update the anchor in this test."
+        }
+
+        $script:Guard2Region = Get-PruneRegion -SourceLines $lines -MustContain 'Assert-PruneRatioWithinThreshold'
+
+        # Runs the extracted guard-2 region against the real module. -Prune is
+        # the orphan count, -Live the tenant count; a -Prune of 0 models the
+        # post-audit state (audit empties $orphanScopes upstream of the guard).
+        function Invoke-Guard2 {
+            param([int]$Prune, [int]$Live, [double]$Max = 0.5, [switch]$Allow)
+            $PruneMissing       = [switch]$true
+            $orphanScopes       = @(for ($i = 0; $i -lt $Prune; $i++) { [pscustomobject]@{ Name = "orphan-$i" } })
+            $tenantScopes       = @(for ($i = 0; $i -lt $Live;  $i++) { [pscustomobject]@{ Name = "live-$i" } })
+            $MaxPruneRatio      = $Max
+            $AllowMajorityPrune = [switch]$Allow
+            # Read by the extracted region through dynamic scoping.
+            $null = $PruneMissing, $orphanScopes, $tenantScopes, $MaxPruneRatio, $AllowMajorityPrune
+            & ([scriptblock]::Create($script:Guard2Region)) 3>$null
+        }
+    }
+
+    It 'passes below the threshold (2 of 10 live)' {
+        { Invoke-Guard2 -Prune 2 -Live 10 } | Should -Not -Throw
+    }
+
+    It 'passes exactly at the threshold (5 of 10 live)' {
+        { Invoke-Guard2 -Prune 5 -Live 10 } | Should -Not -Throw
+    }
+
+    It 'throws above the threshold (6 of 10 live)' {
+        { Invoke-Guard2 -Prune 6 -Live 10 } | Should -Throw
+    }
+
+    It 'permits an over-threshold prune when -AllowMajorityPrune is supplied' {
+        { Invoke-Guard2 -Prune 10 -Live 10 -Allow } | Should -Not -Throw
+    }
+
+    It 'is a no-op under audit mode (orphan list emptied upstream, 0 of 10)' {
+        { Invoke-Guard2 -Prune 0 -Live 10 } | Should -Not -Throw
+    }
+}
+
+Describe 'Prune failure reporting executed through the script wiring (issue #13, part C)' {
+
+    # WHY THE PRUNE REGION IS EXTRACTED AND EXECUTED
+    # ----------------------------------------------
+    # The properties under test are behavioural -- "the loop CONTINUES past a
+    # failure" and "the aggregate throw fires" -- and source-text assertions
+    # cannot distinguish a `continue` that is reached from one that is dead
+    # code after an early `return`. The script body cannot be dot-sourced (it
+    # loads ExchangeOnlineManagement at import time and would connect to a real
+    # tenant), so the `if ($PruneMissing.IsPresent)` reporter region is lifted
+    # by brace matching and executed against stubbed cmdlets. Lifting the REAL
+    # source rather than a transcription is the point: a transcription would
+    # keep passing after the script regressed to the pre-fix
+    # `Write-Error ... return`.
+    #
+    # Reference: issue #13
+    # Reference: scripts/modules/PruneGuard.psm1
+
+    BeforeAll {
+        $script:ReporterLines = @(Get-Content -LiteralPath $script:ScriptPath)
+
+        $start = -1
+        for ($i = 0; $i -lt $script:ReporterLines.Count; $i++) {
+            $depth = 0; $end = -1
+            if ($script:ReporterLines[$i] -match '^\s*if \(\$PruneMissing\.IsPresent\) \{\s*$') {
+                for ($j = $i; $j -lt $script:ReporterLines.Count; $j++) {
+                    $depth += ([regex]::Matches($script:ReporterLines[$j], '\{')).Count
+                    $depth -= ([regex]::Matches($script:ReporterLines[$j], '\}')).Count
+                    if ($depth -le 0) { $end = $j; break }
+                }
+                if ($end -lt 0) { throw 'Unbalanced braces while extracting a -PruneMissing region.' }
+                $candidate = ($script:ReporterLines[$i..$end] -join [Environment]::NewLine)
+                if ($candidate -match 'Write-PruneFailure') { $start = $i; $script:ReporterEnd = $end; break }
+            }
+        }
+        if ($start -lt 0) {
+            throw 'Could not locate the reporter -PruneMissing region in Deploy-AdaptiveScopes.ps1; update the anchor in this test.'
+        }
+        $script:ReporterRegionSource = ($script:ReporterLines[$start..$script:ReporterEnd] -join [Environment]::NewLine)
+
+        # $PSCmdlet is a typed automatic and cannot be stubbed, so the ONLY edit
+        # to the lifted source is redirecting the ShouldProcess call at an
+        # assignable stub. The count is asserted below so a restructure that
+        # drops the gate cannot make the substitution silently vacuous.
+        $script:ReporterShouldProcessCount =
+            ([regex]::Matches($script:ReporterRegionSource, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:ReporterRunnable = $script:ReporterRegionSource -replace
+            '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        function Invoke-PruneRegion {
+            param([string[]]$Names = @(), [string[]]$Fail = @())
+
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+
+            # Stub shadows the real cmdlet for the extracted region's scope,
+            # mimicking a tenant delete-blocker for the named orphans.
+            function Remove-AdaptiveScope {
+                [CmdletBinding(SupportsShouldProcess)] param([string]$Identity)
+                $attempted.Add($Identity)
+                if ($Fail -contains $Identity) { throw "TenantBlockerException: $Identity" }
+            }
+            # Stands in for the module reporter so the test can assert each
+            # individual failure was surfaced with its tenant text.
+            function Write-PruneFailure {
+                param([Parameter(Position = 0)][string]$Message)
+                $reported.Add($Message)
+            }
+
+            $PruneMissing = [switch]$true
+            $orphanScopes = @($Names | ForEach-Object { [pscustomobject]@{ Name = $_ } })
+
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+
+            # Read by the extracted region through dynamic scoping.
+            $null = $PruneMissing, $orphanScopes, $ShouldProcessStub
+
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null }
+            catch { $thrown = $_.Exception.Message }
+
+            [pscustomobject]@{
+                Attempted = $attempted.ToArray()
+                Reported  = $reported.ToArray()
+                Thrown    = $thrown
+            }
+        }
+    }
+
+    It 'attempts every remaining orphan after one fails (loop no longer aborts)' {
+        # The regression that motivated part C: the pre-fix `Write-Error ... return`
+        # abandoned every orphan after the first failure.
+        $r = Invoke-PruneRegion -Names @('a', 'b', 'c') -Fail @('a')
+        $r.Attempted | Should -Be @('a', 'b', 'c')
+    }
+
+    It 'reports each individual failure with the tenant error message' {
+        $r = Invoke-PruneRegion -Names @('a', 'b') -Fail @('a', 'b')
+        $r.Reported.Count | Should -Be 2
+        ($r.Reported -join '; ') | Should -Match 'TenantBlockerException: a'
+        ($r.Reported -join '; ') | Should -Match 'TenantBlockerException: b'
+    }
+
+    It 'throws one aggregate naming every failure, so the run exits non-zero' {
+        $r = Invoke-PruneRegion -Names @('a', 'b', 'c') -Fail @('b', 'c')
+        $r.Thrown | Should -Not -BeNullOrEmpty
+        $r.Thrown | Should -Match 'Reconciliation aborted'
+        $r.Thrown | Should -Match 'b'
+        $r.Thrown | Should -Match 'c'
+    }
+
+    It 'throws nothing when every prune succeeds' {
+        $r = Invoke-PruneRegion -Names @('a', 'b')
+        $r.Thrown   | Should -BeNullOrEmpty
+        $r.Reported | Should -BeNullOrEmpty
+    }
+
+    It 'keeps the prune loop behind its ShouldProcess gate' {
+        # Also proves the ShouldProcess substitution above is not vacuous.
+        $script:ReporterShouldProcessCount | Should -Be 1
+    }
+
+    It 'no longer carries a bare return or a Write-Error in the prune loop (mutation check)' {
+        # Pins the fix against a regression to the pre-part-C shape.
+        $script:ReporterRegionSource | Should -Not -Match '(?m)^\s*return\s*$'
+        $script:ReporterRegionSource | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}

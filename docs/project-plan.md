@@ -54,10 +54,28 @@ and any features explicitly excluded (record those in §7).
 
 List the Microsoft Purview solution surface you intend to govern as code. One row per feature.
 
-| Feature | Data-plane folder | Reconciler | Notes |
-|---|---|---|---|
-| _e.g._ Sensitivity labels | `data-plane/information-protection/` | `scripts/Deploy-Labels.ps1` | |
-| | | | |
+> [!IMPORTANT]
+> **Keep these five columns exactly as shown.**
+> [`surface-watch.yml`](../.github/workflows/surface-watch.yml) parses this table — it reads the
+> *Microsoft Learn entry point* cell of every row, weekly, to catch a Purview surface Microsoft
+> documents that you are not yet tracking, plus retirements (404) and renames. A table with
+> different columns yields **zero** parsed URLs, and the loop then reports every Purview surface
+> as missing, on every run.
+>
+> Two rules make a row work:
+>
+> 1. The *Microsoft Learn entry point* cell must be a Markdown link, `[text](url)`.
+> 2. The link **text** must be that page's current `<title>`, verbatim — it is compared
+>    literally, not cosmetically. Where Learn serves an HTML entity in the title (for example
+>    `&amp;`), keep the entity: it matches the watcher *and* renders correctly.
+>
+> The example row below deliberately carries no link, so the watcher skips it until you replace
+> it with a real one.
+
+| Feature | Microsoft Learn entry point | Desired-state YAML | Reconciler | v1 origin |
+|---|---|---|---|---|
+| _e.g._ Sensitivity labels | _(a Learn link whose text is the page's exact title)_ | `data-plane/information-protection/labels.yaml` | `scripts/Deploy-Labels.ps1` | |
+| | | | | |
 
 ## 4. Per-feature lifecycle
 

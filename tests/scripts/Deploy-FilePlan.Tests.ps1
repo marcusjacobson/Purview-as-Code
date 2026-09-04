@@ -857,3 +857,161 @@ Describe 'Apply-loop invariants -- Records' {
         $skipArms.Count | Should -BeGreaterOrEqual 2
     }
 }
+
+# ---------------------------------------------------------------------------
+# Issue #13, part C batch 4: failure reporter ONLY. The ratio guard (guard 2)
+# is deliberately NOT wired here -- a file-plan teardown legitimately prunes a
+# majority of the property buckets (owner decision) -- and its absence is
+# pinned below. The prune catches previously added a 'Failed' report row and
+# moved on -- a failed prune exited 0. The reporter region is lifted from the
+# REAL script source and executed against stubs.
+# ---------------------------------------------------------------------------
+Describe 'Prune failure reporter wiring -- reporter only, guard 2 pinned absent (issue #13, batch 4)' {
+
+    BeforeAll {
+        $script:B4Source = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:B4Source | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+    It 'still calls guard 1 (empty-desired-set) -- earlier rollout not regressed' {
+        $script:B4Source | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+    It 'calls the failure reporter in the prune catches' {
+        $script:B4Source | Should -Match 'Write-PruneFailure'
+        $script:B4Source | Should -Match '\$pruneFailures'
+    }
+    It 'does NOT wire guard 2 (owner decision: file-plan teardown legitimately prunes a majority)' {
+        $script:B4Source | Should -Not -Match 'Assert-PruneRatioWithinThreshold'
+    }
+    It 'does NOT acquire -AllowMajorityPrune / -MaxPruneRatio (no guard 2, no override surface)' {
+        $cmd = Get-Command -Name $script:ScriptPath -CommandType ExternalScript
+        $cmd.Parameters.Keys | Should -Not -Contain 'AllowMajorityPrune'
+        $cmd.Parameters.Keys | Should -Not -Contain 'MaxPruneRatio'
+    }
+}
+
+Describe 'Prune failure reporting executed through the script wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        $script:RepLines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $s = -1
+        for ($i = 0; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*\$pruneFailures = New-Object') { $s = $i; break }
+        }
+        if ($s -lt 0) { throw 'Could not locate the $pruneFailures declaration in Deploy-FilePlan.ps1; update the anchor in this test.' }
+        $ifStart = -1
+        for ($i = $s; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*if \(\$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
+        }
+        if ($ifStart -lt 0) { throw 'Could not locate the aggregate-throw block in Deploy-FilePlan.ps1; update the anchor in this test.' }
+        $depth = 0; $e = -1
+        for ($j = $ifStart; $j -lt $script:RepLines.Count; $j++) {
+            $depth += ([regex]::Matches($script:RepLines[$j], '\{')).Count
+            $depth -= ([regex]::Matches($script:RepLines[$j], '\}')).Count
+            if ($depth -le 0) { $e = $j; break }
+        }
+        $script:ReporterRegion = ($script:RepLines[$s..$e] -join [Environment]::NewLine)
+        $script:ReporterShouldProcessCount = ([regex]::Matches($script:ReporterRegion, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:ReporterRunnable = $script:ReporterRegion -replace '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        function Invoke-PruneRegion {
+            param([string[]]$LabelNames = @(), [string[]]$Fail = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            function Remove-ComplianceTag {
+                [CmdletBinding(SupportsShouldProcess)]
+                param([string]$Identity)
+                $attempted.Add($Identity)
+                if ($Fail -contains $Identity) { throw "TenantBlockerException: $Identity" }
+            }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            $PruneMissing = [switch]$true
+            $report = New-Object 'System.Collections.Generic.List[object]'
+            $labelPlan = @($LabelNames | ForEach-Object { [pscustomobject]@{ Name = $_; Action = 'Orphan'; Reason = 'test' } })
+            $propertyPlan = @()
+            $script:PropertyKinds = @()
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+            $null = $PruneMissing, $report, $labelPlan, $propertyPlan, $ShouldProcessStub
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = $attempted.ToArray(); Reported = $reported.ToArray(); Thrown = $thrown }
+        }
+    }
+
+    It 'attempts every orphan label after a failure (no first-failure abort)' {
+        $r = Invoke-PruneRegion -LabelNames @('l1', 'l2', 'l3') -Fail @('l1')
+        $r.Attempted | Should -Be @('l1', 'l2', 'l3')
+    }
+    It 'reports each failure with the tenant''s own error text' {
+        $r = Invoke-PruneRegion -LabelNames @('l1', 'l2') -Fail @('l2')
+        $r.Reported.Count | Should -Be 1
+        $r.Reported[0] | Should -Match 'TenantBlockerException: l2'
+    }
+    It 'throws one aggregate naming every failure (exit-0 defect fixed)' {
+        $r = Invoke-PruneRegion -LabelNames @('l1', 'l2', 'l3') -Fail @('l1', 'l3')
+        $r.Thrown | Should -Match "label 'l1'"
+        $r.Thrown | Should -Match "label 'l3'"
+        $r.Thrown | Should -Match '2 orphan file plan object'
+    }
+    It 'throws nothing when every prune succeeds' {
+        $r = Invoke-PruneRegion -LabelNames @('l1', 'l2')
+        $r.Thrown   | Should -BeNullOrEmpty
+        $r.Reported | Should -BeNullOrEmpty
+    }
+    It 'keeps the deletes behind a ShouldProcess gate (substitution non-vacuous)' {
+        $script:ReporterShouldProcessCount | Should -BeGreaterThan 0
+    }
+    It 'carries the reporter and the aggregate throw in the lifted region (mutation check vs pre-batch exit-0)' {
+        $script:ReporterRegion | Should -Match 'Write-PruneFailure'
+        $script:ReporterRegion | Should -Match 'throw'
+        $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}
+
+Describe 'Desired-state schema-validation serialization depth is not truncated (#90)' {
+
+    BeforeAll {
+        $script:ScriptPathForDepth = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-FilePlan.ps1'
+
+        # A synthetic document unrelated to this reconciler's actual schema -- the
+        # #90 fix is schema-independent, so this only needs to nest deep enough
+        # (12+ levels) to prove -Depth 100 does not truncate while -Depth 10 does.
+        $script:DeepDoc = @{
+            l1 = @{ l2 = @{ l3 = @{ l4 = @{ l5 = @{ l6 = @{ l7 = @{ l8 = @{
+                l9 = @{ l10 = @{ l11 = @{ l12 = @{ l13 = @{ l14 = 'leaf' } } } } }
+            } } } } } } } }
+        }
+    }
+
+    It 'reads the serialization depth from the script itself and confirms it is pinned to 100' {
+        # A test that hard-codes its own depth cannot catch this defect -- exactly
+        # how the #80 sibling escaped every offline schema test before it (each
+        # test serialized at a depth of its own choosing rather than the script's).
+        $src = Get-Content -LiteralPath $script:ScriptPathForDepth -Raw
+        $m = [regex]::Match($src, '\$docJson\s*=\s*\$desiredRoot\s*\|\s*ConvertTo-Json\s+-Depth\s+(?<d>\d+)')
+        $m.Success | Should -BeTrue -Because 'the desired-state validation site must stay greppable for this regression test'
+        [int]$m.Groups['d'].Value | Should -Be 100
+    }
+
+    It 'serializes a deeply nested document WITHOUT truncating at the pinned depth' {
+        # ConvertTo-Json warns and rewrites deeper nodes as strings when it hits the
+        # depth cap; the truncated document then fails schema validation with an
+        # error pointing at an unrelated shallow field (the #80 failure mode).
+        $src = Get-Content -LiteralPath $script:ScriptPathForDepth -Raw
+        $depth = [int][regex]::Match($src, '\$docJson\s*=\s*\$desiredRoot\s*\|\s*ConvertTo-Json\s+-Depth\s+(?<d>\d+)').Groups['d'].Value
+
+        $warnings = @()
+        $null = $script:DeepDoc | ConvertTo-Json -Depth $depth -WarningVariable warnings -WarningAction SilentlyContinue
+        $warnings | Should -BeNullOrEmpty -Because 'a truncation warning means the validation site would reject a valid deep document'
+    }
+
+    It 'demonstrates the defect: the same document at the old -Depth 10 does NOT survive' {
+        # Mutation check -- proves the two assertions above are non-vacuous.
+        $warnings = @()
+        $null = $script:DeepDoc | ConvertTo-Json -Depth 10 -WarningVariable warnings -WarningAction SilentlyContinue
+        $warnings | Should -Not -BeNullOrEmpty
+    }
+}

@@ -60,7 +60,29 @@ name: sync-auto-label-policies-from-tenant
 #   https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
 #   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
 #   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+#   https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability
 #   https://github.com/peter-evans/create-pull-request
+#
+# Skip gate (ADR 0054): this schedule-triggered workflow fires on every
+# un-onboarded template copy, including this repository itself, and
+# unconditionally assumed a real Purview tenant was wired up. The
+# `preflight` job below tests the onboarding signal (a non-empty
+# secrets.AZURE_CLIENT_ID and vars.KEY_VAULT_NAME on the selected
+# GitHub Environment) from inside a running job -- `secrets` is not
+# available in ANY `if:` condition, only in env/run/with -- and emits a
+# `configured` output. The `sync` job below declares `needs: preflight`
+# and `if: needs.preflight.outputs.configured == 'true'` (`needs` IS
+# available in a job-level `if:`), so an un-onboarded copy SKIPS this
+# job cleanly instead of failing at azure/login. This also folds in the
+# KEY_VAULT_NAME throw guard that previously lived in the "Temporarily
+# allow Key Vault public access" step.
+#
+# ADR 0060: the same preflight step additionally skips a *scheduled* run
+# (not a manual workflow_dispatch) when vars.CI_DATA_PLANE_ENABLED is
+# 'false' on the selected Environment -- the owner's switch to silence a
+# governance-locked tenant's daily failing cron instead of leaving it red
+# and unexplained. Absent or any other value keeps the current
+# attempt-and-fail-if-blocked behavior.
 
 on:
   schedule:
@@ -95,8 +117,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Preflight (ADR 0054 onboarding signal)
+    runs-on: ubuntu-latest
+    # Binds the SAME selected environment as sync below (ADR 0057
+    # canonical expression, byte-identical), so the secret and variable
+    # it tests are the exact ones sync would use.
+    environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+    permissions:
+      contents: read
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    env:
+      # secrets/vars are legal in jobs.<job_id>.env (not in jobs.<job_id>.if
+      # or jobs.<job_id>.steps.if) -- see ADR 0054.
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      KEY_VAULT_NAME: ${{ vars.KEY_VAULT_NAME }}
+      # ADR 0060: lets a governance-locked tenant's owner silence this
+      # workflow's daily scheduled failure instead of it going
+      # unexplained-red forever. Only applies to the schedule trigger -- a
+      # manual workflow_dispatch run still attempts the tenant call even
+      # when this is 'false', so the owner can test after a policy
+      # exemption is granted.
+      CI_DATA_PLANE_ENABLED: ${{ vars.CI_DATA_PLANE_ENABLED }}
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - name: Check onboarding signal
+        id: check
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
+            Write-Host "::notice::secrets.AZURE_CLIENT_ID is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+          } elseif ([string]::IsNullOrEmpty($env:KEY_VAULT_NAME)) {
+            Write-Host "::notice::vars.KEY_VAULT_NAME is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+          } elseif ($env:EVENT_NAME -eq 'schedule' -and $env:CI_DATA_PLANE_ENABLED -eq 'false') {
+            Write-Host "::notice::vars.CI_DATA_PLANE_ENABLED is 'false' on this GitHub Environment (ADR 0060) -- skipping this scheduled tenant-touching run. Trigger workflow_dispatch manually to run anyway."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=true"
+          }
+
   sync:
     name: Sync auto-label policies from tenant
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
     env:
@@ -131,9 +197,9 @@ jobs:
         id: kv-open
         shell: pwsh
         run: |
-          if (-not $env:KEY_VAULT_NAME) {
-            throw "vars.KEY_VAULT_NAME is not set on the '$($env:ENVIRONMENT_NAME)' GitHub Environment. Set it before re-running."
-          }
+          # KEY_VAULT_NAME is guaranteed non-empty here: the preflight job
+          # (ADR 0054) already checked it and this job would have been
+          # skipped, not started, if it were absent.
           az keyvault update `
             --name $env:KEY_VAULT_NAME `
             --public-network-access Enabled `
@@ -180,23 +246,18 @@ jobs:
           # changes are blank lines and comment-only lines. Tracked-field
           # changes (any other line) flow through unchanged and
           # peter-evans/create-pull-request opens the PR as before.
-          # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_regular_expressions
+          # Shared across every sync-<domain>-from-tenant.yml workflow via
+          # scripts/modules/ExportDiffFilter.psm1
+          # (tests/scripts/ExportDiffFilter.Tests.ps1 pins the filter
+          # steps identical modulo $path).
           $path = 'data-plane/information-protection/auto-label-policies.yaml'
           $diff = git diff -U0 -- $path
           if (-not $diff) {
             Write-Host '::notice::No diff after export.'
             return
           }
-          $meaningful = $false
-          foreach ($line in ($diff -split "`n")) {
-            if ($line -notmatch '^[-+]') { continue }
-            if ($line -match '^(---|\+\+\+)') { continue }
-            $payload = $line.Substring(1)
-            if ($payload -match '^\s*$') { continue }
-            if ($payload -match '^\s*#') { continue }
-            $meaningful = $true
-            break
-          }
+          Import-Module ./scripts/modules/ExportDiffFilter.psm1 -Force -ErrorAction Stop
+          $meaningful = Test-ExportDiffMeaningful -DiffText $diff
           if (-not $meaningful) {
             Write-Host '::notice::Diff is cosmetic-only (blank lines + YAML comments). Reverting export and skipping drift-back PR per issue #508.'
             git checkout HEAD -- $path

@@ -95,3 +95,16 @@ This finding mirrors — and partly cascades from — [ADR 0019](0019-cc-graph-p
 - **[Microsoft Graph security API overview](https://learn.microsoft.com/en-us/graph/api/resources/security-api-overview)**
   Fetch date: 2026-05-17 (originally cited 2026-05-16 in [ADR 0019](0019-cc-graph-pivot.md))
   Cited to confirm no DSPM-for-AI resource is documented in the Graph `security` namespace.
+
+## 2026-07-18 re-verification
+
+Watch-list issue [#3](../../issues/3) flagged this entry: the tracked page's `updated_at` advanced from the recorded baseline (`2026-05-01`) to `2026-06-25`. Re-verified all four §Decision item 5 re-open triggers against fresh evidence on 2026-07-18.
+
+| # | Trigger (from §Decision item 5) | Status | Evidence (2026-07-18) |
+|---|---|---|---|
+| 1 | A `dspmForAi`, `aiInteraction`, `copilotPolicy`, or similarly-named resource lands under `https://learn.microsoft.com/en-us/graph/api/resources/` (beta or v1.0). | **Cold.** | [Microsoft Graph security API overview](https://learn.microsoft.com/en-us/graph/api/resources/security-api-overview) (fetch 2026-07-18, updated_at 2026-05-11) — same page re-fetched for the sibling ADR 0019 re-verification; no such resource anywhere on the page. |
+| 2 | [DSPM for AI](https://learn.microsoft.com/en-us/purview/dspm-for-ai) or [Considerations for deploying Microsoft Purview AI controls](https://learn.microsoft.com/en-us/purview/ai-microsoft-purview-considerations) gains a programmatic-authoring section. | **Cold.** | The tracked page, [DSPM for AI](https://learn.microsoft.com/en-us/purview/dspm-for-ai) (fetch 2026-07-18, updated_at 2026-06-25, word_count 3130), remains portal-workflow instructions top to bottom ("Sign in to the Microsoft Purview portal", "Select...", one-click policies) with zero PowerShell / Graph / REST / API mentions for policy creation. The page now carries a banner noting this "classic" version is being superseded by a newer DSPM product — a product-naming / UX evolution, not a programmatic-authoring capability change; does not touch this trigger. |
+| 3 | A Microsoft-published reference repo ships a DSPM-for-AI authoring sample. | **Not independently re-searched this pass.** | Consistent with finding 2 above (the page remains entirely portal-driven). |
+| 4 | Cascade from [ADR 0019](0019-cc-graph-pivot.md) reverses (Communication Compliance gains an authoring surface). | **Cold.** | Per ADR 0019's 2026-07-18 re-verification (same pass, same issue [#3](../../issues/3)): all four of that ADR's triggers remain cold — if anything, CC's non-programmatic status got more explicit, not less. |
+
+**Verdict: zero of the four triggers fired.** The 2026-06-25 update to the tracked page reflects the "classic version superseded" banner, not a new programmatic-authoring surface. Standing decision unchanged: no `Deploy-DSPMforAI.ps1` reconciler; [`scripts/Test-DSPMforAIPosture.ps1`](../../scripts/Test-DSPMforAIPosture.ps1) remains the read-only posture verifier. Project plan §8 Q11 stays unticked — it is a standing watch-list row by design, not a one-time resolvable item, per §Decision item 4 above. `docs/adr/watch-list.yml`'s `adr-0022-q11-dspm-for-ai` entry is re-baselined to `baseline: '2026-06-25'`, `lastVerified: '2026-07-18'`.

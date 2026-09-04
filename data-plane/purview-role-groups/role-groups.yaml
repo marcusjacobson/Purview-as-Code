@@ -36,9 +36,10 @@
 #     Every role group declared here gets a dedicated Microsoft Entra
 #     security group `sg-purview-<slug>` provisioned by
 #     `scripts/Deploy-RoleGroupBackingEntraGroups.ps1`. Bind each
-#     `members:` entry to that dedicated group's object ID — never to a
-#     shared or general-purpose administrators group, which would grant
-#     the whole group every role you bind it to.
+#     `members:` entry (by `displayName:` — see "Fields per entry" below —
+#     or, legacy-but-supported, by raw object ID) to that dedicated
+#     group — never to a shared or general-purpose administrators group,
+#     which would grant the whole group every role you bind it to.
 #
 # Learn references (Microsoft, authoritative):
 #   https://learn.microsoft.com/en-us/purview/purview-permissions
@@ -59,11 +60,35 @@
 #                "Information Protection Admins".
 #   description  (optional, string) Short prose explaining why this entry
 #                exists. Not read by the reconciler; for human reviewers.
-#   members      (required, list of strings) Entra (Azure AD) **group**
-#                object IDs. One group OID per line. User UPNs and
-#                individual object IDs are intentionally rejected by the
-#                reconciler per `.github/instructions/security.instructions.md`
-#                rule #4 (least privilege — assign to groups, not users).
+#   members      (required, list) Each entry declares one Entra (Azure AD)
+#                **group** and must be one of two shapes (per
+#                [ADR 0023](../../docs/adr/0023-identifier-resolution.md)
+#                Category 3, issue #95):
+#
+#                  * RECOMMENDED for new entries — a mapping naming the
+#                    group by displayName:
+#                        - displayName: sg-purview-compliance-administrators
+#                    The reconciler resolves this to an object ID at
+#                    deploy time via
+#                    `scripts/Get-EntraPrincipalIdByDisplayName.ps1`
+#                    (Kind=Group), so no real Entra object ID is ever
+#                    committed to this file. Resolution is fail-closed: a
+#                    display name that does not resolve, or that matches
+#                    more than one group, aborts the run before any
+#                    tenant write — it never silently drops the member.
+#
+#                  * Legacy-but-still-supported — a bare Entra group
+#                    object ID string:
+#                        - 00000000-0000-0000-0000-000000000000
+#                    Kept indefinitely for compatibility with existing
+#                    populated desired-state files (this is not a
+#                    transitional shim scheduled for removal); used
+#                    as-is, unchanged from prior behaviour.
+#
+#                User UPNs and individual object IDs are intentionally
+#                rejected by the reconciler per
+#                `.github/instructions/security.instructions.md` rule #4
+#                (least privilege — assign to groups, not users).
 #                An empty list is valid but is NOT a safe default: it means
 #                "this role group should have zero declarative members", so
 #                under `-Apply -PruneMissing` the reconciler revokes every
@@ -86,12 +111,12 @@
 #   - name: Organization Management
 #     description: Tenant-wide Exchange / S&C break-glass administration.
 #     members:
-#       - 00000000-0000-0000-0000-000000000000   # Entra group OID for the break-glass Security Admins group
+#       - 00000000-0000-0000-0000-000000000000   # Legacy-but-still-supported shape: a raw Entra group OID for the break-glass Security Admins group. Kept indefinitely for compatibility with existing populated desired-state files -- not scheduled for removal.
 #
 #   - name: Compliance Administrator
 #     description: Read + configure compliance solutions (DLP, DLM, etc.).
 #     members:
-#       - 00000000-0000-0000-0000-000000000000   # Entra group OID for the Compliance Admins group
+#       - displayName: sg-purview-compliance-administrators   # RECOMMENDED shape (ADR 0023 Category 3); resolved to an Entra group object ID at deploy time
 #
 #   - name: eDiscovery Manager
 #     description: Create + manage eDiscovery cases and holds.

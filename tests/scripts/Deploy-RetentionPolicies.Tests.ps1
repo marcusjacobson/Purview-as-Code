@@ -927,3 +927,250 @@ Describe 'SkipNames behavior (ADR 0029) -- DLM' {
         $decision.Action | Should -Be 'Skip'
     }
 }
+
+# ---------------------------------------------------------------------------
+# Issue #13, part C batch 4: guard 2 (PER-TIER prune sanity ratio) and the
+# failure reporter. The prune catches previously added a 'Failed' report row
+# and moved on -- a failed prune exited 0. The regions below are lifted from
+# the REAL script source (not transcribed) and executed against stubs, so the
+# tests cannot keep passing after the script regresses.
+# ---------------------------------------------------------------------------
+Describe 'Prune guard 2 and failure reporter wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        $script:B4Source = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:B4Source | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+    It 'still calls guard 1 (empty-desired-set) -- earlier rollout not regressed' {
+        $script:B4Source | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+    It 'calls the sanity-ratio guard once PER TIER with tier-specific nouns' {
+        ([regex]::Matches($script:B4Source, 'Assert-PruneRatioWithinThreshold\s+`')).Count | Should -Be 2
+        $script:B4Source | Should -Match ([regex]::Escape("-ObjectTypeNoun 'retention rule'"))
+        $script:B4Source | Should -Match ([regex]::Escape("-ObjectTypeNoun 'retention policy'"))
+    }
+    It 'keys the rule tier on the SAME $pruneTargets the ADR 0052 prompt reads (full blast radius, incl. orphan-parent cascade)' {
+        $script:B4Source | Should -Match ([regex]::Escape('@($pruneTargets | Where-Object { $_ -like "rule ''*" }).Count'))
+        $script:B4Source | Should -Match ([regex]::Escape('@($tenantRules).Count'))
+        $script:B4Source | Should -Match ([regex]::Escape('@($tenantPolicies).Count'))
+    }
+    It 'surfaces the ratio override and threshold parameters on the Apply parameter set' {
+        $script:B4Source | Should -Match '\[switch\]\$AllowMajorityPrune'
+        $script:B4Source | Should -Match '\[double\]\$MaxPruneRatio\s*=\s*0\.5'
+        $cmd = Get-Command -Name $script:ScriptPath -CommandType ExternalScript
+        $cmd.Parameters['AllowMajorityPrune'].ParameterSets.Keys | Should -Not -Contain 'Export'
+        $cmd.Parameters['MaxPruneRatio'].ParameterSets.Keys | Should -Not -Contain 'Export'
+    }
+    It 'gates guard 2 on non-audit (AUDIT TRAP: script flips WhatIfPreference, does not empty prune targets)' {
+        $script:B4Source | Should -Match ([regex]::Escape("-and `$DirectionPolicy -ne 'audit'"))
+    }
+    It 'places guard 2 before the ADR 0052 prune confirmation gate' {
+        $ratioIdx = $script:B4Source.IndexOf('Assert-PruneRatioWithinThreshold')
+        $gateIdx  = $script:B4Source.IndexOf('-PruneMissing will DELETE')
+        $ratioIdx | Should -BeGreaterThan 0
+        $gateIdx  | Should -BeGreaterThan 0
+        $ratioIdx | Should -BeLessThan $gateIdx
+    }
+}
+
+Describe 'Per-tier prune sanity-ratio guard executed through the script wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'PruneGuard.psm1') -Force -ErrorAction Stop
+        $lines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $start = -1; $end = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*if \(\$PruneMissing\.IsPresent') {
+                $depth = 0; $e = -1
+                for ($j = $i; $j -lt $lines.Count; $j++) {
+                    $depth += ([regex]::Matches($lines[$j], '\{')).Count
+                    $depth -= ([regex]::Matches($lines[$j], '\}')).Count
+                    if ($depth -le 0) { $e = $j; break }
+                }
+                $cand = ($lines[$i..$e] -join [Environment]::NewLine)
+                if ($cand -match 'Assert-PruneRatioWithinThreshold') { $start = $i; $end = $e; break }
+            }
+        }
+        if ($start -lt 0) { throw 'Could not locate the guard-2 region in Deploy-RetentionPolicies.ps1; update the anchor in this test.' }
+        $script:Guard2Region = ($lines[$start..$end] -join [Environment]::NewLine)
+
+        function Invoke-Guard2 {
+            param([int]$RulePrunes, [int]$LiveRules, [int]$PolicyOrphans, [int]$LivePolicies, [double]$Max = 0.5, [switch]$Allow, [string]$Direction = 'portal-wins')
+            $PruneMissing = [switch]$true
+            $DirectionPolicy = $Direction
+            $MaxPruneRatio = $Max
+            $AllowMajorityPrune = [switch]$Allow
+            $pruneTargets = @(
+                @(for ($i = 0; $i -lt $RulePrunes; $i++) { "rule 'P\r$i'" }) +
+                @(for ($i = 0; $i -lt $PolicyOrphans; $i++) { "policy 'orphan-$i'" })
+            )
+            $policyPlan = @(
+                @(for ($i = 0; $i -lt $PolicyOrphans; $i++) { [pscustomobject]@{ Name = "orphan-$i"; Action = 'Orphan' } }) +
+                @([pscustomobject]@{ Name = 'kept'; Action = 'NoChange' })
+            )
+            $tenantRules    = @(for ($i = 0; $i -lt $LiveRules; $i++) { [pscustomobject]@{ Name = "live-rule-$i" } })
+            $tenantPolicies = @(for ($i = 0; $i -lt $LivePolicies; $i++) { [pscustomobject]@{ Name = "live-policy-$i" } })
+            $null = $PruneMissing, $DirectionPolicy, $MaxPruneRatio, $AllowMajorityPrune, $pruneTargets, $policyPlan, $tenantRules, $tenantPolicies
+            & ([scriptblock]::Create($script:Guard2Region)) 3>$null
+        }
+    }
+
+    It 'passes when both tiers sit at or below the threshold' {
+        { Invoke-Guard2 -RulePrunes 2 -LiveRules 10 -PolicyOrphans 1 -LivePolicies 4 } | Should -Not -Throw
+    }
+    It 'throws when the RULE blast radius exceeds the threshold even though the blended ratio would pass (the per-tier point)' {
+        { Invoke-Guard2 -RulePrunes 4 -LiveRules 4 -PolicyOrphans 0 -LivePolicies 16 } | Should -Throw
+    }
+    It 'throws when the POLICY tier exceeds the threshold' {
+        { Invoke-Guard2 -RulePrunes 0 -LiveRules 16 -PolicyOrphans 4 -LivePolicies 4 } | Should -Throw
+    }
+    It 'permits an over-threshold prune when -AllowMajorityPrune is supplied' {
+        { Invoke-Guard2 -RulePrunes 4 -LiveRules 4 -PolicyOrphans 4 -LivePolicies 4 -Allow } | Should -Not -Throw
+    }
+    It 'does NOT fire under -DirectionPolicy audit even above the threshold (audit trap)' {
+        { Invoke-Guard2 -RulePrunes 4 -LiveRules 4 -PolicyOrphans 4 -LivePolicies 4 -Direction 'audit' } | Should -Not -Throw
+    }
+}
+
+Describe 'Prune failure reporting executed through the script wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        $script:RepLines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $s = -1
+        for ($i = 0; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*\$pruneFailures = New-Object') { $s = $i; break }
+        }
+        if ($s -lt 0) { throw 'Could not locate the $pruneFailures declaration in Deploy-RetentionPolicies.ps1; update the anchor in this test.' }
+        $ifStart = -1
+        for ($i = $s; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*if \(\$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
+        }
+        if ($ifStart -lt 0) { throw 'Could not locate the aggregate-throw block in Deploy-RetentionPolicies.ps1; update the anchor in this test.' }
+        $depth = 0; $e = -1
+        for ($j = $ifStart; $j -lt $script:RepLines.Count; $j++) {
+            $depth += ([regex]::Matches($script:RepLines[$j], '\{')).Count
+            $depth -= ([regex]::Matches($script:RepLines[$j], '\}')).Count
+            if ($depth -le 0) { $e = $j; break }
+        }
+        $script:ReporterRegion = ($script:RepLines[$s..$e] -join [Environment]::NewLine)
+        $script:ReporterShouldProcessCount = ([regex]::Matches($script:ReporterRegion, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:ReporterRunnable = $script:ReporterRegion -replace '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        function Invoke-PruneRegion {
+            # Scenario shape: orphan rules under the still-desired policy
+            # 'KeptPolicy', plus orphan policies each carrying one child rule
+            # that is removed with the parent.
+            param([string[]]$OrphanRuleNames = @(), [string[]]$OrphanPolicyNames = @(), [string[]]$Fail = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            function Remove-RetentionComplianceRule {
+                [CmdletBinding(SupportsShouldProcess)]
+                param([string]$Identity)
+                $attempted.Add("rule:$Identity")
+                if ($Fail -contains $Identity) { throw "TenantBlockerException: $Identity" }
+            }
+            function Remove-RetentionCompliancePolicy {
+                [CmdletBinding(SupportsShouldProcess)]
+                param([string]$Identity)
+                $attempted.Add("policy:$Identity")
+                if ($Fail -contains $Identity) { throw "TenantBlockerException: $Identity" }
+            }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            $PruneMissing = [switch]$true
+            $report = New-Object 'System.Collections.Generic.List[object]'
+            $desiredPolicyNames = @('KeptPolicy')
+            $desiredRuleKeys = @('KeptPolicy\KeptRule')
+            $tenantRuleByKey = [ordered]@{}
+            $tenantRuleByKey['KeptPolicy\KeptRule'] = [pscustomobject]@{ policyName = 'KeptPolicy' }
+            foreach ($n in $OrphanRuleNames) {
+                $tenantRuleByKey[('KeptPolicy\{0}' -f $n)] = [pscustomobject]@{ policyName = 'KeptPolicy' }
+            }
+            $tenantRules = @($OrphanPolicyNames | ForEach-Object { [pscustomobject]@{ Policy = $_; Name = 'ChildRule' } })
+            $policyPlan = @($OrphanPolicyNames | ForEach-Object { [pscustomobject]@{ Name = $_; Action = 'Orphan'; Reason = 'test' } })
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+            $null = $PruneMissing, $report, $desiredPolicyNames, $desiredRuleKeys, $tenantRuleByKey, $tenantRules, $policyPlan, $ShouldProcessStub
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = $attempted.ToArray(); Reported = $reported.ToArray(); Thrown = $thrown }
+        }
+    }
+
+    It 'attempts every prune population after a failure: orphan rules, cascade child rules, then the orphan parent' {
+        $r = Invoke-PruneRegion -OrphanRuleNames @('r1', 'r2') -OrphanPolicyNames @('P2') -Fail @('KeptPolicy\r1')
+        $r.Attempted | Should -Be @('rule:KeptPolicy\r1', 'rule:KeptPolicy\r2', 'rule:P2\ChildRule', 'policy:P2')
+    }
+    It 'reports each failure with the tenant''s own error text' {
+        $r = Invoke-PruneRegion -OrphanRuleNames @('r1') -OrphanPolicyNames @('P2') -Fail @('P2')
+        $r.Reported.Count | Should -Be 1
+        $r.Reported[0] | Should -Match 'TenantBlockerException: P2'
+    }
+    It 'throws one aggregate naming every failure across all three populations (exit-0 defect fixed)' {
+        $r = Invoke-PruneRegion -OrphanRuleNames @('r1') -OrphanPolicyNames @('P2') -Fail @('KeptPolicy\r1', 'P2\ChildRule', 'P2')
+        $r.Thrown | Should -Match ([regex]::Escape("rule 'KeptPolicy\r1'"))
+        $r.Thrown | Should -Match ([regex]::Escape("rule 'P2\ChildRule'"))
+        $r.Thrown | Should -Match ([regex]::Escape("policy 'P2'"))
+        $r.Thrown | Should -Match '3 orphan retention object'
+    }
+    It 'throws nothing when every prune succeeds' {
+        $r = Invoke-PruneRegion -OrphanRuleNames @('r1') -OrphanPolicyNames @('P2')
+        $r.Thrown   | Should -BeNullOrEmpty
+        $r.Reported | Should -BeNullOrEmpty
+    }
+    It 'keeps the deletes behind a ShouldProcess gate (substitution non-vacuous)' {
+        $script:ReporterShouldProcessCount | Should -BeGreaterThan 0
+    }
+    It 'carries the reporter and the aggregate throw in the lifted region (mutation check vs pre-batch exit-0)' {
+        $script:ReporterRegion | Should -Match 'Write-PruneFailure'
+        $script:ReporterRegion | Should -Match 'throw'
+        $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}
+
+Describe 'Desired-state schema-validation serialization depth is not truncated (#90)' {
+
+    BeforeAll {
+        $script:ScriptPathForDepth = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-RetentionPolicies.ps1'
+
+        # A synthetic document unrelated to this reconciler's actual schema -- the
+        # #90 fix is schema-independent, so this only needs to nest deep enough
+        # (12+ levels) to prove -Depth 100 does not truncate while -Depth 10 does.
+        $script:DeepDoc = @{
+            l1 = @{ l2 = @{ l3 = @{ l4 = @{ l5 = @{ l6 = @{ l7 = @{ l8 = @{
+                l9 = @{ l10 = @{ l11 = @{ l12 = @{ l13 = @{ l14 = 'leaf' } } } } }
+            } } } } } } } }
+        }
+    }
+
+    It 'reads the serialization depth from the script itself and confirms it is pinned to 100' {
+        # A test that hard-codes its own depth cannot catch this defect -- exactly
+        # how the #80 sibling escaped every offline schema test before it (each
+        # test serialized at a depth of its own choosing rather than the script's).
+        $src = Get-Content -LiteralPath $script:ScriptPathForDepth -Raw
+        $m = [regex]::Match($src, '\$docJson\s*=\s*\$desiredRoot\s*\|\s*ConvertTo-Json\s+-Depth\s+(?<d>\d+)')
+        $m.Success | Should -BeTrue -Because 'the desired-state validation site must stay greppable for this regression test'
+        [int]$m.Groups['d'].Value | Should -Be 100
+    }
+
+    It 'serializes a deeply nested document WITHOUT truncating at the pinned depth' {
+        # ConvertTo-Json warns and rewrites deeper nodes as strings when it hits the
+        # depth cap; the truncated document then fails schema validation with an
+        # error pointing at an unrelated shallow field (the #80 failure mode).
+        $src = Get-Content -LiteralPath $script:ScriptPathForDepth -Raw
+        $depth = [int][regex]::Match($src, '\$docJson\s*=\s*\$desiredRoot\s*\|\s*ConvertTo-Json\s+-Depth\s+(?<d>\d+)').Groups['d'].Value
+
+        $warnings = @()
+        $null = $script:DeepDoc | ConvertTo-Json -Depth $depth -WarningVariable warnings -WarningAction SilentlyContinue
+        $warnings | Should -BeNullOrEmpty -Because 'a truncation warning means the validation site would reject a valid deep document'
+    }
+
+    It 'demonstrates the defect: the same document at the old -Depth 10 does NOT survive' {
+        # Mutation check -- proves the two assertions above are non-vacuous.
+        $warnings = @()
+        $null = $script:DeepDoc | ConvertTo-Json -Depth 10 -WarningVariable warnings -WarningAction SilentlyContinue
+        $warnings | Should -Not -BeNullOrEmpty
+    }
+}

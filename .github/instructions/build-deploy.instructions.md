@@ -49,6 +49,8 @@ az deployment group create       -g $rg -f infra/main.bicep -p infra/main.bicepp
 
 The shipped `infra/main.bicepparam` is the `lab` parameter file. For a non-`lab` environment, substitute its `infra/main.<environment>.bicepparam` (created by copying the lab file, [ADR 0057](../../docs/adr/0057-multi-environment-and-branch-model.md)) — `deploy-infra.yml` performs the same selection and fails fast when the file is missing.
 
+On a unified-only tenant ([ADR 0047](../../docs/adr/0047-unified-catalog-preview-api-coexistence.md)/[ADR 0048](../../docs/adr/0048-purview-account-discovery-gate.md): no classic account; never target a PAYG metering resource), append `--parameters deployPurviewAccount=false` to both the `what-if` and the `create` — same canonical commands, classic `Microsoft.Purview/accounts` resource skipped, `role-definitions` module still deployed ([conditional deployment](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/conditional-resource-deployment)). Do not deploy `infra/modules/role-definitions.bicep` standalone as a workaround.
+
 Reference: [Deploy Bicep files with Azure CLI](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/deploy-cli), [What-if operation](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/deploy-what-if).
 
 ## Data-plane deploy (Purview REST APIs)

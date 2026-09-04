@@ -116,10 +116,17 @@ jobs:
       - name: Test-IdentifierResidue
         shell: pwsh
         run: |
-          $rows = ./scripts/Test-IdentifierResidue.ps1
+          # -FailOnReview (#98, 2026-07-18): the reviewRequired quarantine is now
+          # empty (both prior entries' provenance was established and promoted to
+          # microsoftConstants), so the scan fails closed with no standing
+          # exceptions -- a future Review row (an identifier of unresolved
+          # provenance) blocks the build immediately instead of passing silently
+          # in report-mode.
+          $rows = ./scripts/Test-IdentifierResidue.ps1 -FailOnReview
           if ($rows) { $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host }
-          # The script exits 1 on any Finding and emits ::error:: annotations
-          # naming the file, the line, and the remediation. Surface its exit code.
+          # The script exits 1 on any Finding (or, with -FailOnReview, any Review
+          # row) and emits ::error:: annotations naming the file, the line, and
+          # the remediation. Surface its exit code.
           exit $LASTEXITCODE
 
   pester:
@@ -219,9 +226,7 @@ jobs:
             'Deploy-Collections.ps1',
             'Deploy-CommunicationCompliance.ps1',
             'Deploy-DataSources.ps1',
-            'Deploy-Glossary.ps1',
-            'Deploy-IRMPolicies.ps1',
-            'Deploy-IRMEntityLists.ps1'
+            'Deploy-Glossary.ps1'
           )
           $required = @('SupportsShouldProcess', 'PruneMissing', 'ExportCurrentState')
           $failures = @()
@@ -257,14 +262,26 @@ jobs:
   landing-page-embeds:
     name: Landing page embedded docs freshness
     runs-on: ubuntu-latest
-    # Verifies that the offline documentation snapshots embedded in index.html
-    # (the file:// fallback for the reader panel) still match their source docs
-    # (README.md + docs/**). If a source doc changed without refreshing the
+    # Verifies that the offline documentation snapshots embedded in each landing
+    # page (the file:// fallback for the reader panel) still match their source
+    # docs (README.md + docs/**). If a source doc changed without refreshing the
     # snapshots, this fails. Regenerate and commit with:
     #   pwsh ./scripts/Update-LandingPageEmbeds.ps1
+    #   pwsh ./scripts/Update-LandingPageEmbeds.ps1 -IndexPath contributing.html
     # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_functions_cmdletbindingattribute
     steps:
       - uses: actions/checkout@v4
-      - name: Check embedded docs are current
+      - name: Check embedded docs are current (index.html)
         shell: pwsh
         run: ./scripts/Update-LandingPageEmbeds.ps1 -Check
+      - name: Check embedded docs are current (contributing.html, when present)
+        shell: pwsh
+        # Existence-guarded so this workflow stays byte-identical between the template
+        # and operator copies: contributing.html is an operator-only landing page.
+        run: |
+          if (Test-Path 'contributing.html') {
+            ./scripts/Update-LandingPageEmbeds.ps1 -IndexPath contributing.html -Check
+          }
+          else {
+            Write-Host 'contributing.html not present in this copy -- skipping.'
+          }

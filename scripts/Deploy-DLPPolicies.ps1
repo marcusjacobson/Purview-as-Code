@@ -91,6 +91,36 @@
     Allow removal of tenant DLP policies and rules that are not declared
     in the YAML. Default $false.
 
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against
+        `policies: []` would classify the entire live set as orphaned.
+      * The prune must not exceed `-MaxPruneRatio` of the live objects
+        without `-AllowMajorityPrune`. The ratio is checked PER TIER --
+        orphan rules against live rules, orphan policies against live
+        policies -- because a blended ratio can mask a single-collection
+        wipe. Not enforced under `-DirectionPolicy audit`, which never
+        writes.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live DLP rules, or of the live DLP policies, is refused before
+    any write. Supply it when a large prune is genuinely intended (a
+    deliberate consolidation); the ratio is then reported as a warning
+    and the run proceeds. Has no effect on the empty-desired-set guard,
+    which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest per-tier share of the live objects `-PruneMissing` may
+    delete without `-AllowMajorityPrune`, as a fraction in (0, 1].
+    Default 0.5. A prune exactly at the threshold passes; only a
+    strictly larger share is refused. Set to 1 to disable the ratio
+    guard for a single run.
+
 .PARAMETER Force
     With -ExportCurrentState: allow overwriting a `policies:` block that
     already contains entries.
@@ -225,6 +255,13 @@ param(
     [switch]$PruneMissing,
 
     [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
+
+    [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
     [switch]$Force,
 
@@ -275,17 +312,183 @@ $ErrorActionPreference = 'Stop'
 #region Helpers
 
 function ConvertFrom-AdvancedRuleWire {
-    # Parse Microsoft's wire JSON for AdvancedRule into the normalized
-    # YAML hash shape from ADR 0031. The wire shape is:
-    #   { Version, Condition: { Operator, SubConditions: [{ ConditionName,
-    #     Value: [{ Operator, Groups: [{ Name, Operator, Sensitivetypes:
-    #     [{ Name, Id, Mincount?, Maxcount?, Confidencelevel?,
-    #        Minconfidence?, Maxconfidence?, Classifiertype? }] }] }] }] } }
+    # Parse Microsoft's wire JSON for AdvancedRule into the canonical
+    # condition-tree hash shape from ADR 0031 (as widened by #80). The wire
+    # shape is a boolean tree:
+    #   { Version, Condition: <node> }
+    # where <node> is either a GROUP node
+    #   { Operator: And|Or, SubConditions: [<node>, ...] }
+    # or a PREDICATE node, one of
+    #   { ConditionName: 'ContentContainsSensitiveInformation',
+    #     Value: [{ Operator, Groups: [{ Name, Operator,
+    #               Sensitivetypes: [{ Name, Id, Mincount?, Maxcount?,
+    #                 Confidencelevel?, Minconfidence?, Maxconfidence?,
+    #                 Classifiertype? }],
+    #               Labels: [{ Name, Id, Type: 'Sensitivity' }] }] }] }
+    #   { ConditionName: 'AccessScope'|'FromScope'|'HasActivity'|'DocumentSizeOver',
+    #     Value: '<scalar>' }
+    #
+    # Sensitivity labels are modeled BY DISPLAY NAME (ADR 0023): each
+    # Labels[].Id is resolved through -LabelNameMap (guid -> displayName). A
+    # label the map cannot resolve fails the parse rather than writing a raw
+    # tenant GUID into the repo -- the caller then falls back to the
+    # notes + rawAdvancedRule evidence path (#79).
+    #
     # Returns @{ Recognized = $bool; Normalized = [ordered]; Reason = $str }.
+    # NOTE: no Reason string may ever quote a GUID -- it is written into
+    # data-plane/dlp/policies.yaml as `notes:` and would become a disclosure
+    # the residue scan (ADR 0055) cannot acquit.
     # Reference: docs/adr/0031-dlp-advancedrule-yaml-shape.md "Lossless-transform claim".
-    param([Parameter(Mandatory = $true)][object]$Wire)
+    param(
+        [Parameter(Mandatory = $true)][object]$Wire,
+        [Parameter()][hashtable]$LabelNameMap = @{}
+    )
 
     function Format-UnrecognizedAdvancedRuleResult { param([string]$why) @{ Recognized = $false; Normalized = $null; Reason = $why } }
+
+    $guidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    # Scalar predicates observed across both tenants' captured bodies. Each
+    # carries a single string Value and no nested structure.
+    $scalarConditionNames = @('AccessScope','FromScope','HasActivity','DocumentSizeOver')
+
+    # guid -> displayName, lower-cased keys so wire casing never matters.
+    $labelNames = @{}
+    foreach ($k in @($LabelNameMap.Keys)) {
+        $lk = ([string]$k).ToLowerInvariant()
+        if ($lk) { $labelNames[$lk] = [string]$LabelNameMap[$k] }
+    }
+
+    # Inner parsers return @{ Ok = $bool; Node = [ordered]; Reason = $str } so a
+    # failure deep in the tree propagates its reason to the top unchanged.
+    function ConvertFrom-AdvancedRuleWireContentNode {
+        param($Sub)
+
+        $vals = [object[]]@($Sub.Value)
+        if ($vals.Count -ne 1) { return @{ Ok = $false; Reason = ("Expected exactly one SubCondition.Value entry, got {0}." -f $vals.Count) } }
+        $val = $vals[0]
+        $outerOp = [string]$val.Operator
+        if ($outerOp -notin @('And','Or')) { return @{ Ok = $false; Reason = ("Unsupported outer Operator='{0}'." -f $outerOp) } }
+
+        $groupResults = [System.Collections.ArrayList]::new()
+        foreach ($g in @($val.Groups)) {
+            if (-not $g) { continue }
+            $op = [string]$g.Operator
+            if ($op -notin @('And','Or')) { return @{ Ok = $false; Reason = ("Unsupported group Operator='{0}' on group '{1}'." -f $op, $g.Name) } }
+            $sitResults   = [System.Collections.ArrayList]::new()
+            $clsfrResults = [System.Collections.ArrayList]::new()
+            $labelResults = [System.Collections.ArrayList]::new()
+            foreach ($st in @($g.Sensitivetypes)) {
+                if (-not $st) { continue }
+                $id = [string]$st.Id
+                if (-not $id) { $id = [string]$st.Name }
+                if (-not $id -or $id -notmatch $guidRegex) { continue }
+                $guid = $id.ToLowerInvariant()
+                $name = [string]$st.Name
+                $hasClassifier = -not [string]::IsNullOrEmpty([string]$st.Classifiertype)
+                if ($hasClassifier) {
+                    $tc = [ordered]@{}
+                    $tc['guid'] = $guid
+                    if ($name -and $name -ne $id) { $tc['name'] = $name }
+                    [void]$clsfrResults.Add($tc)
+                } else {
+                    $so = [ordered]@{}
+                    $so['guid'] = $guid
+                    if ($name -and $name -ne $id)            { $so['name']            = $name }
+                    if ($null -ne $st.Mincount)              { $so['minCount']        = [int]$st.Mincount }
+                    if ($null -ne $st.Maxcount)              { $so['maxCount']        = [int]$st.Maxcount }
+                    if (-not [string]::IsNullOrEmpty([string]$st.Confidencelevel)) { $so['confidenceLevel'] = [string]$st.Confidencelevel }
+                    if ($null -ne $st.Minconfidence)         { $so['minConfidence']   = [int]$st.Minconfidence }
+                    if ($null -ne $st.Maxconfidence)         { $so['maxConfidence']   = [int]$st.Maxconfidence }
+                    [void]$sitResults.Add($so)
+                }
+            }
+            # Sensitivity labels inside a content group (ADR 0023: by display
+            # name, never by raw tenant GUID). An unresolvable label is a parse
+            # FAILURE, not a degraded emit -- see the header note.
+            foreach ($lb in @($g.Labels)) {
+                if (-not $lb) { continue }
+                $ltype = [string]$lb.Type
+                if ($ltype -ne 'Sensitivity') {
+                    return @{ Ok = $false; Reason = ("Group '{0}' carries a label of unsupported Type='{1}' (only 'Sensitivity' is modeled)." -f $g.Name, $ltype) }
+                }
+                $lid = ([string]$lb.Id).ToLowerInvariant()
+                if (-not $lid -or $lid -notmatch $guidRegex) {
+                    return @{ Ok = $false; Reason = ("Group '{0}' carries a sensitivity label with no usable Id." -f $g.Name) }
+                }
+                if (-not $labelNames.ContainsKey($lid)) {
+                    return @{ Ok = $false; Reason = ("Group '{0}' references a sensitivity label that Get-Label did not resolve to a display name; a label reference is modeled by display name only (ADR 0023)." -f $g.Name) }
+                }
+                $lo = [ordered]@{}
+                $lo['displayName'] = $labelNames[$lid]
+                [void]$labelResults.Add($lo)
+            }
+            if ($sitResults.Count -eq 0 -and $clsfrResults.Count -eq 0 -and $labelResults.Count -eq 0) {
+                return @{ Ok = $false; Reason = ("Group '{0}' contained no recognizable Sensitivetypes or Labels entries." -f $g.Name) }
+            }
+            $ge = [ordered]@{}
+            $ge['name']     = [string]$g.Name
+            $ge['operator'] = $op
+            if ($sitResults.Count   -gt 0) { $ge['sensitiveInfoTypes']   = [object[]]$sitResults.ToArray() }
+            if ($clsfrResults.Count -gt 0) { $ge['trainableClassifiers'] = [object[]]$clsfrResults.ToArray() }
+            if ($labelResults.Count -gt 0) { $ge['sensitivityLabels']    = [object[]]$labelResults.ToArray() }
+            [void]$groupResults.Add($ge)
+        }
+        if ($groupResults.Count -eq 0) {
+            return @{ Ok = $false; Reason = 'ContentContainsSensitiveInformation predicate produced zero recognizable groups.' }
+        }
+
+        $node = [ordered]@{}
+        $node['type']          = 'ContentContainsSensitiveInformation'
+        $node['outerOperator'] = $outerOp
+        $node['groups']        = [object[]]$groupResults.ToArray()
+        return @{ Ok = $true; Node = $node; Reason = $null }
+    }
+
+    function ConvertFrom-AdvancedRuleWireNode {
+        param($Node, [int]$Depth = 0)
+
+        # Bounded so a malformed/self-referential body can't spin the parser.
+        # Deepest observed tree is 2 levels; 8 is generous head-room.
+        if ($Depth -gt 8) { return @{ Ok = $false; Reason = 'AdvancedRule condition tree nests deeper than 8 levels.' } }
+        if (-not $Node)   { return @{ Ok = $false; Reason = 'Encountered an empty SubCondition entry.' } }
+
+        $conditionName = [string]$Node.ConditionName
+        if ($conditionName) {
+            if ($conditionName -eq 'ContentContainsSensitiveInformation') {
+                return (ConvertFrom-AdvancedRuleWireContentNode -Sub $Node)
+            }
+            if ($scalarConditionNames -contains $conditionName) {
+                $v = $Node.Value
+                if (($v -is [System.Collections.IEnumerable]) -and -not ($v -is [string])) {
+                    return @{ Ok = $false; Reason = ("SubCondition '{0}' carries a non-scalar Value; only a single scalar value is modeled." -f $conditionName) }
+                }
+                if ([string]::IsNullOrEmpty([string]$v)) {
+                    return @{ Ok = $false; Reason = ("SubCondition '{0}' carries an empty Value." -f $conditionName) }
+                }
+                $node = [ordered]@{}
+                $node['type']  = $conditionName
+                $node['value'] = [string]$v
+                return @{ Ok = $true; Node = $node; Reason = $null }
+            }
+            return @{ Ok = $false; Reason = ("Unsupported SubCondition.ConditionName='{0}'." -f $conditionName) }
+        }
+
+        # No ConditionName -> a nested boolean group joining further SubConditions.
+        $op = [string]$Node.Operator
+        if ($op -notin @('And','Or')) { return @{ Ok = $false; Reason = ("Unsupported condition-group Operator='{0}' (expected 'And' or 'Or')." -f $op) } }
+        $subs = [object[]]@($Node.SubConditions)
+        if ($subs.Count -eq 0) { return @{ Ok = $false; Reason = 'Condition group carries no SubConditions.' } }
+        $children = [System.Collections.ArrayList]::new()
+        foreach ($s in $subs) {
+            $child = ConvertFrom-AdvancedRuleWireNode -Node $s -Depth ($Depth + 1)
+            if (-not $child.Ok) { return $child }
+            [void]$children.Add($child.Node)
+        }
+        $node = [ordered]@{}
+        $node['operator']   = $op
+        $node['conditions'] = [object[]]$children.ToArray()
+        return @{ Ok = $true; Node = $node; Reason = $null }
+    }
 
     try {
         if ($Wire -is [string]) {
@@ -298,192 +501,314 @@ function ConvertFrom-AdvancedRuleWire {
     }
 
     if (-not $obj) { return (Format-UnrecognizedAdvancedRuleResult 'AdvancedRule body parsed as null.') }
-    if ([string]$obj.Version -ne '1.0')             { return (Format-UnrecognizedAdvancedRuleResult ("Unexpected AdvancedRule.Version='{0}' (expected '1.0')." -f $obj.Version)) }
-    if (-not $obj.Condition)                        { return (Format-UnrecognizedAdvancedRuleResult 'AdvancedRule body missing Condition wrapper.') }
-    if ([string]$obj.Condition.Operator -ne 'And')  { return (Format-UnrecognizedAdvancedRuleResult ("Unexpected Condition.Operator='{0}' (expected 'And')." -f $obj.Condition.Operator)) }
-    $subs = [object[]]@($obj.Condition.SubConditions)
-    if ($subs.Count -ne 1)                          { return (Format-UnrecognizedAdvancedRuleResult ("Expected exactly one SubCondition, got {0}." -f $subs.Count)) }
-    $sub = $subs[0]
-    if ([string]$sub.ConditionName -ne 'ContentContainsSensitiveInformation') {
-        return (Format-UnrecognizedAdvancedRuleResult ("Unsupported SubCondition.ConditionName='{0}' (only ContentContainsSensitiveInformation is modeled today)." -f $sub.ConditionName))
-    }
-    $vals = [object[]]@($sub.Value)
-    if ($vals.Count -ne 1)                          { return (Format-UnrecognizedAdvancedRuleResult ("Expected exactly one SubCondition.Value entry, got {0}." -f $vals.Count)) }
-    $val = $vals[0]
-    $outerOp = [string]$val.Operator
-    if ($outerOp -notin @('And','Or'))              { return (Format-UnrecognizedAdvancedRuleResult ("Unsupported outer Operator='{0}'." -f $outerOp)) }
+    if ([string]$obj.Version -ne '1.0') { return (Format-UnrecognizedAdvancedRuleResult ("Unexpected AdvancedRule.Version='{0}' (expected '1.0')." -f $obj.Version)) }
+    if (-not $obj.Condition)            { return (Format-UnrecognizedAdvancedRuleResult 'AdvancedRule body missing Condition wrapper.') }
 
-    $groupResults = [System.Collections.ArrayList]::new()
-    foreach ($g in @($val.Groups)) {
-        if (-not $g) { continue }
-        $op = [string]$g.Operator
-        if ($op -notin @('And','Or')) { return (Format-UnrecognizedAdvancedRuleResult ("Unsupported group Operator='{0}' on group '{1}'." -f $op, $g.Name)) }
-        $sitResults   = [System.Collections.ArrayList]::new()
-        $clsfrResults = [System.Collections.ArrayList]::new()
-        foreach ($st in @($g.Sensitivetypes)) {
-            if (-not $st) { continue }
-            $id = [string]$st.Id
-            if (-not $id) { $id = [string]$st.Name }
-            if (-not $id -or $id -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') { continue }
-            $guid = $id.ToLowerInvariant()
-            $name = [string]$st.Name
-            $hasClassifier = -not [string]::IsNullOrEmpty([string]$st.Classifiertype)
-            if ($hasClassifier) {
-                $tc = [ordered]@{}
-                $tc['guid'] = $guid
-                if ($name -and $name -ne $id) { $tc['name'] = $name }
-                [void]$clsfrResults.Add($tc)
-            } else {
-                $so = [ordered]@{}
-                $so['guid'] = $guid
-                if ($name -and $name -ne $id)            { $so['name']            = $name }
-                if ($null -ne $st.Mincount)              { $so['minCount']        = [int]$st.Mincount }
-                if ($null -ne $st.Maxcount)              { $so['maxCount']        = [int]$st.Maxcount }
-                if (-not [string]::IsNullOrEmpty([string]$st.Confidencelevel)) { $so['confidenceLevel'] = [string]$st.Confidencelevel }
-                if ($null -ne $st.Minconfidence)         { $so['minConfidence']   = [int]$st.Minconfidence }
-                if ($null -ne $st.Maxconfidence)         { $so['maxConfidence']   = [int]$st.Maxconfidence }
-                [void]$sitResults.Add($so)
-            }
-        }
-        if ($sitResults.Count -eq 0 -and $clsfrResults.Count -eq 0) {
-            return (Format-UnrecognizedAdvancedRuleResult ("Group '{0}' contained no recognizable Sensitivetypes entries." -f $g.Name))
-        }
-        $ge = [ordered]@{}
-        $ge['name']     = [string]$g.Name
-        $ge['operator'] = $op
-        if ($sitResults.Count   -gt 0) { $ge['sensitiveInfoTypes']   = [object[]]$sitResults.ToArray() }
-        if ($clsfrResults.Count -gt 0) { $ge['trainableClassifiers'] = [object[]]$clsfrResults.ToArray() }
-        [void]$groupResults.Add($ge)
-    }
-    if ($groupResults.Count -eq 0) {
-        return (Format-UnrecognizedAdvancedRuleResult 'AdvancedRule body parsed but produced zero recognizable groups.')
+    # The root Condition is always a group node. Its Operator (And|Or) is a
+    # first-class modeled field: before #80 it was asserted to 'And' and
+    # dropped, which is why every 'Or'-rooted rule degraded to notes.
+    $root = ConvertFrom-AdvancedRuleWireNode -Node $obj.Condition -Depth 0
+    if (-not $root.Ok) { return (Format-UnrecognizedAdvancedRuleResult $root.Reason) }
+    if (-not $root.Node.Contains('conditions')) {
+        return (Format-UnrecognizedAdvancedRuleResult 'AdvancedRule Condition is a bare predicate, not a condition group.')
     }
 
-    $normalized = [ordered]@{}
-    $normalized['outerOperator'] = $outerOp
-    $normalized['groups']        = [object[]]$groupResults.ToArray()
-    return @{ Recognized = $true; Normalized = $normalized; Reason = $null }
+    return @{ Recognized = $true; Normalized = $root.Node; Reason = $null }
 }
 
 function ConvertTo-NormalizedAdvancedRule {
     # Take an `advancedRule` block from YAML and return the canonical
-    # [ordered] hash shape used by the comparator and the apply path.
-    # Lowercases GUIDs, drops empty optional fields, preserves group
-    # and entry order (Microsoft's evaluation honors order).
+    # condition-tree [ordered] hash used by the comparator and the apply path.
+    # Lowercases GUIDs, drops empty optional fields, preserves condition,
+    # group and entry order (Microsoft's evaluation honors order).
+    #
+    # Accepts BOTH authored shapes and returns exactly one:
+    #   * tree    -- { operator, conditions: [...] }              (canonical)
+    #   * legacy  -- { outerOperator, groups: [...] }             (ADR 0031 sugar)
+    # The legacy shape is exactly equivalent to a tree whose root operator is
+    # 'And' over a single ContentContainsSensitiveInformation predicate, and is
+    # up-converted here so there is ONE comparison vocabulary. Every already-
+    # clean rule in data-plane/dlp/policies.yaml keeps its authored sugar; see
+    # ConvertTo-ExportedAdvancedRule for the export-side inverse.
     # Reference: docs/adr/0031-dlp-advancedrule-yaml-shape.md.
     param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Source)
 
-    $groupResults = [System.Collections.ArrayList]::new()
-    foreach ($g in @($Source['groups'])) {
-        if (-not $g) { continue }
-        $gh = $g
-        $ge = [ordered]@{}
-        $ge['name']     = [string]$gh['name']
-        $ge['operator'] = [string]$gh['operator']
+    function ConvertTo-NormalizedAdvancedRuleGroupList {
+        param($Groups)
 
-        if ($gh.Contains('sensitiveInfoTypes') -and $gh['sensitiveInfoTypes']) {
-            $sitResults = [System.Collections.ArrayList]::new()
-            foreach ($sit in @($gh['sensitiveInfoTypes'])) {
-                $sh = $sit
-                $o  = [ordered]@{}
-                $o['guid'] = ([string]$sh['guid']).ToLowerInvariant()
-                if ($sh.Contains('name') -and $sh['name'])                                  { $o['name']            = [string]$sh['name'] }
-                if ($sh.Contains('minCount'))                                               { $o['minCount']        = [int]$sh['minCount'] }
-                if ($sh.Contains('maxCount'))                                               { $o['maxCount']        = [int]$sh['maxCount'] }
-                if ($sh.Contains('confidenceLevel') -and $sh['confidenceLevel'])            { $o['confidenceLevel'] = [string]$sh['confidenceLevel'] }
-                if ($sh.Contains('minConfidence'))                                          { $o['minConfidence']   = [int]$sh['minConfidence'] }
-                if ($sh.Contains('maxConfidence'))                                          { $o['maxConfidence']   = [int]$sh['maxConfidence'] }
-                [void]$sitResults.Add($o)
+        $groupResults = [System.Collections.ArrayList]::new()
+        foreach ($g in @($Groups)) {
+            if (-not $g) { continue }
+            $gh = $g
+            $ge = [ordered]@{}
+            $ge['name']     = [string]$gh['name']
+            $ge['operator'] = [string]$gh['operator']
+
+            if ($gh.Contains('sensitiveInfoTypes') -and $gh['sensitiveInfoTypes']) {
+                $sitResults = [System.Collections.ArrayList]::new()
+                foreach ($sit in @($gh['sensitiveInfoTypes'])) {
+                    $sh = $sit
+                    $o  = [ordered]@{}
+                    $o['guid'] = ([string]$sh['guid']).ToLowerInvariant()
+                    if ($sh.Contains('name') -and $sh['name'])                                  { $o['name']            = [string]$sh['name'] }
+                    if ($sh.Contains('minCount'))                                               { $o['minCount']        = [int]$sh['minCount'] }
+                    if ($sh.Contains('maxCount'))                                               { $o['maxCount']        = [int]$sh['maxCount'] }
+                    if ($sh.Contains('confidenceLevel') -and $sh['confidenceLevel'])            { $o['confidenceLevel'] = [string]$sh['confidenceLevel'] }
+                    if ($sh.Contains('minConfidence'))                                          { $o['minConfidence']   = [int]$sh['minConfidence'] }
+                    if ($sh.Contains('maxConfidence'))                                          { $o['maxConfidence']   = [int]$sh['maxConfidence'] }
+                    [void]$sitResults.Add($o)
+                }
+                if ($sitResults.Count -gt 0) { $ge['sensitiveInfoTypes'] = [object[]]$sitResults.ToArray() }
             }
-            if ($sitResults.Count -gt 0) { $ge['sensitiveInfoTypes'] = [object[]]$sitResults.ToArray() }
+
+            if ($gh.Contains('trainableClassifiers') -and $gh['trainableClassifiers']) {
+                $tcResults = [System.Collections.ArrayList]::new()
+                foreach ($tc in @($gh['trainableClassifiers'])) {
+                    $th = $tc
+                    $o  = [ordered]@{}
+                    $o['guid'] = ([string]$th['guid']).ToLowerInvariant()
+                    if ($th.Contains('name') -and $th['name']) { $o['name'] = [string]$th['name'] }
+                    [void]$tcResults.Add($o)
+                }
+                if ($tcResults.Count -gt 0) { $ge['trainableClassifiers'] = [object[]]$tcResults.ToArray() }
+            }
+
+            # Sensitivity labels carried INSIDE a content group, by display name
+            # only (ADR 0023). Emitted last so the key order matches the order
+            # ConvertFrom-AdvancedRuleWire builds -- the two must agree field for
+            # field or the same predicate hashes differently on each side.
+            if ($gh.Contains('sensitivityLabels') -and $gh['sensitivityLabels']) {
+                $lblResults = [System.Collections.ArrayList]::new()
+                foreach ($lbl in @($gh['sensitivityLabels'])) {
+                    $lh = $lbl
+                    $o  = [ordered]@{}
+                    $o['displayName'] = [string]$lh['displayName']
+                    [void]$lblResults.Add($o)
+                }
+                if ($lblResults.Count -gt 0) { $ge['sensitivityLabels'] = [object[]]$lblResults.ToArray() }
+            }
+
+            [void]$groupResults.Add($ge)
+        }
+        return , [object[]]$groupResults.ToArray()
+    }
+
+    function ConvertTo-NormalizedAdvancedRuleNode {
+        param($Node)
+
+        $h = $Node
+        if ($h.Contains('type')) {
+            $t = [string]$h['type']
+            if ($t -eq 'ContentContainsSensitiveInformation') {
+                $o = [ordered]@{}
+                $o['type']          = $t
+                $o['outerOperator'] = [string]$h['outerOperator']
+                $o['groups']        = ConvertTo-NormalizedAdvancedRuleGroupList $h['groups']
+                return $o
+            }
+            $o = [ordered]@{}
+            $o['type']  = $t
+            $o['value'] = [string]$h['value']
+            return $o
         }
 
-        if ($gh.Contains('trainableClassifiers') -and $gh['trainableClassifiers']) {
-            $tcResults = [System.Collections.ArrayList]::new()
-            foreach ($tc in @($gh['trainableClassifiers'])) {
-                $th = $tc
-                $o  = [ordered]@{}
-                $o['guid'] = ([string]$th['guid']).ToLowerInvariant()
-                if ($th.Contains('name') -and $th['name']) { $o['name'] = [string]$th['name'] }
-                [void]$tcResults.Add($o)
-            }
-            if ($tcResults.Count -gt 0) { $ge['trainableClassifiers'] = [object[]]$tcResults.ToArray() }
-        }
+        $o = [ordered]@{}
+        $o['operator']   = [string]$h['operator']
+        $o['conditions'] = [object[]]@(foreach ($c in @($h['conditions'])) { ConvertTo-NormalizedAdvancedRuleNode $c })
+        return $o
+    }
 
-        [void]$groupResults.Add($ge)
+    # Legacy sugar -> canonical tree.
+    if (-not $Source.Contains('conditions')) {
+        $content = [ordered]@{}
+        $content['type']          = 'ContentContainsSensitiveInformation'
+        $content['outerOperator'] = [string]$Source['outerOperator']
+        $content['groups']        = ConvertTo-NormalizedAdvancedRuleGroupList $Source['groups']
+
+        $out = [ordered]@{}
+        $out['operator']   = 'And'
+        $out['conditions'] = [object[]]@($content)
+        return $out
     }
 
     $out = [ordered]@{}
-    $out['outerOperator'] = [string]$Source['outerOperator']
-    $out['groups']        = [object[]]$groupResults.ToArray()
+    $out['operator']   = [string]$Source['operator']
+    $out['conditions'] = [object[]]@(foreach ($c in @($Source['conditions'])) { ConvertTo-NormalizedAdvancedRuleNode $c })
     return $out
 }
 
-function ConvertTo-AdvancedRuleWire {
-    # Serialize a normalized `advancedRule` hash back into the wire
-    # JSON shape Microsoft's New-/Set-DlpComplianceRule accepts via
-    # the -AdvancedRule parameter. Reconstructs the three constant
-    # wrappers (Version, Condition.Operator, ConditionName) per ADR 0031
-    # "Captured-field coverage" table.
-    # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule
+function ConvertTo-ExportedAdvancedRule {
+    # Export-side inverse of the legacy up-conversion in
+    # ConvertTo-NormalizedAdvancedRule: render a canonical condition tree in the
+    # most readable YAML form the shape allows.
+    #
+    #   root operator 'And' over exactly one ContentContainsSensitiveInformation
+    #   predicate  ->  legacy sugar { outerOperator, groups }
+    #   anything else                ->  the tree verbatim
+    #
+    # This is what keeps a re-export byte-stable for the rules that were already
+    # clean before #80: they round-trip back into the same sugar they were
+    # authored in, so the widened model costs zero YAML churn on them. Both
+    # forms normalize to the identical hash, so the choice is purely cosmetic
+    # and can never move the comparator.
     param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$AdvancedRule)
 
-    $wireGroups = @()
-    foreach ($g in @($AdvancedRule.groups)) {
-        $wireSits = @()
-        foreach ($s in @($g.sensitiveInfoTypes)) {
-            if (-not $s) { continue }
-            $w = [ordered]@{}
-            if ($s.Contains('name') -and $s.name) { $w.Name = [string]$s.name } else { $w.Name = [string]$s.guid }
-            $w.Id = [string]$s.guid
-            if ($s.Contains('minCount'))        { $w.Mincount        = [int]$s.minCount }
-            if ($s.Contains('maxCount'))        { $w.Maxcount        = [int]$s.maxCount }
-            if ($s.Contains('confidenceLevel')) { $w.Confidencelevel = [string]$s.confidenceLevel }
-            if ($s.Contains('minConfidence'))   { $w.Minconfidence   = [int]$s.minConfidence }
-            if ($s.Contains('maxConfidence'))   { $w.Maxconfidence   = [int]$s.maxConfidence }
-            $wireSits += $w
+    $conditions = @($AdvancedRule['conditions'])
+    if ([string]$AdvancedRule['operator'] -eq 'And' -and
+        $conditions.Count -eq 1 -and
+        $conditions[0].Contains('type') -and
+        [string]$conditions[0]['type'] -eq 'ContentContainsSensitiveInformation') {
+        $sugar = [ordered]@{}
+        $sugar['outerOperator'] = [string]$conditions[0]['outerOperator']
+        $sugar['groups']        = $conditions[0]['groups']
+        return $sugar
+    }
+    return $AdvancedRule
+}
+
+function ConvertTo-AdvancedRuleWire {
+    # Serialize a canonical `advancedRule` condition tree back into the wire
+    # JSON shape Microsoft's New-/Set-DlpComplianceRule accepts via the
+    # -AdvancedRule parameter. Reconstructs the Version wrapper and, per node,
+    # the Operator / ConditionName / Value envelopes per the ADR 0031
+    # "Captured-field coverage" table.
+    #
+    # -LabelGuidMap (displayName -> GUID) resolves the by-name sensitivity-label
+    # references back to this tenant's own GUIDs. A name the map cannot resolve
+    # THROWS rather than emitting a hollow predicate -- same contract as the
+    # rule-level sensitivityLabels path in Get-DlpRuleSplat.
+    #
+    # Legacy `{ outerOperator, groups }` input is accepted and up-converted, so
+    # the writer has exactly one code path.
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$AdvancedRule,
+        [Parameter()][hashtable]$LabelGuidMap = @{}
+    )
+
+    function ConvertTo-AdvancedRuleWireGroupList {
+        # $LabelMap is threaded explicitly rather than read out of the enclosing
+        # scope: label resolution is the one place here that can THROW, so the
+        # dependency is made visible at every call site.
+        param($Groups, [hashtable]$LabelMap)
+
+        $wireGroups = @()
+        foreach ($g in @($Groups)) {
+            if (-not $g) { continue }
+            $wireSits = @()
+            foreach ($s in @($g.sensitiveInfoTypes)) {
+                if (-not $s) { continue }
+                $w = [ordered]@{}
+                if ($s.Contains('name') -and $s.name) { $w.Name = [string]$s.name } else { $w.Name = [string]$s.guid }
+                $w.Id = [string]$s.guid
+                if ($s.Contains('minCount'))        { $w.Mincount        = [int]$s.minCount }
+                if ($s.Contains('maxCount'))        { $w.Maxcount        = [int]$s.maxCount }
+                if ($s.Contains('confidenceLevel')) { $w.Confidencelevel = [string]$s.confidenceLevel }
+                if ($s.Contains('minConfidence'))   { $w.Minconfidence   = [int]$s.minConfidence }
+                if ($s.Contains('maxConfidence'))   { $w.Maxconfidence   = [int]$s.maxConfidence }
+                $wireSits += $w
+            }
+            foreach ($c in @($g.trainableClassifiers)) {
+                if (-not $c) { continue }
+                $w = [ordered]@{}
+                if ($c.Contains('name') -and $c.name) { $w.Name = [string]$c.name } else { $w.Name = [string]$c.guid }
+                $w.Id            = [string]$c.guid
+                $w.Classifiertype = 'MLModel'
+                $wireSits += $w
+            }
+            $wireLabels = @()
+            foreach ($l in @($g.sensitivityLabels)) {
+                if (-not $l) { continue }
+                $displayName = [string]$l.displayName
+                if (-not $LabelMap.ContainsKey($displayName)) {
+                    throw ("Sensitivity label '{0}' referenced by an advancedRule group was not found via Get-Label. Declare it under data-plane/information-protection/labels.yaml first." -f $displayName)
+                }
+                # Emit the immutable GUID in BOTH Name and Id. The service resolves this
+                # entry by Name and rejects a human-readable display name -- "The label
+                # name '<x>' ... does not exist" -- because a sensitivity label's Name
+                # property is not its DisplayName (#93). The GUID form is what the sibling
+                # simple-label path in Get-DlpRuleSplat already emits, and is the shape
+                # observed in accepted tenant wire bodies. Do not "restore" the display
+                # name here for readability; it is a write-time rejection, not cosmetics.
+                $labelId = [string]$LabelMap[$displayName]
+                $wireLabels += [ordered]@{
+                    Name = $labelId
+                    Id   = $labelId
+                    Type = 'Sensitivity'
+                }
+            }
+
+            $wg = [ordered]@{}
+            $wg.Name     = [string]$g.name
+            $wg.Operator = [string]$g.operator
+            # Emit each bucket only when populated: a labels-only group carries no
+            # Sensitivetypes key on the wire (observed on both label-bearing lab
+            # rules), and an empty array is not the same document.
+            if ($wireSits.Count   -gt 0) { $wg.Sensitivetypes = $wireSits }
+            if ($wireLabels.Count -gt 0) { $wg.Labels         = $wireLabels }
+            $wireGroups += $wg
         }
-        foreach ($c in @($g.trainableClassifiers)) {
-            if (-not $c) { continue }
-            $w = [ordered]@{}
-            if ($c.Contains('name') -and $c.name) { $w.Name = [string]$c.name } else { $w.Name = [string]$c.guid }
-            $w.Id            = [string]$c.guid
-            $w.Classifiertype = 'MLModel'
-            $wireSits += $w
-        }
-        $wireGroups += [ordered]@{
-            Name           = [string]$g.name
-            Operator       = [string]$g.operator
-            Sensitivetypes = $wireSits
-        }
+        return , $wireGroups
     }
 
-    $doc = [ordered]@{
-        Version   = '1.0'
-        Condition = [ordered]@{
-            Operator     = 'And'
-            SubConditions = @(
-                [ordered]@{
+    function ConvertTo-AdvancedRuleWireNode {
+        param($Node, [hashtable]$LabelMap)
+
+        if ($Node.Contains('type')) {
+            $t = [string]$Node['type']
+            if ($t -eq 'ContentContainsSensitiveInformation') {
+                return [ordered]@{
                     ConditionName = 'ContentContainsSensitiveInformation'
                     Value         = @(
                         [ordered]@{
-                            Operator = [string]$AdvancedRule.outerOperator
-                            Groups   = $wireGroups
+                            Operator = [string]$Node['outerOperator']
+                            Groups   = (ConvertTo-AdvancedRuleWireGroupList -Groups $Node['groups'] -LabelMap $LabelMap)
                         }
                     )
                 }
-            )
+            }
+            return [ordered]@{
+                ConditionName = $t
+                Value         = [string]$Node['value']
+            }
+        }
+
+        return [ordered]@{
+            Operator      = [string]$Node['operator']
+            SubConditions = @(foreach ($c in @($Node['conditions'])) { ConvertTo-AdvancedRuleWireNode -Node $c -LabelMap $LabelMap })
         }
     }
-    return $doc | ConvertTo-Json -Depth 12 -Compress:$false
+
+    $root = ConvertTo-NormalizedAdvancedRule -Source $AdvancedRule
+    $doc = [ordered]@{
+        Version   = '1.0'
+        Condition = [ordered]@{
+            Operator      = [string]$root['operator']
+            SubConditions = @(foreach ($c in @($root['conditions'])) { ConvertTo-AdvancedRuleWireNode -Node $c -LabelMap $LabelGuidMap })
+        }
+    }
+    # Depth covers the deepest modeled path (Condition -> SubConditions ->
+    # nested SubConditions -> Value -> Groups -> Sensitivetypes) with head-room
+    # for the nesting the parser allows.
+    return $doc | ConvertTo-Json -Depth 24 -Compress:$false
 }
 
 function ConvertTo-NormalizedAdvancedRuleJson {
     # Produce a stable, key-sorted, whitespace-free JSON string from a
     # normalized advancedRule hash. Used by Compare-DlpRule for an
-    # order-stable equality check. Groups and entries-within-groups
+    # order-stable equality check. Conditions, groups and entries-within-groups
     # are NOT reordered (order has semantic meaning under Microsoft's
     # boolean evaluation); only object-key order is canonicalized.
+    #
+    # THIS IS THE ANTI-PHANTOM-DRIFT SITE, and it is distinct from
+    # ConvertTo-NormalizedAdvancedRule despite the near-identical name: this one
+    # is what Compare-DlpRule calls. The walk below is deliberately STRUCTURAL
+    # (every IDictionary key, every IEnumerable element, recursively) rather
+    # than a field allow-list, so a field added to the model on one side and not
+    # the other cannot silently escape canonicalization and diff forever. The
+    # obligation that remains is that ConvertFrom-AdvancedRuleWire and
+    # ConvertTo-NormalizedAdvancedRule emit the SAME fields for the same
+    # predicate -- pinned by the round-trip tests.
     param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$AdvancedRule)
 
     function ConvertTo-SortedAdvancedRuleNode {
@@ -678,7 +1003,11 @@ function ConvertTo-GenericLocationsWire {
 
         $wireEntries += $w
     }
-    return ($wireEntries | ConvertTo-Json -Depth 10 -Compress)
+    # Bind by -InputObject, never by pipeline: the pipeline enumerates the array, so a
+    # policy with exactly one location scope would serialize as a bare JSON object and the
+    # service rejects the create ("the type requires a JSON array (e.g. [1,2,3])") (#92).
+    # -Depth 100 matches the repo-wide pin rather than the old 10 (#90).
+    return (ConvertTo-Json -InputObject @($wireEntries) -Depth 100 -Compress)
 }
 
 function ConvertTo-NormalizedGenericLocationsJson {
@@ -703,7 +1032,12 @@ function ConvertTo-NormalizedGenericLocationsJson {
         return $node
     }
 
-    return (ConvertTo-SortedGenericLocationNode $GenericLocations) | ConvertTo-Json -Depth 10 -Compress
+    # Bind the array by -InputObject, never by pipeline: the pipeline enumerates it, so a
+    # policy with exactly one location scope would serialize as a bare JSON object and the
+    # service rejects it ("the type requires a JSON array (e.g. [1,2,3])") (#92). The @()
+    # wrapper keeps a single scope an array even after ConvertTo-SortedGenericLocationNode
+    # returns a scalar. -Depth 100 matches the repo-wide pin rather than the old 10 (#90).
+    return ConvertTo-Json -InputObject @(ConvertTo-SortedGenericLocationNode $GenericLocations) -Depth 100 -Compress
 }
 
 function ConvertTo-NormalizedPolicyTemplateInfo {
@@ -1264,7 +1598,10 @@ function ConvertTo-TenantDlpPolicyHash {
 function ConvertTo-TenantDlpRuleHash {
     # Normalize a Get-DlpComplianceRule entry into the desired shape.
     # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/get-dlpcompliancerule
-    param([Parameter(Mandatory = $true)]$Rule)
+    param(
+        [Parameter(Mandatory = $true)]$Rule,
+        [Parameter()][hashtable]$LabelNameMap = @{}
+    )
 
     $sits = @()
     if ($Rule.ContentContainsSensitiveInformation) {
@@ -1290,7 +1627,7 @@ function ConvertTo-TenantDlpRuleHash {
     # notes pass-through introduced by PR #516.
     $advancedRule = $null
     if (([bool]$Rule.IsAdvancedRule) -and $Rule.AdvancedRule) {
-        $parsed = ConvertFrom-AdvancedRuleWire -Wire $Rule.AdvancedRule
+        $parsed = ConvertFrom-AdvancedRuleWire -Wire $Rule.AdvancedRule -LabelNameMap $LabelNameMap
         if ($parsed.Recognized) { $advancedRule = $parsed.Normalized }
     }
 
@@ -1437,13 +1774,112 @@ function Compare-DlpPolicy {
     return $diffs
 }
 
+# ---- Location-restricted rule parameters (#108) --------------------------
+# The DLP service accepts some New-/Set-DlpComplianceRule parameters only when
+# the PARENT policy is scoped to a workload that implements the feature. The
+# restriction is NOT documented on the cmdlet reference page -- it surfaces
+# only as a runtime rejection, quoted verbatim:
+#
+#   Using the 'NotifyUserType' parameter is supported only for Exchange,
+#   SharePoint, OneDriveForBusiness, Teams, EndpointDevices. Either remove
+#   this parameter or turn on only Exchange, SharePoint, OneDriveForBusiness,
+#   Teams, EndpointDevices.
+#
+# Hit live on 2026-07-27 creating 'Fabric PII Detection - CoA Demo Workspace'
+# (locations.powerBI only): the POLICY created, its rule did not, leaving an
+# enabled RULELESS policy on the tenant. Same defect class as #92/#93 -- a
+# value that round-trips cleanly on -ExportCurrentState is undeployable on
+# apply, so no offline test can see it.
+#
+# Only NotifyUserType is listed, deliberately. The sibling notify-* parameters
+# are NOT listed: no Microsoft source documents a restriction for them, and
+# none has been observed rejected. Adding one on suspicion would silently drop
+# a user-notification setting from a working policy -- strictly worse than the
+# loud service error this guard replaces. Add a sibling here only with an
+# observed rejection to cite.
+# Reference: https://learn.microsoft.com/en-us/purview/dlp-use-notifications-and-policy-tips
+function Test-DlpParameterLocationSupport {
+    # $true when $ParameterName may be emitted for a rule whose parent policy
+    # declares $PolicyLocations.
+    #
+    # Fails OPEN in three cases, each on purpose:
+    #   1. The parameter carries no known restriction.
+    #   2. $PolicyLocations is $null -- the caller has no parent-policy context
+    #      (unit-test path, notes-only pass-through). Suppressing on absent
+    #      information would silently weaken a policy.
+    #   3. The policy declares no inclusion bucket at all (genericLocations-only
+    #      or notes-only). Scope is unknown; let the service arbitrate.
+    #
+    # Suppresses ONLY when the policy declares at least one inclusion bucket and
+    # EVERY declared bucket is outside the supported set -- the exact shape the
+    # service rejects.
+    #
+    # A MIXED policy (say exchange + powerBI) deliberately still emits. The
+    # service's own remedy text ("turn on only Exchange, ...") reads as though
+    # it may reject that too, but no such rejection has been observed, and the
+    # two failure modes are not symmetric: emitting risks a LOUD create error
+    # the operator sees and can act on, while suppressing risks SILENTLY
+    # dropping a notification setting from a policy that works today. Loud beats
+    # silent for a security control.
+    param(
+        [Parameter(Mandatory = $true)][string]$ParameterName,
+        [Parameter()][hashtable]$PolicyLocations
+    )
+
+    # Held inside the function, not at script scope, so the function is
+    # self-contained: the Pester suite extracts functions by AST and
+    # dot-sources them individually, and a script-scope table would be $null
+    # under test while working in production -- the worst possible split.
+    $restricted = @{
+        NotifyUserType = @('exchange', 'sharePoint', 'oneDrive', 'teams', 'endpoint')
+    }
+
+    # Every location bucket that TURNS ON a workload. The `*Exception` buckets
+    # carve scope out of an already-enabled workload, so they can never make a
+    # restricted parameter supported and are excluded on purpose.
+    $inclusionBuckets = @(
+        'endpoint', 'exchange', 'exchangeOnPremises', 'onPremisesScanner',
+        'oneDrive', 'powerBI', 'sharePoint', 'sharePointServer', 'teams',
+        'thirdPartyApp'
+    )
+
+    if (-not $restricted.ContainsKey($ParameterName)) { return $true }
+    if ($null -eq $PolicyLocations) { return $true }
+
+    $supported = @($restricted[$ParameterName])
+
+    # NOT `@($PolicyLocations[$bucket]).Count -gt 0`: for a key the hash does
+    # not carry, the indexer returns $null and `@($null).Count` is **1**, not
+    # 0 -- so that idiom reports every bucket as declared and the guard can
+    # never fire. Filter the entries themselves instead.
+    $declared = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($bucket in $inclusionBuckets) {
+        $value = $PolicyLocations[$bucket]
+        if ($null -eq $value) { continue }
+        $entries = @($value | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) })
+        if ($entries.Count -gt 0) { $declared.Add($bucket) }
+    }
+
+    if ($declared.Count -eq 0) { return $true }
+    foreach ($bucket in $declared) {
+        if ($supported -contains $bucket) { return $true }
+    }
+    return $false
+}
+
 function Compare-DlpRule {
     # Return a list of field names that differ between desired and
     # tenant rule hashes. Only declared (non-null / non-empty)
     # desired fields are compared.
+    #
+    # -PolicyLocations is the parent policy's `locations` hash. It is optional
+    # so every existing caller and test keeps working; when supplied it lets
+    # the comparison drop a field the write path cannot emit (#108), which is
+    # what stops a suppressed parameter from planning an Update forever.
     param(
         [Parameter(Mandatory = $true)][hashtable]$Desired,
-        [Parameter(Mandatory = $true)][hashtable]$Tenant
+        [Parameter(Mandatory = $true)][hashtable]$Tenant,
+        [Parameter()][hashtable]$PolicyLocations
     )
 
     $diffs = New-Object 'System.Collections.Generic.List[string]'
@@ -1508,7 +1944,11 @@ function Compare-DlpRule {
     }
 
     # ADR 0033 Batch 3b (#521 slice E) scalars: same only-when-declared semantics.
-    if (-not [string]::IsNullOrEmpty([string]$Desired.notifyUserType)) {
+    # notifyUserType additionally honors the #108 location guard: if the write
+    # path cannot emit it for this policy's workload, comparing it would plan an
+    # Update on every run that the apply could never satisfy.
+    if (-not [string]::IsNullOrEmpty([string]$Desired.notifyUserType) -and
+        (Test-DlpParameterLocationSupport -ParameterName 'NotifyUserType' -PolicyLocations $PolicyLocations)) {
         if ([string]$Desired.notifyUserType -ne [string]$Tenant.notifyUserType) {
             $diffs.Add('notifyUserType') | Out-Null
         }
@@ -1738,10 +2178,16 @@ function Get-DlpRuleSplat {
     # New- expects -Name + -Policy; Set- expects -Identity.
     # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule
     # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/set-dlpcompliancerule
+    #
+    # -PolicyLocations is the parent policy's `locations` hash, used by the
+    # #108 guard to omit parameters the service rejects for this policy's
+    # workload. Optional so existing callers and tests keep working; omitting
+    # it emits every declared parameter exactly as before.
     param(
         [Parameter(Mandatory = $true)][hashtable]$Hash,
         [Parameter()][string]$PolicyName,
         [Parameter()][hashtable]$LabelGuidMap = @{},
+        [Parameter()][hashtable]$PolicyLocations,
         [switch]$ForSet
     )
 
@@ -1785,8 +2231,17 @@ function Get-DlpRuleSplat {
     }
 
     # ADR 0033 Batch 3b (#521 slice E) scalars -> 3 cmdlet parameters.
+    # NotifyUserType is location-restricted (#108): emitting it for a policy
+    # scoped exclusively to an unsupported workload (powerBI/Fabric, on-prem,
+    # third-party) fails the rule create outright and strands an enabled,
+    # ruleless policy in the tenant. Omit it and WARN -- never drop it silently.
     if (-not [string]::IsNullOrEmpty([string]$Hash.notifyUserType)) {
-        $splat.NotifyUserType = [string]$Hash.notifyUserType
+        if (Test-DlpParameterLocationSupport -ParameterName 'NotifyUserType' -PolicyLocations $PolicyLocations) {
+            $splat.NotifyUserType = [string]$Hash.notifyUserType
+        } else {
+            Write-Warning ("[#108] Omitting -NotifyUserType ('{0}') from rule '{1}\{2}': the parent policy is scoped only to workloads the DLP service does not accept this parameter for (supported: Exchange, SharePoint, OneDriveForBusiness, Teams, EndpointDevices). The rule is created without it; the YAML is left unchanged." -f `
+                [string]$Hash.notifyUserType, [string]$PolicyName, [string]$Hash.name)
+        }
     }
     if (-not [string]::IsNullOrEmpty([string]$Hash.notifyOverrideRequirements)) {
         $splat.NotifyOverrideRequirements = [string]$Hash.notifyOverrideRequirements
@@ -1877,8 +2332,18 @@ function Get-DlpRuleSplat {
     # against the YAML carrying both: only emit -AdvancedRule when
     # ContentContainsSensitiveInformation is not already set above.
     if ($Hash.advancedRule -and -not $splat.ContainsKey('ContentContainsSensitiveInformation')) {
-        $splat.AdvancedRule = ConvertTo-AdvancedRuleWire -AdvancedRule $Hash.advancedRule
+        $splat.AdvancedRule = ConvertTo-AdvancedRuleWire -AdvancedRule $Hash.advancedRule -LabelGuidMap $LabelGuidMap
     }
+
+    # rawAdvancedRule (#79): NEVER emitted to the cmdlet. The field is
+    # exporter-write / applier-skip -- it carries a verbatim tenant wire body that
+    # this reconciler could NOT parse, so it is by definition unvalidated against
+    # the ADR 0031 model. Forwarding it to New-/Set-DlpComplianceRule would push an
+    # unvalidated predicate down the live write path. This is the defensive
+    # boundary, mirroring the identical treatment `policyTemplateInfo` is given in
+    # Get-DlpPolicySplat per ADR 0032. The absence of an emit here is deliberate and
+    # is pinned by a regression test -- do not "complete" this function by adding
+    # one. Reference: docs/adr/0031-dlp-advancedrule-yaml-shape.md
 
     return $splat
 }
@@ -1905,6 +2370,43 @@ function Resolve-SensitivityLabelMap {
     return $map
 }
 
+function ConvertTo-SensitivityLabelNameMap {
+    # Invert a displayName -> GUID label map into GUID -> displayName, which is
+    # the direction the EXPORT path needs: an AdvancedRule wire body carries
+    # Labels[].Id (a raw tenant GUID) and the repo may only ever record the
+    # display name (ADR 0023). Keys are lower-cased so wire casing is irrelevant.
+    param([Parameter(Mandatory = $true)][hashtable]$LabelGuidMap)
+
+    $inverse = @{}
+    foreach ($displayName in @($LabelGuidMap.Keys)) {
+        $guid = ([string]$LabelGuidMap[$displayName]).ToLowerInvariant()
+        if (-not $guid) { continue }
+        # First writer wins. Two display names cannot share an ImmutableId, so
+        # this only guards against a malformed map.
+        if (-not $inverse.ContainsKey($guid)) { $inverse[$guid] = [string]$displayName }
+    }
+    return $inverse
+}
+
+function Test-DlpRuleIsNotesOnly {
+    # A rule is a notes-only pass-through when it carries a `notes:` marker and
+    # NO predicate the reconciler can send to New-/Set-DlpComplianceRule.
+    #
+    # Single definition on purpose (#80): the policy-level hollow-create guard
+    # and the rule-level Create/Update skip MUST agree on what "no predicate"
+    # means. They did not before -- the rule guard skipped such rules while the
+    # policy guard only recognised a policy with NO rules at all, so a policy
+    # whose every rule was degraded was still planned Create and landed in the
+    # tenant enabled and RULELESS.
+    param([Parameter(Mandatory = $true)][hashtable]$Rule)
+
+    if ([string]::IsNullOrEmpty([string]$Rule.notes))    { return $false }
+    if (@($Rule.sensitiveInfoTypes).Count -gt 0)         { return $false }
+    if (@($Rule.sensitivityLabels).Count  -gt 0)         { return $false }
+    if ($Rule.advancedRule)                              { return $false }
+    return $true
+}
+
 function Invoke-DlpExport {
     # Round-trip tenant policies + rules back into the YAML's
     # `policies:` block.
@@ -1912,6 +2414,7 @@ function Invoke-DlpExport {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$TenantPolicies,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$TenantRules,
+        [Parameter()][hashtable]$LabelNameMap = @{},
         [switch]$Force
     )
 
@@ -2155,11 +2658,20 @@ function Invoke-DlpExport {
                 # value: Block}. Closes out Batch 4 and umbrella #521.
                 if ($r.RestrictAccess -and @($r.RestrictAccess).Count -gt 0) {
                     $raNormalized = ConvertTo-NormalizedRestrictAccess -Source @($r.RestrictAccess)
-                    $re.restrictAccess = @($raNormalized | ForEach-Object {
-                        $o = [ordered]@{}
-                        foreach ($p in $_.PSObject.Properties) { $o[$p.Name] = $p.Value }
-                        $o
-                    })
+                    # Emit only when normalization yields >=1 item. A tenant rule can
+                    # carry a RestrictAccess entry that drops out during normalization
+                    # (e.g. an item with no `setting` -- observed on the lab Copilot
+                    # "interactions" rule), which would otherwise write an empty
+                    # `restrictAccess: []`. That value is rejected by the schema
+                    # (restrictAccess minItems: 1) and can never round-trip. Mirrors the
+                    # endpointDlpRestrictions / alertProperties emit guards above.
+                    if (@($raNormalized).Count -gt 0) {
+                        $re.restrictAccess = @($raNormalized | ForEach-Object {
+                            $o = [ordered]@{}
+                            foreach ($p in $_.PSObject.Properties) { $o[$p.Name] = $p.Value }
+                            $o
+                        })
+                    }
                 }
 
                 # AdvancedRule extraction (ADR 0031). When IsAdvancedRule=True,
@@ -2170,14 +2682,42 @@ function Invoke-DlpExport {
                 $advancedRuleEntry = $null
                 $advancedRuleNote  = $null
                 if (([bool]$r.IsAdvancedRule) -and $r.AdvancedRule) {
-                    $parsed = ConvertFrom-AdvancedRuleWire -Wire $r.AdvancedRule
+                    $parsed = ConvertFrom-AdvancedRuleWire -Wire $r.AdvancedRule -LabelNameMap $LabelNameMap
                     if ($parsed.Recognized) {
-                        $advancedRuleEntry = $parsed.Normalized
+                        # Rendered in the legacy `{ outerOperator, groups }` sugar when
+                        # the tree allows it, so rules that were already clean before
+                        # #80 re-export byte-identically. See ConvertTo-ExportedAdvancedRule.
+                        $advancedRuleEntry = ConvertTo-ExportedAdvancedRule -AdvancedRule $parsed.Normalized
                     } else {
                         $advancedRuleNote = ("Tenant rule predicate is carried in AdvancedRule but the wire shape isn't yet modeled ({0}). Reconciler treats this entry as inert pass-through until follow-up support lands." -f $parsed.Reason)
                     }
                 }
                 if ($advancedRuleEntry) { $re.advancedRule = $advancedRuleEntry }
+
+                # rawAdvancedRule (#79): when the wire body did NOT parse, persist it
+                # verbatim as captured evidence. Before this, the exporter kept only the
+                # `notes:` sentence -- which reports the arity of the failure ("got 2")
+                # but not its content -- and discarded $r.AdvancedRule entirely. That
+                # destroyed the only copy of the predicate, so a representability gap
+                # could not be diagnosed or modelled from the repo at all.
+                #
+                # Emit site (#79 constraint 4, option 1): UNCONDITIONAL on parse failure,
+                # deliberately NOT gated on $sits.Count like the `notes:` fallback below.
+                # $sits is extracted from $r.ContentContainsSensitiveInformation, a
+                # SEPARATE tenant property from $r.AdvancedRule, so a rule can populate
+                # both; gating here would silently skip exactly that case and hand the
+                # follow-up representability work an incomplete sample it would believe
+                # complete. The field means "the tenant's AdvancedRule body did not
+                # parse", which is true independent of $sits.
+                #
+                # Consequence for policies.schema.json: `rawAdvancedRule` is mutually
+                # exclusive with `advancedRule` only (added to the `not` block). It is
+                # NOT forbidden alongside `sensitiveInfoTypes`, because that pairing is
+                # permitted by design here.
+                #
+                # This field is exporter-write / applier-skip -- see the boundary comment
+                # in Get-DlpRuleSplat. Reference: docs/adr/0031-dlp-advancedrule-yaml-shape.md
+                if ($advancedRuleNote -and $r.AdvancedRule) { $re.rawAdvancedRule = [string]$r.AdvancedRule }
 
                 # If the rule carries no modeled predicate, fall back to a
                 # notes marker so the entry round-trips through the schema
@@ -2262,6 +2802,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 # cannot be entered unattended from a local terminal.
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 #endregion
@@ -2359,7 +2906,19 @@ if ($mode -eq 'Apply') {
             return
         }
         $schemaText = Get-Content -LiteralPath $schemaPath -Raw
-        $docJson = $desiredRoot | ConvertTo-Json -Depth 10
+        # Depth 100 (the ConvertTo-Json maximum), matching Deploy-AdaptiveScopes.ps1,
+        # Deploy-AutoLabelPolicies.ps1, Deploy-LabelPolicies.ps1 and Deploy-Labels.ps1.
+        #
+        # This was -Depth 10, which sat EXACTLY at the deepest pre-#80 path
+        # (policies > [] > rules > [] > advancedRule > groups > [] >
+        # sensitiveInfoTypes > [] > guid). The #80 condition tree adds two levels
+        # (conditions > []) and a nested condition group adds two more, so a valid
+        # document silently TRUNCATED during serialization and then failed schema
+        # validation with a misleading error pointing at an unrelated shallow field
+        # (`locations/powerBI`), because truncation rewrites deep nodes as strings.
+        # Found at first live contact on dev. Pinning the maximum removes the whole
+        # class: no future widening of the model can reintroduce it.
+        $docJson = $desiredRoot | ConvertTo-Json -Depth 100
         try {
             $null = $docJson | Test-Json -Schema $schemaText -ErrorAction Stop
         }
@@ -2374,6 +2933,25 @@ if ($mode -eq 'Apply') {
         $desiredEntries = @($desiredRoot.policies | ForEach-Object { ConvertTo-DesiredDlpPolicyHash -Entry ([hashtable]$_) })
     }
     Write-Information ("Desired policies: {0}" -f $desiredEntries.Count) -InformationAction Continue
+
+    # Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+    #
+    # With zero desired entries every live tenant DLP policy falls out of the
+    # orphan match below, so the run would classify the entire set as orphans
+    # and delete it. The rationale, the likely causes, and the 2026-07-19
+    # production hit are documented in scripts/modules/PruneGuard.psm1.
+    #
+    # This whole block is Apply-only, so reaching it already implies Apply mode.
+    # Placed in the desired-state load region so it fires before the tenant is
+    # contacted at all -- before `az account show`, before Connect-IPPSSession,
+    # and before any write phase.
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneDesiredSetNotEmpty `
+            -DesiredCount   $desiredEntries.Count `
+            -ObjectTypeNoun 'DLP policy' `
+            -SourcePath     $Path `
+            -CollectionKey  'policies'
+    }
 }
 
 #endregion
@@ -2458,13 +3036,19 @@ try {
     Write-Information ("Tenant policies : {0}" -f $tenantPolicies.Count) -InformationAction Continue
     Write-Information ("Tenant rules    : {0}" -f $tenantRules.Count)    -InformationAction Continue
 
+    # Sensitivity-label display-name -> GUID resolution (issue #65), and its
+    # GUID -> display-name inverse (#80). Resolved BEFORE the Export branch:
+    # export needs the inverse to render an AdvancedRule's embedded Labels[].Id
+    # by display name (ADR 0023). A rule whose label the tenant cannot resolve
+    # stays unparsed and is captured as rawAdvancedRule evidence (#79) rather
+    # than exported with a raw GUID in it.
+    $labelGuidMap = Resolve-SensitivityLabelMap
+    $labelNameMap = ConvertTo-SensitivityLabelNameMap -LabelGuidMap $labelGuidMap
+
     if ($mode -eq 'Export') {
-        Invoke-DlpExport -Path $Path -TenantPolicies $tenantPolicies -TenantRules $tenantRules -Force:$Force.IsPresent
+        Invoke-DlpExport -Path $Path -TenantPolicies $tenantPolicies -TenantRules $tenantRules -LabelNameMap $labelNameMap -Force:$Force.IsPresent
         return
     }
-
-    # Sensitivity-label display-name -> GUID resolution (issue #65).
-    $labelGuidMap = Resolve-SensitivityLabelMap
 
     # Adaptive scope Name -> GUID resolution (#520). Passed to
     # Get-DlpPolicySplat so apply throws clearly if a YAML-referenced
@@ -2480,11 +3064,17 @@ try {
     $tenantRuleByKey = @{}
     foreach ($r in $tenantRules) {
         $key = ('{0}\{1}' -f [string]$r.ParentPolicyName, [string]$r.Name)
-        $tenantRuleByKey[$key] = ConvertTo-TenantDlpRuleHash -Rule $r
+        $tenantRuleByKey[$key] = ConvertTo-TenantDlpRuleHash -Rule $r -LabelNameMap $labelNameMap
     }
     $desiredPolicyNames = @($desiredEntries | ForEach-Object { $_.name })
 
     # ---- Policy-level plan ------------------------------------------------
+    # Blocked rows are collected here and aborted on below, before the ADR 0029
+    # direction pass and both ADR 0052 confirmation gates -- i.e. at the last
+    # point where nothing has been written. Mirrors the Blocked handling in
+    # Deploy-AdaptiveScopes.ps1 / Deploy-AutoLabelPolicies.ps1.
+    $blockedRows        = New-Object 'System.Collections.Generic.List[object]'
+    $blockedPolicyNames = New-Object 'System.Collections.Generic.List[string]'
     $policyPlan = New-Object 'System.Collections.Generic.List[object]'
     foreach ($d in $desiredEntries) {
         # Notes-only pass-through: a policy that declares only structural
@@ -2504,6 +3094,36 @@ try {
             $policyPlan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $d.name; Desired = $d; Reason = 'Notes-only pass-through; no tenant counterpart and no modeled state to create.' })
             continue
         }
+
+        # ---- Hollow-policy create guard (#80) ----
+        # A policy that does NOT exist in the tenant and whose EVERY rule is a
+        # notes-only pass-through has no predicate to create. The rule loop
+        # below would skip all of those rules while this loop happily planned
+        # the policy Create -- landing an ENABLED, RULELESS policy in the
+        # tenant, which enforces nothing and silently misrepresents the repo as
+        # the source of truth for it. That asymmetry is the failure mode this
+        # guard closes: Blocked, never Create.
+        #
+        # Deliberately scoped to CREATE. An existing policy whose rules degraded
+        # is not hollow -- its live rules are untouched, and Compare-DlpPolicy
+        # keeps reconciling its policy-level fields.
+        #
+        # This can only fire on a predicate shape the transform cannot model,
+        # which #79 now captures verbatim as rawAdvancedRule evidence -- so the
+        # operator gets a Blocked row AND the body needed to model it.
+        if (-not $tenantPolicyByName.ContainsKey($d.name) -and @($d.rules).Count -gt 0) {
+            $modeledRules = @($d.rules | Where-Object { -not (Test-DlpRuleIsNotesOnly -Rule ([hashtable]$_)) })
+            if ($modeledRules.Count -eq 0) {
+                $reason = ("Every one of the {0} declared rule(s) is a notes-only pass-through, so creating this policy would produce an enabled policy with no rules. Model the rule predicate (see the rule's rawAdvancedRule evidence) or remove the policy from the YAML." -f @($d.rules).Count)
+                $row = [pscustomobject]@{ Action = 'Blocked'; Name = $d.name; Desired = $d; Reason = $reason; Fields = '' }
+                $policyPlan.Add($row)
+                $blockedRows.Add($row)
+                $blockedPolicyNames.Add([string]$d.name)
+                $report.Add([pscustomobject]@{ Category = 'Blocked'; Kind = 'Policy'; Name = $d.name; Reason = $reason })
+                continue
+            }
+        }
+
         if ($tenantPolicyByName.ContainsKey($d.name)) {
             $diffs = Compare-DlpPolicy -Desired $d -Tenant $tenantPolicyByName[$d.name]
             if ($diffs.Count -eq 0) {
@@ -2531,6 +3151,10 @@ try {
     $rulePlan       = New-Object 'System.Collections.Generic.List[object]'
     $ruleOrphanPlan = New-Object 'System.Collections.Generic.List[object]'
     foreach ($d in $desiredEntries) {
+        # A policy the hollow guard blocked has no tenant counterpart and will
+        # not be created, so planning its rules would only produce Create rows
+        # that could never bind to a parent policy.
+        if ($blockedPolicyNames -contains [string]$d.name) { continue }
         $desiredRuleNames = @($d.rules | ForEach-Object { $_.name })
         foreach ($dr in $d.rules) {
             $key = ('{0}\{1}' -f $d.name, $dr.name)
@@ -2539,20 +3163,23 @@ try {
             # no sensitivityLabels, no advancedRule) has no predicate
             # the reconciler can send to New-/Set-DlpComplianceRule.
             # Skip Create/Update; plan as NoChange so the row is
-            # visible.
-            if (-not [string]::IsNullOrEmpty([string]$dr.notes) -and @($dr.sensitiveInfoTypes).Count -eq 0 -and @($dr.sensitivityLabels).Count -eq 0 -and (-not $dr.advancedRule)) {
-                $rulePlan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; Reason = 'Notes-only pass-through; no Create/Update against tenant.'; Fields = '' })
+            # visible. Shares its definition with the policy-level
+            # hollow guard above -- see Test-DlpRuleIsNotesOnly.
+            if (Test-DlpRuleIsNotesOnly -Rule ([hashtable]$dr)) {
+                $rulePlan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; PolicyLocations = $d.locations; Reason = 'Notes-only pass-through; no Create/Update against tenant.'; Fields = '' })
                 continue
             }
+            # The parent policy's locations ride on every rule row so the apply
+            # loop can consult the #108 guard without re-resolving the parent.
             if ($tenantRuleByKey.ContainsKey($key)) {
-                $diffs = Compare-DlpRule -Desired $dr -Tenant $tenantRuleByKey[$key]
+                $diffs = Compare-DlpRule -Desired $dr -Tenant $tenantRuleByKey[$key] -PolicyLocations $d.locations
                 if ($diffs.Count -eq 0) {
-                    $rulePlan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; Reason = 'In sync with tenant.'; Fields = '' })
+                    $rulePlan.Add([pscustomobject]@{ Action = 'NoChange'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; PolicyLocations = $d.locations; Reason = 'In sync with tenant.'; Fields = '' })
                 } else {
-                    $rulePlan.Add([pscustomobject]@{ Action = 'Update'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; Reason = ('Drift in: {0}' -f ($diffs -join ', ')); Fields = ($diffs -join ',') })
+                    $rulePlan.Add([pscustomobject]@{ Action = 'Update'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; PolicyLocations = $d.locations; Reason = ('Drift in: {0}' -f ($diffs -join ', ')); Fields = ($diffs -join ',') })
                 }
             } else {
-                $rulePlan.Add([pscustomobject]@{ Action = 'Create'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; Reason = 'Declared in YAML; absent from tenant.'; Fields = '' })
+                $rulePlan.Add([pscustomobject]@{ Action = 'Create'; Name = $dr.name; Key = $key; Desired = $dr; PolicyName = $d.name; PolicyLocations = $d.locations; Reason = 'Declared in YAML; absent from tenant.'; Fields = '' })
             }
         }
 
@@ -2564,6 +3191,19 @@ try {
                 $ruleOrphanPlan.Add([pscustomobject]@{ Action = 'Orphan'; Name = $trn; Key = $key; PolicyName = $d.name; Reason = 'Tenant-only rule under managed policy.' })
             }
         }
+    }
+
+    # ---- Blocked abort (#80) ---------------------------------------------
+    # Before the direction pass, before both ADR 0052 gates, before any write:
+    # a Blocked row means the plan itself is unsound, so the run stops rather
+    # than reconciling the rest and leaving the operator to notice a row in a
+    # table. Fires under -WhatIf too -- a preview that hides the block would
+    # send the operator into an apply that cannot succeed.
+    if ($blockedRows.Count -gt 0) {
+        foreach ($b in $blockedRows) {
+            Write-Error ("DLP policy '{0}' is Blocked: {1}" -f $b.Name, $b.Reason)
+        }
+        throw ("Reconciliation aborted: {0} DLP policy/policies blocked. See the errors above." -f $blockedRows.Count)
     }
 
     # ---- ADR 0029: direction-policy pass ---------------------------------
@@ -2667,6 +3307,48 @@ try {
     if ($DirectionPolicy -eq 'audit') {
         Write-Information '[ADR0029-AUDIT] DirectionPolicy=audit - no writes will fire. Plan below is read-only.' -InformationAction Continue
         $WhatIfPreference = $true
+    }
+
+    # ---- Issue #13, guard 2: prune sanity ratio (per tier) ----
+    # Guard 1 (desired-state load region) catches only the total wipe. This
+    # catches the near-total one: a policies.yaml that lost most of its
+    # entries to a bad merge, or a -Path pointing at a smaller environment's
+    # file, both of which leave a non-zero desired count and so clear guard 1.
+    #
+    # The ratio is checked PER TIER -- orphan rules against the live rules,
+    # orphan policies against the live policies -- because a blended ratio can
+    # mask a single-collection wipe. Fires before both ADR 0052 gates so the
+    # operator is never prompted for a plan the guard would refuse anyway.
+    #
+    # AUDIT TRAP: this script implements audit by flipping $WhatIfPreference;
+    # the orphan plans stay populated, so without the explicit audit gate a
+    # read-only `-DirectionPolicy audit -PruneMissing` run would be refused
+    # for a delete it can never perform.
+    # Reference: scripts/modules/PruneGuard.psm1
+    if ($PruneMissing.IsPresent -and $DirectionPolicy -ne 'audit') {
+        # $ruleOrphanPlan is a System.Collections.Generic.List[object] (built via
+        # New-Object + .Add()). Do NOT re-wrap it in @() -- on PowerShell 7.6.x,
+        # directly array-wrapping a List[object] VARIABLE REFERENCE throws
+        # "Argument types do not match" inside the dynamic array-conversion
+        # binder, independent of element count (reproduced crashing at 0, 1, and
+        # 2 elements alike). .Count is a native property on List<T>, always
+        # correct with none of the pipeline single-result-unwrapping hazard
+        # @(...) normally guards against -- that hazard applies to PIPELINE
+        # output, not a pre-built List<T>. Found live at first -PruneMissing
+        # contact against a real tenant (issue #110); invisible offline because
+        # no offline test builds a real List[object] and exercises this wrap.
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     $ruleOrphanPlan.Count `
+            -LiveCount      @($tenantRules).Count `
+            -ObjectTypeNoun 'DLP rule' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     @($policyPlan | Where-Object { $_.Action -eq 'Orphan' }).Count `
+            -LiveCount      @($tenantPolicies).Count `
+            -ObjectTypeNoun 'DLP policy' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
     }
 
     # ---- ADR 0052: destructive-operation confirmation gate ----
@@ -2783,7 +3465,7 @@ try {
             'Create' {
                 if ($PSCmdlet.ShouldProcess($target, 'New-DlpComplianceRule')) {
                     try {
-                        $splat = Get-DlpRuleSplat -Hash $row.Desired -PolicyName $row.PolicyName -LabelGuidMap $labelGuidMap
+                        $splat = Get-DlpRuleSplat -Hash $row.Desired -PolicyName $row.PolicyName -LabelGuidMap $labelGuidMap -PolicyLocations $row.PolicyLocations
                         # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/new-dlpcompliancerule
                         New-DlpComplianceRule @splat -ErrorAction Stop | Out-Null
                         $report.Add([pscustomobject]@{ Category = 'Created'; Kind = 'Rule'; Name = $row.Key; Reason = 'Declared in YAML; absent from tenant.' })
@@ -2797,7 +3479,7 @@ try {
             'Update' {
                 if ($PSCmdlet.ShouldProcess($target, 'Set-DlpComplianceRule')) {
                     try {
-                        $splat = Get-DlpRuleSplat -Hash $row.Desired -PolicyName $row.PolicyName -LabelGuidMap $labelGuidMap -ForSet
+                        $splat = Get-DlpRuleSplat -Hash $row.Desired -PolicyName $row.PolicyName -LabelGuidMap $labelGuidMap -PolicyLocations $row.PolicyLocations -ForSet
                         # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/set-dlpcompliancerule
                         Set-DlpComplianceRule @splat -ErrorAction Stop | Out-Null
                         $report.Add([pscustomobject]@{ Category = 'Updated'; Kind = 'Rule'; Name = $row.Key; Reason = $row.Reason })
@@ -2819,6 +3501,17 @@ try {
         }
     }
 
+    $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+    # Issue #13: in-loop prune failures keep their 'Failed' report row AND are
+    # reported via Write-PruneFailure (scripts/modules/PruneGuard.psm1), which
+    # uses Write-Warning plus an '::error::' workflow command rather than
+    # Write-Error. Previously the catch added the row and moved on, so a
+    # failed prune exited 0. The aggregate `throw` after the policy orphan
+    # loop -- inside this try, so the finally still disconnects -- is the
+    # terminal outcome, so a failed prune now exits non-zero after every
+    # orphan has been attempted.
+
     # Apply rule-level orphan plan (Remove under -PruneMissing).
     foreach ($row in $ruleOrphanPlan) {
         if ($PruneMissing.IsPresent) {
@@ -2830,6 +3523,9 @@ try {
                     $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Rule'; Name = $row.Key; Reason = $row.Reason })
                 } catch {
                     $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Rule'; Name = $row.Key; Reason = ('Remove failed: {0}' -f $_.Exception.Message) })
+                    Write-PruneFailure ("Remove-DlpComplianceRule '{0}' failed: {1}" -f $row.Key, $_.Exception.Message)
+                    $pruneFailures.Add(("rule '{0}'" -f $row.Key))
+                    continue
                 }
             } else {
                 $report.Add([pscustomobject]@{ Category = 'Orphan'; Kind = 'Rule'; Name = $row.Key; Reason = 'Would remove tenant-only rule under managed policy.' })
@@ -2850,6 +3546,9 @@ try {
                     $report.Add([pscustomobject]@{ Category = 'Removed'; Kind = 'Policy'; Name = $row.Name; Reason = $row.Reason })
                 } catch {
                     $report.Add([pscustomobject]@{ Category = 'Failed'; Kind = 'Policy'; Name = $row.Name; Reason = ('Remove failed: {0}' -f $_.Exception.Message) })
+                    Write-PruneFailure ("Remove-DlpCompliancePolicy '{0}' failed: {1}" -f $row.Name, $_.Exception.Message)
+                    $pruneFailures.Add(("policy '{0}'" -f $row.Name))
+                    continue
                 }
             } else {
                 $report.Add([pscustomobject]@{ Category = 'Orphan'; Kind = 'Policy'; Name = $row.Name; Reason = ('Would remove. {0}' -f $row.Reason) })
@@ -2857,6 +3556,10 @@ try {
         } else {
             $report.Add([pscustomobject]@{ Category = 'Orphan'; Kind = 'Policy'; Name = $row.Name; Reason = $row.Reason })
         }
+    }
+
+    if ($pruneFailures.Count -gt 0) {
+        throw ("Reconciliation aborted: {0} orphan DLP object(s) could not be removed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
     }
 }
 finally {

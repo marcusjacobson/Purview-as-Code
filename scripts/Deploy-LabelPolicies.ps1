@@ -121,6 +121,30 @@
     must usually be set to `Mode Disable` first; the reconciler
     surfaces the server error if the tenant refuses.
 
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty. A prune against
+        `labelPolicies: []` would classify every live policy as orphaned.
+      * The prune must not exceed `-MaxPruneRatio` of the live label
+        policies without `-AllowMajorityPrune`.
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live label policies is refused before any write. Supply it when a
+    large prune is genuinely intended (a deliberate consolidation); the
+    ratio is then reported as a warning and the run proceeds. Has no
+    effect on the empty-desired-set guard, which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest share of the live label policies `-PruneMissing` may delete
+    without `-AllowMajorityPrune`, as a fraction in (0, 1]. Default 0.5.
+    A prune exactly at the threshold passes; only a strictly larger share
+    is refused. Set to 1 to disable the ratio guard for a single run.
+
 .PARAMETER Force
     With `-ExportCurrentState`: allow overwriting a `labelPolicies:` block
     that already contains entries. Without it the script refuses, to avoid
@@ -292,6 +316,13 @@ param(
 
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -933,6 +964,13 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 #endregion
 
 #region Parameters file resolution
@@ -1041,6 +1079,25 @@ if (-not $SkipSchemaValidation.IsPresent) {
 $desiredEntries = @()
 if ($desiredRoot -and $desiredRoot.ContainsKey('labelPolicies') -and $desiredRoot.labelPolicies) {
     $desiredEntries = @($desiredRoot.labelPolicies)
+}
+
+# Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+#
+# With zero desired entries every live tenant label policy falls out of the
+# orphan match below, so the run would classify the entire set as orphans and
+# delete it. The rationale, the likely causes, and the 2026-07-19 production
+# hit are documented in scripts/modules/PruneGuard.psm1.
+#
+# Keyed on Apply specifically: this script also has Verify and Compare modes,
+# neither of which writes. Placed in the desired-state load region so it fires
+# before the tenant is contacted at all -- before `az account show`, before
+# Connect-IPPSSession, and before any write phase.
+if ($mode -eq 'Apply' -and $PruneMissing.IsPresent) {
+    Assert-PruneDesiredSetNotEmpty `
+        -DesiredCount   $desiredEntries.Count `
+        -ObjectTypeNoun 'label policy' `
+        -SourcePath     $Path `
+        -CollectionKey  'labelPolicies'
 }
 
 $desiredHashes = @()
@@ -1778,6 +1835,27 @@ try {
         $orphans = @()
     }
 
+    # ---- Issue #13, guard 2: prune sanity ratio ----
+    # Guard 1 (desired-state load region) catches only the total wipe. This
+    # catches the near-total one: a label-policies.yaml that lost most of its
+    # entries to a bad merge, or a -Path pointing at a smaller environment's
+    # file, both of which leave a non-zero desired count and so clear guard 1.
+    #
+    # Keyed on the ORPHAN set this run would actually delete against the live
+    # tenant count, and evaluated after the audit short-circuit has emptied
+    # $orphans so `-DirectionPolicy audit` cannot trip it. Fires before the ADR
+    # 0052 gate and before Phase 2/3: the last point at which nothing has been
+    # written.
+    # Reference: scripts/modules/PruneGuard.psm1
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneRatioWithinThreshold `
+            -PruneCount     $orphans.Count `
+            -LiveCount      @($tenantPolicies).Count `
+            -ObjectTypeNoun 'label policy' `
+            -MaxPruneRatio  $MaxPruneRatio `
+            -Allow:$AllowMajorityPrune
+    }
+
     # ---- ADR 0052: destructive-operation confirmation gate ----
     # The last point before Phase 2/3 at which nothing has been written.
     # Both destructive branches are gated here, once per run, via
@@ -1912,16 +1990,32 @@ try {
                     try {
                         $created = New-LabelPolicy @newArgs -Confirm:$false -ErrorAction Stop
                         Write-Information ("Created label policy '{0}'." -f $d.name) -InformationAction Continue
-                        # Mode is Set- only on a follow-up call to keep the
-                        # Create splat minimal; New-LabelPolicy defaults to
-                        # TestWithoutNotifications and the next Set-LabelPolicy
-                        # call below converges to the desired Mode.
-                        if ($d.mode -and $d.mode -ne 'TestWithoutNotifications') {
-                            $modeAction = "Set-LabelPolicy -Mode {0}" -f $d.mode
-                            if ($PSCmdlet.ShouldProcess($shouldProcessTarget, $modeAction)) {
-                                # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-labelpolicy
-                                Set-LabelPolicy -Identity $d.name -Mode $d.mode -Confirm:$false -ErrorAction Stop | Out-Null
-                                Write-Information ("Set label policy '{0}' Mode={1}." -f $d.name, $d.mode) -InformationAction Continue
+                        # Discovered 2026-07-22: `-Mode` is NOT a valid parameter on
+                        # EITHER New-LabelPolicy or Set-LabelPolicy in the connected
+                        # Security & Compliance PowerShell session (confirmed via
+                        # `Get-Command -Syntax` against a live app-only session --
+                        # zero parameter sets on either cmdlet include `Mode`,
+                        # despite the Learn reference page documenting one). The
+                        # PREVIOUS code here called `Set-LabelPolicy -Mode` as a
+                        # follow-up write, which always throws
+                        # ParameterBindingException and aborts the whole Apply run
+                        # (issue discovered live: the first Create in a real dev-
+                        # tenant convergence failed here after already creating the
+                        # policy). New-LabelPolicy creates a policy already in the
+                        # enforcing/published runtime state (`Get-LabelPolicy.Mode`
+                        # reports `Enforce`, which `ConvertTo-PolicyInputMode` above
+                        # already normalizes to `Enable` for read/compare) with no
+                        # Mode argument needed. There is currently no known
+                        # cmdlet-level way to create a policy in `Disable` or a
+                        # `TestWith*` state; if the desired Mode isn't the
+                        # New-LabelPolicy default, warn rather than silently
+                        # pretending it was applied.
+                        # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/new-labelpolicy
+                        if ($d.mode) {
+                            $tenantPolicyAfterCreate = Get-LabelPolicy -Identity $d.name -ErrorAction SilentlyContinue
+                            $actualMode = if ($tenantPolicyAfterCreate) { ConvertTo-PolicyInputMode -Mode ([string]$tenantPolicyAfterCreate.Mode) } else { '' }
+                            if ($actualMode -and $actualMode -ne $d.mode) {
+                                Write-Warning ("Label policy '{0}' created with runtime Mode '{1}' (desired '{2}'); no cmdlet parameter is currently known to set Mode explicitly. Manual/portal follow-up may be required." -f $d.name, $actualMode, $d.mode)
                             }
                         }
                         $null = $created
@@ -1949,17 +2043,16 @@ try {
                 # not a full set.
                 # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-labelpolicy
                 if ($changedFields -contains 'mode') {
-                    $action = "Set-LabelPolicy -Mode {0}" -f $d.mode
-                    if ($PSCmdlet.ShouldProcess($shouldProcessTarget, $action)) {
-                        try {
-                            Set-LabelPolicy -Identity $d.name -Mode $d.mode -Confirm:$false -ErrorAction Stop | Out-Null
-                            Write-Information ("Updated label policy '{0}' Mode={1}." -f $d.name, $d.mode) -InformationAction Continue
-                        }
-                        catch {
-                            Write-Error ("Set-LabelPolicy '{0}' (Mode) failed: {1}" -f $d.name, $_.Exception.Message)
-                            return
-                        }
-                    }
+                    # Discovered 2026-07-22: `-Mode` is not a valid parameter on
+                    # Set-LabelPolicy in the connected Security & Compliance
+                    # PowerShell session (confirmed via `Get-Command -Syntax` --
+                    # zero parameter sets include `Mode`). See the matching
+                    # Create-branch comment above for the full finding. There is
+                    # currently no known cmdlet-level way to change a label
+                    # policy's Mode after creation; warn rather than attempt a
+                    # call that will always throw ParameterBindingException.
+                    # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/set-labelpolicy
+                    Write-Warning ("Label policy '{0}' Mode drift detected (desired '{1}') but no cmdlet parameter is currently known to change Mode post-creation. Skipping -- manual/portal follow-up required." -f $d.name, $d.mode)
                 }
                 if ($changedFields -contains 'exchangeLocation') {
                     $action = 'Set-LabelPolicy -ExchangeLocation'
@@ -2131,6 +2224,16 @@ try {
     }
 
     if ($PruneMissing.IsPresent) {
+        $pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+        # Issue #13: in-loop prune failures are reported via Write-PruneFailure
+        # (scripts/modules/PruneGuard.psm1), which uses Write-Warning plus an
+        # '::error::' workflow command rather than Write-Error. Under GitHub
+        # Actions, `shell: pwsh` sets $ErrorActionPreference='stop', so a
+        # Write-Error here would terminate the loop on the first orphan and the
+        # rest would never be attempted. The aggregate `throw` below remains the
+        # terminal outcome, so a failed prune still exits non-zero.
+
         foreach ($p in $orphans) {
             $shouldProcessTarget = "Sensitivity label policy '{0}'" -f $p.Name
             $shouldProcessAction = 'Remove-LabelPolicy'
@@ -2141,10 +2244,15 @@ try {
                     Write-Information ("Removed orphan label policy '{0}'." -f $p.Name) -InformationAction Continue
                 }
                 catch {
-                    Write-Error ("Remove-LabelPolicy '{0}' failed: {1}" -f $p.Name, $_.Exception.Message)
-                    return
+                    Write-PruneFailure ("Remove-LabelPolicy '{0}' failed: {1}" -f $p.Name, $_.Exception.Message)
+                    $pruneFailures.Add([string]$p.Name)
+                    continue
                 }
             }
+        }
+
+        if ($pruneFailures.Count -gt 0) {
+            throw ("Reconciliation aborted: {0} orphan label policy/policies could not be removed: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
         }
     }
 

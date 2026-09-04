@@ -106,6 +106,37 @@
 .PARAMETER PruneMissing
     Remove tenant types/rules not present in YAML. Default `$false`.
 
+    Two issue #13 guards stand in front of this switch, both implemented
+    in `scripts/modules/PruneGuard.psm1`:
+
+      * The desired-state set must be non-empty (total across types AND
+        rules). A prune against an empty file would classify the entire
+        live user-authored set as orphaned.
+      * The prune must not exceed `-MaxPruneRatio` of the live objects
+        without `-AllowMajorityPrune`. The ratio is checked PER TIER --
+        orphan rules against live rules, orphan types against live
+        user-authored types -- because a blended ratio can mask a
+        single-collection wipe (every rule orphaned still blends below
+        the threshold when the types are intact).
+
+    Both refuse before the tenant is written to.
+
+.PARAMETER AllowMajorityPrune
+    Override for the issue #13 prune sanity-ratio guard. Without it, a
+    `-PruneMissing` plan that would delete more than `-MaxPruneRatio` of
+    the live classification rules, or of the live user-authored
+    classification types, is refused before any write. Supply it when a
+    large prune is genuinely intended (a deliberate consolidation); the
+    ratio is then reported as a warning and the run proceeds. Has no
+    effect on the empty-desired-set guard, which cannot be overridden.
+
+.PARAMETER MaxPruneRatio
+    Largest per-tier share of the live objects `-PruneMissing` may
+    delete without `-AllowMajorityPrune`, as a fraction in (0, 1].
+    Default 0.5. A prune exactly at the threshold passes; only a
+    strictly larger share is refused. Set to 1 to disable the ratio
+    guard for a single run.
+
 .PARAMETER Force
     Suppress the safety guard on the operation you asked for. In the
     Export parameter set that guard is `-ExportCurrentState`'s refusal
@@ -170,6 +201,13 @@ param(
 
     [Parameter(ParameterSetName = 'Apply')]
     [switch]$PruneMissing,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [switch]$AllowMajorityPrune,
+
+    [Parameter(ParameterSetName = 'Apply')]
+    [ValidateRange(0.0000001, 1.0)]
+    [double]$MaxPruneRatio = 0.5,
 
     [Parameter(ParameterSetName = 'Apply')]
     [Parameter(ParameterSetName = 'Export')]
@@ -762,6 +800,13 @@ Import-Module 'powershell-yaml' -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
+# In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
+# refusal, which prevents a prune against a zero-entry desired state from
+# classifying every live tenant object as an orphan. Shared with the other
+# Deploy-*.ps1 reconcilers that implement -PruneMissing.
+Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
 $scriptRoot = Split-Path -Parent $PSCommandPath
 $repoRoot   = Split-Path -Parent $scriptRoot
 
@@ -817,6 +862,28 @@ if ($mode -eq 'Apply') {
     $desiredTypes = @($desiredRoot.classifications | ForEach-Object { ConvertTo-DesiredTypeHash -Type ([hashtable]$_) })
     $desiredRules = @($desiredRoot.rules           | ForEach-Object { ConvertTo-DesiredRuleHash -Rule ([hashtable]$_) })
     Write-Information ("Desired         : {0} type(s), {1} rule(s)" -f $desiredTypes.Count, $desiredRules.Count) -InformationAction Continue
+
+    # Issue #13, guard 1: empty-desired-set hard refusal for -PruneMissing.
+    #
+    # This reconciler manages two collections -- classification types and
+    # classification rules -- so the guard is keyed on their TOTAL. A prune is
+    # only catastrophic when NOTHING at all is declared; a file that legitimately
+    # declares types but no rules (or vice versa) must still be prunable.
+    #
+    # With a zero total, every live classification type and rule falls out of the
+    # orphan match below and the run would delete the whole set. The rationale,
+    # the likely causes, and the 2026-07-19 production hit are documented in
+    # scripts/modules/PruneGuard.psm1.
+    #
+    # Placed in the desired-state load region so it fires before the tenant is
+    # contacted at all -- before `az account show` and before any write phase.
+    if ($PruneMissing.IsPresent) {
+        Assert-PruneDesiredSetNotEmpty `
+            -DesiredCount   ($desiredTypes.Count + $desiredRules.Count) `
+            -ObjectTypeNoun 'classification type or rule' `
+            -SourcePath     $Path `
+            -CollectionKey  'classifications/rules'
+    }
 }
 
 # Reference: https://learn.microsoft.com/en-us/cli/azure/account#az-account-show
@@ -1149,7 +1216,36 @@ $gateArgs = @{
     ConfirmValue = $confirmValue
 }
 
+# ---- Issue #13, guard 2: prune sanity ratio (per tier) ----
+# Guard 1 (desired-state load region) catches only the total wipe. This
+# catches the near-total one: a classifications.yaml that lost most of its
+# entries to a bad merge, or a -Path pointing at a smaller environment's
+# file, both of which leave a non-zero desired count and so clear guard 1.
+#
+# The ratio is checked PER TIER -- orphan rules against the live rules,
+# orphan types against the live USER-AUTHORED types (system types are
+# excluded from the orphan match, so they are excluded from the denominator
+# too) -- because a blended ratio can mask a single-collection wipe. Fires
+# before the ADR 0052 gate and before the apply loops: the last point at
+# which nothing has been written. This script is Class B with no
+# -DirectionPolicy, so there is no audit mode to gate on.
+# Reference: scripts/modules/PruneGuard.psm1
 $orphans = @($plan | Where-Object { $_.Action -eq 'Orphan' })
+if ($PruneMissing.IsPresent) {
+    Assert-PruneRatioWithinThreshold `
+        -PruneCount     @($orphans | Where-Object { $_.Kind -eq 'Rule' }).Count `
+        -LiveCount      @($tenantRulesRaw).Count `
+        -ObjectTypeNoun 'classification rule' `
+        -MaxPruneRatio  $MaxPruneRatio `
+        -Allow:$AllowMajorityPrune
+    Assert-PruneRatioWithinThreshold `
+        -PruneCount     @($orphans | Where-Object { $_.Kind -eq 'Type' }).Count `
+        -LiveCount      @($tenantTypesUserAuthored).Count `
+        -ObjectTypeNoun 'user-authored classification type' `
+        -MaxPruneRatio  $MaxPruneRatio `
+        -Allow:$AllowMajorityPrune
+}
+
 if ($PruneMissing.IsPresent -and $orphans.Count -gt 0) {
     $orphanNames = @($orphans | ForEach-Object { '{0} {1}' -f $_.Kind, $_.Name })
     $pruneQuery = "-PruneMissing will DELETE {0} orphan classification object(s) from the Purview account: {1}. This cannot be undone. Continue?" -f `
@@ -1244,6 +1340,15 @@ foreach ($row in ($plan | Where-Object { $_.Kind -eq 'Rule' -and $_.Action -ne '
     }
 }
 
+$pruneFailures = New-Object 'System.Collections.Generic.List[string]'
+
+# Issue #13: in-loop prune failures keep their 'Failed' report row AND are
+# reported via Write-PruneFailure (scripts/modules/PruneGuard.psm1), which
+# uses Write-Warning plus an '::error::' workflow command rather than
+# Write-Error. Previously the catch added the row and moved on, so a failed
+# prune exited 0. The aggregate `throw` after step 5 is the terminal outcome,
+# so a failed prune now exits non-zero after every orphan has been attempted.
+
 # Step 4: rule orphans (delete rules before types so FK never dangles).
 foreach ($row in ($plan | Where-Object { $_.Kind -eq 'Rule' -and $_.Action -eq 'Orphan' })) {
     $target = "Purview classification rule '$($row.Name)'"
@@ -1256,7 +1361,11 @@ foreach ($row in ($plan | Where-Object { $_.Kind -eq 'Rule' -and $_.Action -eq '
             Invoke-RuleDelete -Name $row.Name
             Add-Report -Category 'Removed' -Kind 'Rule' -Name $row.Name -Reason 'Deleted (-PruneMissing).'
         } catch {
-            Add-Report -Category 'Failed' -Kind 'Rule' -Name $row.Name -Reason ("Delete failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_))
+            $failureText = Format-PurviewRestError -ErrorRecord $_
+            Add-Report -Category 'Failed' -Kind 'Rule' -Name $row.Name -Reason ("Delete failed: {0}" -f $failureText)
+            Write-PruneFailure ("DELETE classification rule '{0}' failed: {1}" -f $row.Name, $failureText)
+            $pruneFailures.Add(("rule '{0}'" -f $row.Name))
+            continue
         }
     } else {
         Add-Report -Category 'Removed' -Kind 'Rule' -Name $row.Name -Reason 'Would be deleted (-PruneMissing).'
@@ -1275,11 +1384,19 @@ foreach ($row in ($plan | Where-Object { $_.Kind -eq 'Type' -and $_.Action -eq '
             Invoke-TypeDelete -Name $row.Name
             Add-Report -Category 'Removed' -Kind 'Type' -Name $row.Name -Reason 'Deleted (-PruneMissing).'
         } catch {
-            Add-Report -Category 'Failed' -Kind 'Type' -Name $row.Name -Reason ("Delete failed: {0}" -f (Format-PurviewRestError -ErrorRecord $_))
+            $failureText = Format-PurviewRestError -ErrorRecord $_
+            Add-Report -Category 'Failed' -Kind 'Type' -Name $row.Name -Reason ("Delete failed: {0}" -f $failureText)
+            Write-PruneFailure ("DELETE classification typedef '{0}' failed: {1}" -f $row.Name, $failureText)
+            $pruneFailures.Add(("type '{0}'" -f $row.Name))
+            continue
         }
     } else {
         Add-Report -Category 'Removed' -Kind 'Type' -Name $row.Name -Reason 'Would be deleted (-PruneMissing).'
     }
+}
+
+if ($pruneFailures.Count -gt 0) {
+    throw ("Reconciliation aborted: {0} orphan classification object(s) could not be deleted: {1}. See errors above." -f $pruneFailures.Count, ($pruneFailures -join ', '))
 }
 
 $report

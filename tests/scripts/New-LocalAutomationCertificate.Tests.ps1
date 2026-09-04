@@ -17,6 +17,16 @@
       3. Re-running the merge with the same cert is a no-op (dedup on
          customKeyIdentifier) so an idempotent re-run produces no Graph
          PATCH drift.
+      4. Test-KeyCredentialPresent is the Graph-layer idempotency check
+         and must be evaluated independently of local-cert idempotency:
+         the subject CN is not tenant-scoped, so a local cert already
+         provisioned for one tenant's app must not cause a second
+         tenant's app (sharing the same data-plane app display name) to
+         be reported NoChange without actually checking that tenant's
+         Graph state. This is the regression test for the bug found
+         2026-07-22: the script's main body previously `return`ed as
+         soon as a local cert match was found, never reaching the Graph
+         check at all.
 
     The script's top-level body calls 'az ad app list' and 'az rest'
     PATCH against live Microsoft Graph -- so it cannot be dot-sourced
@@ -44,7 +54,7 @@ BeforeAll {
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
         }, $true)
-    foreach ($targetName in @('Get-LocalCertSubject', 'Find-LocalCertBySubject', 'ConvertTo-GraphKeyCredentialEntry', 'Merge-KeyCredentialList')) {
+    foreach ($targetName in @('Get-LocalCertSubject', 'Find-LocalCertBySubject', 'ConvertTo-GraphKeyCredentialEntry', 'Merge-KeyCredentialList', 'Test-KeyCredentialPresent')) {
         $fnAst = $allFns | Where-Object { $_.Name -eq $targetName } | Select-Object -First 1
         if (-not $fnAst) { throw "Function '$targetName' not found in $script:ScriptPath" }
         . ([ScriptBlock]::Create($fnAst.Extent.Text))
@@ -162,5 +172,87 @@ Describe 'Merge-KeyCredentialList -- co-equal invariant (ADR 0028)' {
         $merged = Merge-KeyCredentialList -Existing @() -NewEntry $newEntry
         $merged.Count | Should -Be 1
         $merged[0].customKeyIdentifier | Should -Be 'FIRST_CRED'
+    }
+}
+
+Describe 'Test-KeyCredentialPresent -- Graph-layer idempotency (ADR 0028, regression for the 2026-07-22 cross-tenant bug)' {
+
+    It 'returns $false against an empty keyCredentials list' {
+        Test-KeyCredentialPresent -Existing @() -CustomKeyIdentifier 'ANYTHING' | Should -BeFalse
+    }
+
+    It 'returns $false when no entry matches this specific certificate' {
+        $existing = @(
+            [pscustomobject]@{ customKeyIdentifier = 'EXISTING_KV_CRED'; displayName = 'CN=kv-signed' }
+        )
+        Test-KeyCredentialPresent -Existing $existing -CustomKeyIdentifier 'LOCAL_CERT_NOT_YET_UPLOADED' | Should -BeFalse
+    }
+
+    It 'returns $true when a matching customKeyIdentifier is present (pscustomobject, e.g. az ad app list output)' {
+        $existing = @(
+            [pscustomobject]@{ customKeyIdentifier = 'EXISTING_KV_CRED'; displayName = 'CN=kv-signed' },
+            [pscustomobject]@{ customKeyIdentifier = 'LOCAL_CERT_ID';    displayName = 'CN=local' }
+        )
+        Test-KeyCredentialPresent -Existing $existing -CustomKeyIdentifier 'LOCAL_CERT_ID' | Should -BeTrue
+    }
+
+    It 'returns $true when a matching customKeyIdentifier is present (hashtable, e.g. ConvertFrom-Json -AsHashtable output)' {
+        $existing = @(
+            @{ customKeyIdentifier = 'LOCAL_CERT_ID'; displayName = 'CN=local' }
+        )
+        Test-KeyCredentialPresent -Existing $existing -CustomKeyIdentifier 'LOCAL_CERT_ID' | Should -BeTrue
+    }
+
+    It 'is case-sensitive on customKeyIdentifier (exact string match only, no normalization assumed)' {
+        $existing = @(
+            [pscustomobject]@{ customKeyIdentifier = 'AbC123'; displayName = 'CN=local' }
+        )
+        Test-KeyCredentialPresent -Existing $existing -CustomKeyIdentifier 'abc123' | Should -BeFalse
+    }
+
+    It 'does NOT falsely match a different tenant''s app just because the local cert subject CN collides (the core cross-tenant scenario)' {
+        # Simulates: local cert already exists for 'gh-oidc-purview-data-plane' from
+        # provisioning against lab. A second tenant's (dev's) app has only its own
+        # KV-signed credential -- the local cert's customKeyIdentifier is genuinely
+        # absent from THIS app's keyCredentials until this script uploads it there.
+        $devAppExistingCreds = @(
+            [pscustomobject]@{ customKeyIdentifier = '78214A96BC50C63E5F849BDEF495C92F2934437E'; displayName = 'kv:kv-marcusj-dev-02/gh-oidc-purview-data-plane' }
+        )
+        $localCertComputedId = 'BASE64SHA256OFLOCALCERTRAWDATA=='
+        Test-KeyCredentialPresent -Existing $devAppExistingCreds -CustomKeyIdentifier $localCertComputedId | Should -BeFalse
+    }
+}
+
+Describe 'New-LocalAutomationCertificate.ps1 main body -- source-level regression guard' {
+
+    BeforeAll {
+        $script:SourceText = Get-Content -Raw -LiteralPath $script:ScriptPath
+    }
+
+    It 'never returns immediately after a local-cert idempotency match (must fall through to the Graph-layer check)' {
+        # Pins the fix for the 2026-07-22 bug: the branch taken when a local
+        # cert match is found used to end in a bare `return`, skipping Graph
+        # resolution entirely. Assert no `return` statement appears between
+        # the local-match message and its `$cert = $existing` fall-through
+        # assignment (a narrow span covering only that specific branch --
+        # NOT the sibling -WhatIf-with-no-existing-cert branch, which has
+        # its own legitimate `return`).
+        $localMatchIdx = $script:SourceText.IndexOf('Existing matching cert found')
+        $assignIdx = $script:SourceText.IndexOf('$cert = $existing')
+        $localMatchIdx | Should -BeGreaterThan -1
+        $assignIdx | Should -BeGreaterThan $localMatchIdx
+        $between = $script:SourceText.Substring($localMatchIdx, $assignIdx - $localMatchIdx)
+        $between | Should -Not -Match '(?m)^\s*return\s*$'
+
+        $graphResolveIdx = $script:SourceText.IndexOf('Entra app objectId')
+        $graphResolveIdx | Should -BeGreaterThan $assignIdx
+    }
+
+    It 'calls Test-KeyCredentialPresent before the Graph PATCH ShouldProcess block' {
+        $patchIndex = $script:SourceText.IndexOf('PATCH keyCredentials')
+        $checkIndex = $script:SourceText.IndexOf('Test-KeyCredentialPresent -Existing')
+        $checkIndex | Should -BeGreaterThan -1
+        $patchIndex | Should -BeGreaterThan -1
+        $checkIndex | Should -BeLessThan $patchIndex
     }
 }

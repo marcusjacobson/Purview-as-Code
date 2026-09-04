@@ -45,6 +45,15 @@ of the no-push-back boundary. See
 Prefer a local-only workspace instead? `git clone` it and pick the local-workspace mode in the next
 step.
 
+**Seed the automation labels.** "Use this template" does not copy labels, so the label-gated
+automation (`owner-approved` auto-merge, `needs-review`, `destructive`, `squad:*` routing) starts
+dormant — the first merge otherwise fails with `'owner-approved' not found`. Run the idempotent
+seeder once with an authenticated `gh` that has push access:
+
+```bash
+pwsh ./scripts/New-RepoLabels.ps1
+```
+
 ### 2. Decouple with the Kickoff agent
 
 Open the copy in VS Code, start Copilot Chat, and run [`@operator-kickoff`](../.github/agents/operator-kickoff.agent.md).
@@ -69,9 +78,10 @@ the diff and commit it on a branch.
 
 Authenticate GitHub Actions to Azure with a Microsoft Entra app + OIDC federated credential — no
 stored client secret. Set the environment secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-`AZURE_SUBSCRIPTION_ID`), the `PURVIEW_ACCOUNT_NAME` variable, and the `OWNER_APPROVAL_LOGIN`
-repository variable (your GitHub login — both the auto-merge gate and the idea-intake
-`needs-review` auto-add read it). Exact commands:
+`AZURE_SUBSCRIPTION_ID`), the `PURVIEW_ACCOUNT_NAME` variable (classic accounts only — omit it on
+a unified-only tenant per [ADR 0048](adr/0048-purview-account-discovery-gate.md)), and the
+`OWNER_APPROVAL_LOGIN` repository variable (your GitHub login — both the auto-merge gate and the
+idea-intake `needs-review` auto-add read it). Exact commands:
 [Getting started §1–§2](getting-started.md). Grounding:
 [Use Azure Login with OpenID Connect](https://learn.microsoft.com/en-us/azure/developer/github/connect-from-azure-openid-connect),
 [Store information in variables](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-variables).

@@ -21,8 +21,8 @@
     if it had been scanned. This script closes that gap.
 
     CONTRACT -- FAIL CLOSED. Every GUID-shaped token in every tracked file is
-    guilty until acquitted. A GUID is acquitted only if one of four manifest
-    rules claims it:
+    guilty until acquitted. A GUID is acquitted only if one of five manifest
+    rules -- or the one positional rule 6 -- claims it:
 
       1. syntheticShapes    -- acquits by SHAPE (zero GUID, the zero-prefixed
                                fixture namespace, repeated-nibble fixtures, two
@@ -43,6 +43,32 @@
                                them. Reported as `Review`, not `Finding`, and
                                pinned by a Pester test so the list cannot grow
                                quietly.
+      5. committedTenantIdentifiers -- acquits by exact VALUE. Tenant-SPECIFIC IDs
+                               deliberately committed as desired state because the
+                               surface has no displayName the reconciler can
+                               round-trip (Power BI/Fabric DLP workspace locations,
+                               genericLocations principals keyed on object ID). A
+                               narrow, owner-approved ADR-0023/0055 exception; each
+                               entry is named + reasoned + Pester-pinned. NOT a
+                               path/shape hatch -- any OTHER tenant GUID still fails.
+      6. advancedRuleCatalogId -- acquits by POSITION, and is the only rule with
+                               no manifest data because it names no value: a
+                               GUID that is the whole value of an `"Id"` or
+                               `"Name"` member of a `Sensitivetypes` array
+                               INSIDE a `rawAdvancedRule:` block scalar. That is
+                               a Microsoft catalog position by construction (a
+                               built-in SIT ID, or a trainable-classifier ID
+                               which Microsoft mirrors into `Name`).
+                               `rawAdvancedRule` is the verbatim tenant wire
+                               body #79 captures when a predicate shape is not
+                               yet modeled (ADR 0031) -- transient evidence that
+                               must survive the scan long enough to BE modeled.
+                               Deliberately narrow: the sibling `Labels` array
+                               in the same body carries tenant sensitivity-label
+                               IDs and is NOT acquitted, because ADR 0023
+                               requires labels by display name -- which is
+                               exactly what issue #80 implements, so a modeled
+                               label never reaches the file at all.
 
     Anything else is a `Finding` and the script exits 1.
 
@@ -316,6 +342,20 @@ foreach ($c in $cfg.microsoftConstants) {
     $microsoftConstants[([string]$c.value).ToLowerInvariant()] = [string]$c.name
 }
 
+# Rule 5 — committed tenant identifiers (by exact value). OPTIONAL. Tenant-
+# SPECIFIC identifiers deliberately committed as desired state because the
+# surface that carries them has no displayName-based representation the
+# reconciler can round-trip (ADR 0055 exception, issue #71 — e.g. Power BI /
+# Fabric DLP policy workspace locations, genericLocations principals keyed on
+# object ID). Fail-closed: exact value only, each entry named and reasoned in
+# the manifest and pinned by a Pester test.
+$committedTenantIds = @{}
+if ($cfg.ContainsKey('committedTenantIdentifiers') -and $null -ne $cfg.committedTenantIdentifiers) {
+    foreach ($c in $cfg.committedTenantIdentifiers) {
+        $committedTenantIds[([string]$c.value).ToLowerInvariant()] = [string]$c.name
+    }
+}
+
 # Rule 4 — review-required quarantine (by SHA-256 of the lower-cased value).
 $reviewRequired = @{}
 if ($cfg.ContainsKey('reviewRequired') -and $null -ne $cfg.reviewRequired) {
@@ -366,10 +406,50 @@ foreach ($relativePath in $fileList) {
     $lines = Get-ScannedFileLine -Root $RepoRoot -AtRef $Ref -RelativePath $relativePath
     if ($null -eq $lines) { continue }
 
+    # Rule 6 state (see the rule 6 block below). Tracked across the whole file
+    # because the rule is POSITIONAL: it needs to know whether the current line
+    # sits inside a `rawAdvancedRule:` block scalar and, if so, which JSON array
+    # encloses it.
+    $rawBlockIndent = -1
+    $rawBlockArray  = $null
+
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
+
+        # --- Rule 6 position tracking -----------------------------------------
+        if ($rawBlockIndent -ge 0) {
+            # A non-blank line indented no further than the key ends the block scalar.
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                $indent = ($line -replace '^(\s*).*$', '$1').Length
+                if ($indent -le $rawBlockIndent) {
+                    $rawBlockIndent = -1
+                    $rawBlockArray  = $null
+                }
+            }
+        }
+        if ($rawBlockIndent -ge 0) {
+            # Remember the innermost JSON array we most recently opened. The two
+            # that matter are `Sensitivetypes` (Microsoft catalog identifiers)
+            # and `Labels` (tenant sensitivity-label IDs, which must NEVER be
+            # acquitted -- ADR 0023 requires labels by display name).
+            $arrayOpen = [regex]::Match($line, '"(?<key>[A-Za-z]+)"\s*:\s*\[')
+            if ($arrayOpen.Success) { $rawBlockArray = $arrayOpen.Groups['key'].Value }
+        } elseif ($line -match '^(?<indent>\s*)rawAdvancedRule\s*:\s*[|>]') {
+            $rawBlockIndent = $Matches['indent'].Length
+            $rawBlockArray  = $null
+        }
+        # ----------------------------------------------------------------------
+
         if ([string]::IsNullOrEmpty($line)) { continue }
         if ($line -notmatch $guidPattern) { continue }
+
+        # Rule 6 applies only to an `"Id"` / `"Name"` member of a
+        # `Sensitivetypes` array inside a captured `rawAdvancedRule` body.
+        $isCatalogIdPosition = (
+            $rawBlockIndent -ge 0 -and
+            $rawBlockArray -eq 'Sensitivetypes' -and
+            $line -match ('^\s*"(Id|Name)"\s*:\s*"' + $guidPattern + '"\s*,?\s*$')
+        )
 
         foreach ($match in [regex]::Matches($line, $guidPattern)) {
             $value = $match.Value.ToLowerInvariant()
@@ -391,6 +471,17 @@ foreach ($relativePath in $fileList) {
             elseif ($microsoftConstants.ContainsKey($value)) {
                 $verdict = 'Allow'
                 $rule = "microsoftConstant:$($microsoftConstants[$value])"
+            }
+            # Rule 5 — committed tenant identifier (exact value, ADR 0055 exception).
+            elseif ($committedTenantIds.ContainsKey($value)) {
+                $verdict = 'Allow'
+                $rule = "committedTenantIdentifier:$($committedTenantIds[$value])"
+            }
+            # Rule 6 — Microsoft catalog identifier inside captured AdvancedRule
+            # evidence (by POSITION, ADR 0031 / issue #80).
+            elseif ($isCatalogIdPosition) {
+                $verdict = 'Allow'
+                $rule = 'advancedRuleCatalogId:Sensitivetypes'
             }
             # Rule 4 — quarantine.
             elseif ($reviewRequired.ContainsKey((Get-Sha256Hex -Value $value))) {

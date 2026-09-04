@@ -134,6 +134,55 @@ adding it to surface-watch breaks Slice 8's deterministic contract.
 a silent cmdlet or `api-version` retirement is found only by a runtime failure; and feature currency relies
 on one-off manual surveys that do not scale across the §3 inventory.
 
+## Errata — 2026-07-17 (public-repo premise correction)
+
+This is a dated errata note, not an amending ADR: nothing in the original decision above was wrong, and
+nothing below changes it. Only a stated fact — the repo's visibility — has since changed, and this repo's
+own contingency plan for exactly that change (Context, line 97-99; Alternative C, line 128-131) has already
+been executed. Per this repo's ADR-immutability convention, the correction is recorded here rather than
+silently edited into the Context section above.
+
+1. **The premise is stale.** Line 35 states: *"This repo is **private**, which matters because Copilot
+   automations are unavailable in public repos."* `gh repo view` confirms `visibility: PUBLIC`. The repo's
+   visibility changed from private to public at some point after this ADR was accepted (2026-06-20) — no
+   exact toggle date is recorded in the repository's version-controlled history, since a GitHub visibility
+   change is not itself a commit or an event this repo's Git history captures. [ADR 0055](0055-identifier-shaped-residual-scan.md)
+   (dated 2026-07-13) already treats the repo as having been public "for weeks" by that date, so the change
+   predates this errata by a comfortable margin; the outer bound is 2026-07-16, when this staleness was
+   discovered during a documentation-currency audit ([#119](https://github.com/marcusjacobson/Purview-as-Code/issues/119)).
+
+2. **The ADR's own fallback has been executed.** Lines 97-99 anticipated this exact scenario: *"If the repo
+   is ever made public, Slice 13 must fall back to a deterministic surface-watch extension."* Lines 128-131
+   (Alternative C) named the mechanism and explicitly kept it as the complementary fallback: extend
+   `surface-watch.yml` to populate its `$additionsReport`. That fallback is
+   [#114](https://github.com/marcusjacobson/Purview-as-Code/issues/114) / [PR #133](https://github.com/marcusjacobson/Purview-as-Code/pull/133),
+   now merged. Concretely: `surface-watch.yml` previously declared `$additionsReport = @()` and rendered it
+   under "### New features on Learn (not in §3)", but no code path ever populated it — the fetch/parse loop
+   only walked the §3 table's own rows, so it could detect removals and title drift but could never
+   discover a Learn page not already listed in §3. The fix resolves the current Learn entry-point URL for a
+   curated feature-name list against Microsoft Learn's machine-readable `/purview/` TOC
+   (`https://learn.microsoft.com/en-us/purview/toc.json`) and diffs each resolved URL against §3, so a
+   genuinely new Learn page for an in-scope Purview feature now surfaces as a real addition instead of dead
+   code. `surface-watch.yml` itself is otherwise unchanged — this did not touch Slice 8's deterministic
+   removal/title-change contract.
+
+3. **Slice 13's real-world configuration status is unverified, and is not resolvable from this repository.**
+   Whether `feature-currency-watch` (the Copilot cloud-agent automation this ADR enumerated as Slice 13) was
+   ever actually turned on in this repo's GitHub Copilot-automations UI is **unknown**. The lab owner does
+   not know either — it may be a newer Copilot-automations capability that was never configured for this
+   repo. This is not a code question and there is no gate or check that can answer it: a Copilot automation
+   is a UI-level setting external to Git, not a version-controlled artifact, so nothing in this repo's
+   history, workflows, or scripts can confirm or deny whether it is enabled, disabled, or was ever set up.
+   Confirming its status requires checking GitHub's Copilot-automations settings for this repository
+   directly. This errata makes no claim that Slice 13 is "likely disabled" or "likely fine" — only that its
+   status is unknown and open.
+
+4. **Nothing in the original decision is retracted.** The reasoning in Context and Decision above — why
+   command currency (Slice 12) is a deterministic GitHub Actions loop and feature currency (Slice 13) is a
+   reasoning-driven Copilot automation, and why the two are not interchangeable — is unaffected by the
+   visibility change. The only thing that was wrong was the standing assumption that the repo would stay
+   private; the ADR itself already priced that risk in and named its own mitigation.
+
 ## Citations
 
 - **[What's new in Microsoft Purview](https://learn.microsoft.com/en-us/purview/whats-new)**
@@ -152,3 +201,10 @@ on one-off manual surveys that do not scale across the §3 inventory.
 - [Az PowerShell module reference](https://learn.microsoft.com/en-us/powershell/module/?view=azps-latest) and [Azure service retirements](https://learn.microsoft.com/en-us/azure/service-retirement/) — cmdlet / version deprecation sources.
 - [Schedule events for GitHub Actions workflows](https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule) and [Security hardening for GitHub Actions](https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions) — Slice 12 trigger and secure-by-default rules.
 - [ADR 0014](0014-agents-as-default-entry-point.md) — the unchanged lifecycle both loops feed.
+- [ADR 0055](0055-identifier-shaped-residual-scan.md) — records the repo as public "for weeks" as of its
+  2026-07-13 date, the closest version-controlled evidence for how long the visibility change had already
+  been in effect (Errata, point 1).
+- [#119](https://github.com/marcusjacobson/Purview-as-Code/issues/119) — the doc-currency issue that
+  identified this ADR's stale private-repo premise.
+- [#114](https://github.com/marcusjacobson/Purview-as-Code/issues/114) / [PR #133](https://github.com/marcusjacobson/Purview-as-Code/pull/133) —
+  implements this ADR's own anticipated public-repo fallback (Errata, point 2).

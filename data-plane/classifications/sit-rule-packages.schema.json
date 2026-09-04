@@ -1,0 +1,65 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "https://purview-as-code.contoso-lab/classifications/sit-rule-packages.schema.json",
+    "title": "Microsoft Purview custom SIT rule packages",
+    "description": "Desired state for custom Sensitive Information Type rule packages consumed by scripts/Deploy-SITRulePackages.ps1. See docs/adr/0061-custom-sit-rule-package-shape.md. Each entry indexes a verbatim rule-package XML file under rule-packages/. Reference: https://learn.microsoft.com/en-us/purview/sit-create-a-custom-sensitive-information-type-in-scc-powershell",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "rulePackages": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/rulePackage" }
+        }
+    },
+    "definitions": {
+        "rulePackage": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "name", "rulePackId", "version", "file" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Human-readable rule-package name. Must equal the <Name> declared in the referenced XML's <RulePack> details."
+                },
+                "rulePackId": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                    "description": "Rule-package GUID. MUST equal the XML <RulePack id>. Repo-authored packs use the reserved synthetic namespace 00000000-0000-0000-0000-<counter> per ADR 0061 decision 2; the ADR 0055 identifier scan acquits that shape."
+                },
+                "version": {
+                    "type": "string",
+                    "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$",
+                    "description": "Rule-package version, major.minor.build.revision. MUST equal the XML <Version>. A content change requires a version bump or the service silently ignores the update (ADR 0061 decision 5)."
+                },
+                "file": {
+                    "type": "string",
+                    "pattern": "^rule-packages/[A-Za-z0-9._-]+\\.xml$",
+                    "description": "Path to the verbatim rule-package XML, relative to the manifest, under rule-packages/."
+                },
+                "sits": {
+                    "type": "array",
+                    "description": "The SITs this pack defines, for cross-reference with the catalog and downstream policies.",
+                    "items": { "$ref": "#/definitions/sit" }
+                }
+            }
+        },
+        "sit": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "id" ],
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The SIT display name, from the XML <LocalizedStrings> <Name> for this entity."
+                },
+                "id": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+                    "description": "The SIT entity GUID, equal to the XML <Entity id>. Downstream label/auto-label/DLP YAML references this by sitId."
+                }
+            }
+        }
+    }
+}

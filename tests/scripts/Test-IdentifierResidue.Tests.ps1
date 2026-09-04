@@ -99,6 +99,19 @@ Describe 'Test-IdentifierResidue — manifest contract' {
         }
     }
 
+    It 'gives every committed tenant identifier a value, a name AND a reason (Rule 5 acquits real tenant OIDs, so each MUST be justified)' {
+        # ADR 0055 Rule 5 (issue #71). This category acquits tenant-SPECIFIC GUIDs by
+        # exact value — the one place a real object ID is legitimately committed — so
+        # unlike every other rule each entry MUST carry a written reason, or it is
+        # indistinguishable from laundering an OID into the allow-list. Optional key:
+        # @() makes the loop a no-op when the category is absent.
+        foreach ($c in @($script:Manifest.identifierScan.committedTenantIdentifiers)) {
+            [string]$c.value  | Should -Match '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+            [string]$c.name   | Should -Not -BeNullOrEmpty
+            [string]$c.reason | Should -Not -BeNullOrEmpty
+        }
+    }
+
     It 'scopes every catalogKeys entry to a specific file AND specific keys (never a whole directory)' {
         foreach ($entry in $script:Manifest.identifierScan.catalogKeys) {
             [string]$entry.path | Should -Not -Match '[*?]'          # no globs — one file
@@ -107,28 +120,35 @@ Describe 'Test-IdentifierResidue — manifest contract' {
         }
     }
 
-    It 'PINS the reviewRequired quarantine to exactly the known entries, BY VALUE' {
+    It 'PINS the reviewRequired quarantine to exactly the known entries (EMPTY — #98), BY VALUE' {
         # The quarantine is a quarantine, not an escape hatch.
         #
         # Pinning the COUNT alone is not enough, and the gap is not theoretical:
-        # with only a count pinned, the two hashes could be SWAPPED for two
-        # different ones — count still 2, test still green — and the quarantine
-        # would now be covering two identifiers nobody reviewed. A quarantine that
-        # can be SUBSTITUTED is a path exclusion with better PR.
+        # with only a count pinned, entries could be SWAPPED for different ones —
+        # count unchanged, test still green — and the quarantine would now be
+        # covering identifiers nobody reviewed. A quarantine that can be
+        # SUBSTITUTED is a path exclusion with better PR.
         #
-        # So pin the literal digests too. This is safe to do in the open precisely
-        # BECAUSE they are hashes: they disclose nothing about the identifiers they
-        # cover, which is the whole reason reviewRequired is SHA-256-keyed. Growing
-        # OR substituting the quarantine now requires editing this test, which is a
+        # So pin the literal digests too (there are none left to pin, which is
+        # itself the assertion). This is safe to do in the open precisely BECAUSE
+        # they are hashes: they disclose nothing about the identifiers they cover,
+        # which is the whole reason reviewRequired is SHA-256-keyed. Growing OR
+        # substituting the quarantine now requires editing this test, which is a
         # deliberate, visible review signal.
-        $expected = @(
-            '6bb5e87d3144d4e6dac9e6d5dfc4b47999cb63df062eef342567ccaddf8e5068'  # docs/adr/0035 — File Plan property Guid
-            '53fc1662c3b2d2b3c056cf9e9513b8ef5da860141b468fb8d547a23a1dab41a8'  # docs/adr/0035 — File Plan property Policy GUID
-        )
+        #
+        # Formerly 2 entries (docs/adr/0035 — File Plan property `Guid` and
+        # `Policy` GUID). Issue #98 established both GUIDs' provenance by
+        # empirical cross-tenant verification and promoted them to
+        # identifierScan.microsoftConstants in the manifest, emptying this list.
+        # validate.yml now runs Test-IdentifierResidue.ps1 -FailOnReview, so a
+        # future addition here fails the build immediately rather than passing in
+        # report-mode — see .github/agents/tenant-placeholders.yaml
+        # identifierScan.reviewRequired.
+        $expected = @()
         $actual = @($script:Manifest.identifierScan.reviewRequired |
                 ForEach-Object { ([string]$_.sha256).ToLowerInvariant() } | Sort-Object)
 
-        $actual.Count | Should -Be 2 -Because 'the quarantine must not GROW without review'
+        $actual.Count | Should -Be 0 -Because 'both prior entries were promoted to microsoftConstants (#98); the quarantine must not GROW without review'
         $actual | Should -Be (@($expected) | Sort-Object) -Because 'the quarantine must not be SUBSTITUTED without review'
     }
 
@@ -216,6 +236,129 @@ Describe 'Test-IdentifierResidue — acquittal rules' {
             $r.Findings.Count | Should -Be 0
         }
         finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    Context 'Rule 6 — Sensitivetypes IDs inside captured rawAdvancedRule evidence (#80)' {
+
+        BeforeAll {
+            # Builds a policies.yaml carrying one rawAdvancedRule block scalar, with
+            # the caller's JSON body indented into it. Mirrors what Invoke-DlpExport
+            # writes when ConvertFrom-AdvancedRuleWire cannot model a shape (#79).
+            function New-RawAdvancedRuleYaml {
+                param([string]$Body)
+                $indented = (($Body -split "`n") | ForEach-Object { '          ' + $_ }) -join "`n"
+                @"
+policies:
+  - name: P
+    mode: Enable
+    rules:
+      - name: R
+        rawAdvancedRule: |-
+$indented
+        notes: wire shape not yet modeled
+"@
+            }
+            $script:NewRawAdvancedRuleYaml = ${function:New-RawAdvancedRuleYaml}
+        }
+
+        It 'acquits a SIT Id in a Sensitivetypes position inside the evidence body' {
+            ${function:New-RawAdvancedRuleYaml} = $script:NewRawAdvancedRuleYaml
+            $repo = New-FixtureRepo
+            try {
+                $sit = [guid]::NewGuid().ToString()
+                $body = @"
+{
+  "Version": "1.0",
+  "Condition": {
+    "SubConditions": [
+      {
+        "Sensitivetypes": [
+          {
+            "Id": "$sit"
+          }
+        ]
+      }
+    ]
+  }
+}
+"@
+                Set-FixtureFile -Root $repo -RelativePath 'data-plane/dlp/policies.yaml' `
+                    -Content (New-RawAdvancedRuleYaml -Body $body)
+                $r = Invoke-Scan -Root $repo
+                $r.Findings.Count | Should -Be 0
+            }
+            finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'FAILS on a sensitivity-label Id in the SAME body — Labels is not Sensitivetypes' {
+            # The disclosure this rule must not open. A tenant label GUID has a
+            # display-name representation (ADR 0023 / #80), so it never has an
+            # excuse to sit in the repo -- unlike a Microsoft catalog SIT ID.
+            ${function:New-RawAdvancedRuleYaml} = $script:NewRawAdvancedRuleYaml
+            $repo = New-FixtureRepo
+            try {
+                $label = [guid]::NewGuid().ToString()
+                $body = @"
+{
+  "Version": "1.0",
+  "Condition": {
+    "SubConditions": [
+      {
+        "Labels": [
+          {
+            "Id": "$label"
+          }
+        ]
+      }
+    ]
+  }
+}
+"@
+                Set-FixtureFile -Root $repo -RelativePath 'data-plane/dlp/policies.yaml' `
+                    -Content (New-RawAdvancedRuleYaml -Body $body)
+                $r = Invoke-Scan -Root $repo
+                $r.Findings.Count | Should -BeGreaterThan 0
+                $r.ExitCode       | Should -Be 1
+            }
+            finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'FAILS on an `"Id"` line that is NOT inside a rawAdvancedRule block (position, not spelling)' {
+            $repo = New-FixtureRepo
+            try {
+                $oid = [guid]::NewGuid().ToString()
+                Set-FixtureFile -Root $repo -RelativePath 'data-plane/dlp/notes.md' `
+                    -Content "Some JSON we pasted into a doc:`n`n    `"Id`": `"$oid`"`n"
+                $r = Invoke-Scan -Root $repo
+                $r.Findings.Count | Should -BeGreaterThan 0
+            }
+            finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+
+        It 'FAILS on a GUID that merely FOLLOWS the evidence block once the block has closed' {
+            # Pins the block-scalar termination logic: the acquittal must not leak
+            # past the end of the rawAdvancedRule body into the rest of the file.
+            ${function:New-RawAdvancedRuleYaml} = $script:NewRawAdvancedRuleYaml
+            $repo = New-FixtureRepo
+            try {
+                $sit = [guid]::NewGuid().ToString()
+                $oid = [guid]::NewGuid().ToString()
+                $body = @"
+{
+  "Sensitivetypes": [
+    {
+      "Id": "$sit"
+    }
+  ]
+}
+"@
+                $yaml = (New-RawAdvancedRuleYaml -Body $body) + "`n        generateIncidentReport:`n          - $oid`n"
+                Set-FixtureFile -Root $repo -RelativePath 'data-plane/dlp/policies.yaml' -Content $yaml
+                $r = Invoke-Scan -Root $repo
+                @($r.Findings | Where-Object { $_.Rule -eq 'unclaimed' }).Count | Should -Be 1
+            }
+            finally { Remove-Item $repo -Recurse -Force -ErrorAction SilentlyContinue }
+        }
     }
 }
 

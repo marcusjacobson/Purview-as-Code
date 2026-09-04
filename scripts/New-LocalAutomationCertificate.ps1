@@ -12,8 +12,24 @@
     the public .cer as an *additional* keyCredential on the data-plane
     Entra app via Microsoft Graph. The KV-signed credential and any other
     existing keyCredentials are preserved -- this script is strictly
-    additive on the Graph side. On the local side it is idempotent on the
-    subject CN: a non-expired existing match is reused (NoChange).
+    additive on the Graph side.
+
+    Idempotency is checked at TWO independent layers, both required for a
+    NoChange result:
+      1. Local layer: a non-expired cert with the deterministic subject CN
+         already exists in Cert:\CurrentUser\My (skip generation, reuse).
+      2. Graph layer: the target Entra app's keyCredentials already
+         contains an entry whose customKeyIdentifier matches this specific
+         certificate (skip the PATCH).
+    The subject CN is scoped to (app display name, user, machine) -- NOT
+    to a tenant. Two tenants whose parameters files share the same
+    automation.apps.dataPlane.displayName (the template default is
+    identical on every environment) will resolve to the SAME local cert on
+    one workstation. A local-layer match therefore never implies the
+    Graph-layer check can be skipped -- each tenant's app is verified
+    independently, so re-running this script against a second tenant with
+    an already-provisioned local cert still uploads that cert's public key
+    to the second tenant's app.
 
     Storage model A from the 2026-05-29 design discussion: the private
     key never lands on disk, so there is no PFX to gitignore on the happy
@@ -179,10 +195,34 @@ function Merge-KeyCredentialList {
     $existingIds = @($base | ForEach-Object {
         if ($_ -is [hashtable]) { $_.customKeyIdentifier } else { $_.customKeyIdentifier }
     })
-    if ($existingIds -contains $NewEntry.customKeyIdentifier) {
+    # Case-sensitive (-ccontains): see Test-KeyCredentialPresent for why.
+    if ($existingIds -ccontains $NewEntry.customKeyIdentifier) {
         return ,$base
     }
     return ,($base + @($NewEntry))
+}
+
+function Test-KeyCredentialPresent {
+    # Return $true when a keyCredential with the given customKeyIdentifier
+    # already exists in the app's keyCredentials list. This is the
+    # Graph-layer idempotency check (see .DESCRIPTION): it must be
+    # evaluated independently of local-cert idempotency, because the
+    # local cert's subject CN is not tenant-scoped and can pre-exist from
+    # a different tenant's app sharing the same display name.
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Existing,
+        [Parameter(Mandatory = $true)] [string] $CustomKeyIdentifier
+    )
+    # Case-sensitive (-ceq): customKeyIdentifier is an opaque, case-significant
+    # encoded hash. PowerShell's default -eq is culture-aware case-INsensitive,
+    # which would wrongly equate two distinct byte sequences that differ only
+    # by letter case in their encoded form.
+    $base = @(($Existing | Where-Object { $null -ne $_ }))
+    foreach ($cred in $base) {
+        $id = if ($cred -is [hashtable]) { $cred.customKeyIdentifier } else { $cred.customKeyIdentifier }
+        if ($id -ceq $CustomKeyIdentifier) { return $true }
+    }
+    return $false
 }
 
 #endregion Helpers
@@ -205,44 +245,44 @@ $subject = Get-LocalCertSubject -AppDisplayName $DataPlaneAppDisplayName
 Write-Information ("Target Entra app  : {0}" -f $DataPlaneAppDisplayName) -InformationAction Continue
 Write-Information ("Cert subject CN   : {0}" -f $subject) -InformationAction Continue
 
-# --- 2. Idempotency / rotation check ---------------------------------------
+# --- 2. Local-layer idempotency / rotation check ---------------------------
+# A local match is reused but NEVER short-circuits the Graph-layer check in
+# step 5 -- see .DESCRIPTION. Falls through to step 4 either way.
 $existing = Find-LocalCertBySubject -Subject $subject
 if ($existing -and -not $RemoveExisting.IsPresent) {
     Write-Information ("Existing matching cert found: thumbprint={0} NotAfter={1:o}" -f $existing.Thumbprint, $existing.NotAfter) -InformationAction Continue
-    Write-Information ("NoChange. Re-run with -RemoveExisting to rotate.") -InformationAction Continue
-    Write-Information "" -InformationAction Continue
-    Write-Information "To use this cert from the data-plane scripts, set:" -InformationAction Continue
-    Write-Information ("  `$env:PURVIEW_LOCAL_CERT_THUMBPRINT = '{0}'" -f $existing.Thumbprint) -InformationAction Continue
-    return
-}
-
-if ($existing -and $RemoveExisting.IsPresent) {
-    if ($PSCmdlet.ShouldProcess("Cert:\CurrentUser\My\$($existing.Thumbprint)", 'Remove existing local cert')) {
-        Remove-Item -LiteralPath ("Cert:\CurrentUser\My\{0}" -f $existing.Thumbprint) -Force
-        Write-Information ("Removed local cert {0}." -f $existing.Thumbprint) -InformationAction Continue
-    }
-}
-
-# --- 3. Generate the new cert ----------------------------------------------
-# Reference: https://learn.microsoft.com/en-us/powershell/module/pki/new-selfsignedcertificate
-$notAfter = (Get-Date).AddMonths($ValidityMonths)
-if ($PSCmdlet.ShouldProcess("Cert:\CurrentUser\My (Subject=$subject)", 'Generate new RSA-2048 / SHA-256 cert (NonExportable)')) {
-    $newCert = New-SelfSignedCertificate `
-        -Subject $subject `
-        -CertStoreLocation 'Cert:\CurrentUser\My' `
-        -KeyAlgorithm RSA `
-        -KeyLength 2048 `
-        -HashAlgorithm SHA256 `
-        -KeyExportPolicy NonExportable `
-        -KeyUsage DigitalSignature, KeyEncipherment `
-        -NotAfter $notAfter `
-        -Type Custom `
-        -ErrorAction Stop
-    Write-Information ("Generated local cert: thumbprint={0} NotAfter={1:o}" -f $newCert.Thumbprint, $newCert.NotAfter) -InformationAction Continue
+    Write-Information "Local layer: NoChange. Continuing to verify this tenant's Entra app keyCredentials (Graph-layer check is independent -- re-run with -RemoveExisting to rotate the local cert instead)." -InformationAction Continue
+    $cert = $existing
 }
 else {
-    Write-Information "[-WhatIf] Skipping cert generation; Graph PATCH preview below uses a placeholder." -InformationAction Continue
-    return
+    if ($existing -and $RemoveExisting.IsPresent) {
+        if ($PSCmdlet.ShouldProcess("Cert:\CurrentUser\My\$($existing.Thumbprint)", 'Remove existing local cert')) {
+            Remove-Item -LiteralPath ("Cert:\CurrentUser\My\{0}" -f $existing.Thumbprint) -Force
+            Write-Information ("Removed local cert {0}." -f $existing.Thumbprint) -InformationAction Continue
+        }
+    }
+
+    # --- 3. Generate the new cert -------------------------------------------
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/pki/new-selfsignedcertificate
+    $notAfter = (Get-Date).AddMonths($ValidityMonths)
+    if ($PSCmdlet.ShouldProcess("Cert:\CurrentUser\My (Subject=$subject)", 'Generate new RSA-2048 / SHA-256 cert (NonExportable)')) {
+        $cert = New-SelfSignedCertificate `
+            -Subject $subject `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -KeyAlgorithm RSA `
+            -KeyLength 2048 `
+            -HashAlgorithm SHA256 `
+            -KeyExportPolicy NonExportable `
+            -KeyUsage DigitalSignature, KeyEncipherment `
+            -NotAfter $notAfter `
+            -Type Custom `
+            -ErrorAction Stop
+        Write-Information ("Generated local cert: thumbprint={0} NotAfter={1:o}" -f $cert.Thumbprint, $cert.NotAfter) -InformationAction Continue
+    }
+    else {
+        Write-Information "[-WhatIf] Skipping cert generation; a real run would continue to the Graph-layer keyCredentials check." -InformationAction Continue
+        return
+    }
 }
 
 # --- 4. Resolve the data-plane Entra app objectId via Azure CLI ------------
@@ -263,14 +303,21 @@ $appObjectId = $app.id
 $existingCreds = @($app.keyCredentials)
 Write-Information ("Entra app objectId: {0} (current keyCredentials count: {1})" -f $appObjectId, $existingCreds.Count) -InformationAction Continue
 
-# --- 5. Build merged keyCredentials and PATCH the application -------------
-$entry = ConvertTo-GraphKeyCredentialEntry -Certificate $newCert
+# --- 5. Graph-layer idempotency check, then merge + PATCH -----------------
+$entry = ConvertTo-GraphKeyCredentialEntry -Certificate $cert
+if (Test-KeyCredentialPresent -Existing $existingCreds -CustomKeyIdentifier $entry.customKeyIdentifier) {
+    Write-Information ("Graph layer: NoChange. Entra app '{0}' already has a keyCredential matching this certificate (customKeyIdentifier)." -f $DataPlaneAppDisplayName) -InformationAction Continue
+    Write-Information "" -InformationAction Continue
+    Write-Information "To use this cert from the data-plane scripts, set:" -InformationAction Continue
+    Write-Information ("  `$env:PURVIEW_LOCAL_CERT_THUMBPRINT = '{0}'" -f $cert.Thumbprint) -InformationAction Continue
+    return
+}
 $merged = Merge-KeyCredentialList -Existing $existingCreds -NewEntry $entry
 $patchBody = @{ keyCredentials = $merged } | ConvertTo-Json -Depth 6
 $tmpBody = (New-TemporaryFile).FullName + '.json'
 try {
     Set-Content -Path $tmpBody -Value $patchBody -Encoding utf8 -NoNewline
-    if ($PSCmdlet.ShouldProcess("Entra app objectId=$appObjectId", "PATCH keyCredentials (append local cert thumbprint $($newCert.Thumbprint); preserve existing $($existingCreds.Count) credentials)")) {
+    if ($PSCmdlet.ShouldProcess("Entra app objectId=$appObjectId", "PATCH keyCredentials (append local cert thumbprint $($cert.Thumbprint); preserve existing $($existingCreds.Count) credentials)")) {
         # Reference: https://learn.microsoft.com/en-us/graph/api/application-update
         $null = az rest `
             --method PATCH `
@@ -291,9 +338,9 @@ finally {
 # --- 6. Print operator handoff instructions --------------------------------
 Write-Information "" -InformationAction Continue
 Write-Information "Provisioning complete. To use this cert from the data-plane scripts, set:" -InformationAction Continue
-Write-Information ("  `$env:PURVIEW_LOCAL_CERT_THUMBPRINT = '{0}'" -f $newCert.Thumbprint) -InformationAction Continue
+Write-Information ("  `$env:PURVIEW_LOCAL_CERT_THUMBPRINT = '{0}'" -f $cert.Thumbprint) -InformationAction Continue
 Write-Information "" -InformationAction Continue
 Write-Information "Persist across shell sessions (current user) with:" -InformationAction Continue
-Write-Information ("  [Environment]::SetEnvironmentVariable('PURVIEW_LOCAL_CERT_THUMBPRINT', '{0}', 'User')" -f $newCert.Thumbprint) -InformationAction Continue
+Write-Information ("  [Environment]::SetEnvironmentVariable('PURVIEW_LOCAL_CERT_THUMBPRINT', '{0}', 'User')" -f $cert.Thumbprint) -InformationAction Continue
 Write-Information "" -InformationAction Continue
 Write-Information "See docs/runbooks/local-cert-provisioning.md for verify + rotate + revoke procedures." -InformationAction Continue

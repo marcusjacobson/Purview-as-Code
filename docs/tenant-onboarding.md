@@ -40,6 +40,22 @@ Use either path:
   cd <your-repo>
   ```
 
+> **Seed the automation labels first.** GitHub's **Use this template** does **not** copy labels,
+> so a fresh spin-off starts with the label-driven automation dormant — `pr-auto-merge.yml` /
+> `@owner-approval` gate on `owner-approved`, `@idea-intake` on `needs-review`, destructive PRs on
+> `destructive`, issue triage on `squad:*` — and the first merge fails with `'owner-approved' not
+> found`. Seed the full required set once, idempotently, with an authenticated
+> [`gh`](https://cli.github.com/) that has push access:
+>
+> ```bash
+> pwsh ./scripts/New-RepoLabels.ps1            # add -WhatIf to preview; re-runs are a no-op
+> ```
+>
+> Some workflows self-seed their own labels at run time, but three — `owner-approved`,
+> `destructive`, `surface-watch` — have no run-time fallback, so this step is the only thing that
+> creates them. See
+> [Creating a repository from a template](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template).
+
 ## Step 2 — Decouple your copy with the Kickoff agent
 
 Sever your copy from the source template so it can never contribute content back, per
@@ -143,10 +159,15 @@ Follow [Getting started §1–§2](getting-started.md) for the exact `az ad app`
    [Access control in Microsoft Purview](https://learn.microsoft.com/en-us/purview/data-gov-classic-permissions).
 3. In **Settings → Environments → `<env>`**, set secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
    `AZURE_SUBSCRIPTION_ID` and the variables `PURVIEW_ACCOUNT_NAME`, `PURVIEW_RG`,
-   `KEY_VAULT_NAME`, `TENANT_DOMAIN`, and `DATA_PLANE_CERT_NAME` — the workflows read every
-   tenant-specific non-secret value from the selected Environment's variables and fail fast when
-   one is unset, per [ADR 0057](adr/0057-multi-environment-and-branch-model.md). See
-   [Getting started §2](getting-started.md) for the per-environment breakdown (including the
+   `KEY_VAULT_NAME`, `TENANT_DOMAIN`, and `DATA_PLANE_CERT_NAME` — the workflows read
+   tenant-specific non-secret values from the selected Environment's variables, and each
+   workflow's fail-fast guard checks exactly the variables that workflow consumes, per
+   [ADR 0057](adr/0057-multi-environment-and-branch-model.md). **Unified-only tenants omit
+   `PURVIEW_ACCOUNT_NAME`** — no workflow guard requires it; it feeds only the classic
+   reconcilers' `${env:PURVIEW_ACCOUNT_NAME}` tokens ([ADR 0023](adr/0023-identifier-resolution.md)
+   Category 2), and per the [ADR 0048](adr/0048-purview-account-discovery-gate.md) outcome matrix
+   the `purviewAccountName` surfaces keep the shipped placeholder on a confirmed-unified tenant.
+   See [Getting started §2](getting-started.md) for the per-environment breakdown (including the
    `kv-unlock` Environment's own secret and variables).
 4. In **Settings → Secrets and variables → Actions → Variables**, set the repository variable
    `OWNER_APPROVAL_LOGIN` to your GitHub login. Two workflows read it: the
@@ -163,6 +184,30 @@ Follow [Getting started §1–§2](getting-started.md) for the exact `az ad app`
 
 > Never commit any of these values. They live only in GitHub secrets and in your local
 > `az account set` context.
+
+### Adopting a pre-existing Key Vault — firewall posture
+
+A Key Vault has **two** independent public-network layers: `publicNetworkAccess` and
+`networkAcls.defaultAction` ([Key Vault network security](https://learn.microsoft.com/en-us/azure/key-vault/general/network-security)).
+The workflows treat `publicNetworkAccess` as the toggle and handle `defaultAction` explicitly,
+because a vault carrying `defaultAction: Deny` with no `ipRules` — a common legacy state on an
+adopted vault — stays unreachable after a `publicNetworkAccess`-only open: data-plane calls fail
+with "(Forbidden) Client address is not authorized and caller is not a trusted service" while
+`publicNetworkAccess` reads `Enabled`.
+
+What to expect when you point the automation at an adopted vault:
+
+- [`validate-oidc-auth.yml`](../.github/workflows/validate-oidc-auth.yml) opens **both** layers
+  (`Enabled`/`Allow`) for its window, verifies the open stuck by reading the state back, and on
+  close restores `publicNetworkAccess: Disabled` **and your vault's pre-open `defaultAction`** —
+  it never changes the vault's steady-state posture.
+- [`kv-temp-unlock.yml`](../.github/workflows/kv-temp-unlock.yml) requires the hardened steady
+  posture (`publicNetworkAccess: Disabled`, `defaultAction: Deny`) at its pre-unlock guard and
+  re-locks to exactly that posture. Bring an adopted vault to that posture before using it.
+- In a governance-managed tenant, an Azure Policy `modify` effect can silently revert the open;
+  both workflows now fail loudly on the read-back when that happens — see the
+  ["Governed tenants" section of the kv-temp-unlock runbook](runbooks/kv-temp-unlock.md) for the
+  bounded policy-exemption procedure.
 
 ### Optional — add a second (`dev`) environment
 

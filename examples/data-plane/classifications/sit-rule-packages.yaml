@@ -1,0 +1,23 @@
+# WORKED EXAMPLE -- custom SIT rule-package manifest (ADR 0061).
+#
+# Under examples/**, a tree NO workflow, script, or schema reads. Copy from here
+# deliberately into data-plane/classifications/sit-rule-packages.yaml when
+# authoring a real custom SIT.
+#
+# This example indexes one rule package (rule-packages/repo-custom-sits.xml)
+# defining a single synthetic "Contoso Employee ID" SIT (EMP-1234). Every GUID
+# uses the reserved synthetic namespace 00000000-0000-0000-0000-<counter> so the
+# example is clean under the ADR 0055 identifier scan; the rulePackId / version /
+# sit id below match the values inside the XML exactly (the reconciler blocks a
+# mismatch).
+#
+# Reference:
+#   https://learn.microsoft.com/en-us/purview/sit-create-a-custom-sensitive-information-type-in-scc-powershell
+rulePackages:
+  - name: Contoso.Repo.CustomRulePack (example)
+    rulePackId: 00000000-0000-0000-0000-000000000061
+    version: 1.0.0.0
+    file: rule-packages/repo-custom-sits.xml
+    sits:
+      - name: Contoso Employee ID (example)
+        id: 00000000-0000-0000-0000-000000000062

@@ -51,6 +51,22 @@ name: code-currency-watch
 #   https://learn.microsoft.com/en-us/rest/api/resources/providers/get
 #   https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions
 #   https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#schedule
+#   https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability
+#
+# Skip gate (ADR 0054): this schedule-triggered workflow fires on every
+# un-onboarded template copy, including this repository itself, and
+# unconditionally assumed a real Purview tenant was wired up. The
+# `preflight` job below tests the onboarding signal (a non-empty
+# secrets.AZURE_CLIENT_ID on the selected GitHub Environment) from
+# inside a running job -- `secrets` is not available in ANY `if:`
+# condition, only in env/run/with -- and emits a `configured` output.
+# This workflow never opens the Key Vault firewall (its Azure login is
+# a tenant-level ARM metadata read only), so the gate checks only
+# AZURE_CLIENT_ID, not KEY_VAULT_NAME. The `check-currency` job below
+# declares `needs: preflight` and `if:
+# needs.preflight.outputs.configured == 'true'` (`needs` IS available
+# in a job-level `if:`), so an un-onboarded copy SKIPS this job cleanly
+# instead of failing at azure/login.
 
 on:
   schedule:
@@ -95,8 +111,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Preflight (ADR 0054 onboarding signal)
+    runs-on: ubuntu-latest
+    # Binds the SAME selected environment as check-currency below (ADR 0057
+    # canonical expression, byte-identical), so the secret it tests is the
+    # exact one check-currency would use.
+    environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}
+    permissions:
+      contents: read
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    env:
+      # secrets/vars are legal in jobs.<job_id>.env (not in jobs.<job_id>.if
+      # or jobs.<job_id>.steps.if) -- see ADR 0054.
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+    steps:
+      - name: Check onboarding signal
+        id: check
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
+            Write-Host "::notice::secrets.AZURE_CLIENT_ID is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=true"
+          }
+
   check-currency:
     name: Check code currency
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment || (github.ref_name == 'dev' && 'dev' || 'lab') }}  # Matches the OIDC federated-credential subject (ADR 0010 / ADR 0057).
     steps:

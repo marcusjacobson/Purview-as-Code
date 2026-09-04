@@ -2,7 +2,7 @@
     "$schema": "http://json-schema.org/draft-07/schema#",
     "$id": "https://purview-as-code.contoso-lab/irm/entity-lists.schema.json",
     "title": "Microsoft Purview Insider Risk Management entity lists",
-    "description": "Desired state for Microsoft Purview Insider Risk Management entity lists consumed by scripts/Deploy-IRMEntityLists.ps1. Reference: https://learn.microsoft.com/en-us/purview/insider-risk-management-settings-priority-user-groups",
+    "description": "PARKED SURFACE (ADR 0064) -- retained ONLY so the permanently empty data-plane/irm/entity-lists.yaml still validates. Do not author against this schema. The item shape below, including the type enum, is the ADR 0039 model, which live probing on 2026-09-03 showed does not exist: UserType/GroupType/SiteType are not members of the live IrmEntityListType enum, and entity-list membership is not readable through any documented surface, so nothing on this surface is reconcilable. See docs/adr/0064-irm-entity-lists-are-microsoft-managed.md. Reference: https://learn.microsoft.com/en-us/purview/insider-risk-management-settings",
     "type": "object",
     "additionalProperties": false,
     "required": [ "entityLists" ],

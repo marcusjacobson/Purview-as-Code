@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WORKED EXAMPLE ONLY (not deployed). A verbatim custom SIT rule package in the
+  Microsoft "mce" rule-collection schema, indexed by the sibling
+  examples/data-plane/classifications/sit-rule-packages.yaml. See
+  docs/adr/0061-custom-sit-rule-package-shape.md.
+
+  GUIDs use the reserved synthetic namespace 00000000-0000-0000-0000-<counter>
+  (ADR 0061 decision 2) so the file is clean under the ADR 0055 identifier scan.
+  A real repo-authored pack allocates its own synthetic-namespace counters.
+
+  Encoding note: this example is UTF-8 for reviewability. The tenant's live packs
+  are UTF-16; the reconciler reads either (it honours the XML prolog), and Phase 3's
+  round-trip gate confirms the encoding the service requires for a deployed pack.
+
+  Reference (schema + limits):
+    https://learn.microsoft.com/en-us/purview/sit-create-a-custom-sensitive-information-type-in-scc-powershell
+-->
+<RulePackage xmlns="http://schemas.microsoft.com/office/2011/mce">
+  <RulePack id="00000000-0000-0000-0000-000000000061">
+    <Version major="1" minor="0" build="0" revision="0" />
+    <Publisher id="00000000-0000-0000-0000-000000000060" />
+    <Details defaultLangCode="en-us">
+      <LocalizedDetails langcode="en-us">
+        <PublisherName>Contoso Purview-as-Code (example)</PublisherName>
+        <Name>Contoso.Repo.CustomRulePack (example)</Name>
+        <Description>Worked example custom SIT rule package (ADR 0061).</Description>
+      </LocalizedDetails>
+    </Details>
+  </RulePack>
+  <Rules>
+    <Entity id="00000000-0000-0000-0000-000000000062" patternsProximity="300" recommendedConfidence="85">
+      <Pattern confidenceLevel="85">
+        <IdMatch idRef="Regex_contoso_employee_id" />
+        <Match idRef="Keyword_contoso_employee" />
+      </Pattern>
+    </Entity>
+    <Regex id="Regex_contoso_employee_id">EMP-\d{4}</Regex>
+    <Keyword id="Keyword_contoso_employee">
+      <Group matchStyle="word">
+        <Term caseSensitive="false">Employee</Term>
+        <Term caseSensitive="false">Staff</Term>
+        <Term caseSensitive="false">Personnel</Term>
+        <Term caseSensitive="false">Employee ID</Term>
+      </Group>
+    </Keyword>
+    <LocalizedStrings>
+      <Resource idRef="00000000-0000-0000-0000-000000000062">
+        <Name default="true" langcode="en-us">Contoso Employee ID (example)</Name>
+        <Description default="true" langcode="en-us">Detects Contoso employee identifiers in the format EMP-1234.</Description>
+      </Resource>
+    </LocalizedStrings>
+  </Rules>
+</RulePackage>

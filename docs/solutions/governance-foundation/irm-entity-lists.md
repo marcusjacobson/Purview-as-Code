@@ -1,115 +1,67 @@
-﻿# Insider Risk Management - entity lists
+# Insider Risk Management - entity lists (PARKED SURFACE)
 
-Operational guide for [`scripts/Deploy-IRMEntityLists.ps1`](../../../scripts/Deploy-IRMEntityLists.ps1) -- the reconciler that materializes [`data-plane/irm/entity-lists.yaml`](../../../data-plane/irm/entity-lists.yaml) against the [Microsoft Purview Insider Risk Management](https://learn.microsoft.com/en-us/purview/insider-risk-management) entity-list surface. Pairs with [`insider-risk-management.md`](insider-risk-management.md) (the IRM policy reconciler).
+> **This surface is parked. There is nothing to operate.**
+> `data-plane/irm/entity-lists.yaml` stays empty permanently, [`scripts/Deploy-IRMEntityLists.ps1`](../../../scripts/Deploy-IRMEntityLists.ps1) is parked and driven by no workflow, and IRM exclusions and priority user groups stay portal-managed. Ratified in [ADR 0064](../../adr/0064-irm-entity-lists-are-microsoft-managed.md), which supersedes [ADR 0039](../../adr/0039-irm-entity-list-tracked-fields.md).
+>
+> This page is retained as the record of why. For the IRM surface that **is** managed as code, see [`insider-risk-management.md`](insider-risk-management.md) (policies).
 
-## Purpose
+## What happened
 
-Reconciles the [`Get/New/Set/Remove-InsiderRiskEntityList`](https://learn.microsoft.com/en-us/powershell/module/exchange/get-insiderriskentitylist) cmdlet family against a declared list of IRM entity-list entries. Emits Create / Update / NoChange / Orphan / Skipped decisions per entity list. Orphan lists (live in tenant, absent from YAML) are reported and skipped unless `-PruneMissing` is supplied AND the name is not on the `-SkipNames` baseline.
+[ADR 0039](../../adr/0039-irm-entity-list-tracked-fields.md) (2026-06-16) modelled entity lists as operator-authored desired state: named, typed collections of users, groups, or sites, with a `type` of `UserType` / `GroupType` / `SiteType` and a tracked `entities` membership array. A reconciler shipped against that model with 66 unit tests.
 
-Entity lists are named, typed collections of users, groups, or sites used to scope IRM policies:
+The model was never run against a live tenant. Its unit tests feed stubbed rows straight to the helper functions, and no workflow drove it, so the enumerate path never executed. On 2026-09-03 the backfilled forward-apply workflow ran for the first time, failed at its read step, and two read-only probes established the following on the lab tenant.
 
-- `UserType` -- holds user principal names (UPNs) for priority user groups.
-- `GroupType` -- holds distribution group or Microsoft 365 group identifiers.
-- `SiteType` -- holds SharePoint or Microsoft Teams site URLs.
-
-Tracked fields: `displayName`, `description`, `entities` (full replace). `type` is immutable after creation -- changing type requires deleting and recreating the list. See [ADR 0039](../../adr/0039-irm-entity-list-tracked-fields.md).
-
-## Default state
-
-The shipped YAML declares an empty `entityLists: []` list (issue [#606](../../../../../issues/606)). The `IRM-Lab-Priority-Users` entity list (backing the `IRM Lab -- Data leaks by priority users` policy) is under the #603 hard rule (no mutation during active testing) and is carried in the CI skip baseline per [ADR 0039](../../adr/0039-irm-entity-list-tracked-fields.md).
-
-## Authentication
-
-Same Key Vault-side JWT signing path as every other Security & Compliance reconciler in this repo:
-
-1. Resolves the data-plane Entra app by display name (per [ADR 0010](../../adr/0010-automation-identity-subject-model.md)).
-2. Calls [`scripts/Get-PurviewIPPSAccessToken.ps1`](../../../scripts/Get-PurviewIPPSAccessToken.ps1) which builds an [RFC 7523](https://datatracker.ietf.org/doc/html/rfc7523) `client_assertion` JWT and signs the SHA-256 digest via [`az keyvault key sign`](https://learn.microsoft.com/en-us/cli/azure/keyvault/key) against the certificate''s underlying RSA key. The private key never leaves Key Vault.
-3. Calls [`Connect-IPPSSession -AccessToken`](https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/connect-ippssession) with `-ShowBanner:$false`.
-
-## Inputs
-
-| Parameter | Default source in `lab.yaml` |
+| # | Finding |
 |---|---|
-| `-Path` | `data-plane/irm/entity-lists.yaml` |
-| `-ParametersFile` | defaults to `infra/parameters/lab.yaml` |
-| `-VaultName` | `resources.keyVault.name:` |
-| `-CertificateName` | `automation.apps.dataPlane.certificateName:` |
-| `-DataPlaneAppDisplayName` | `automation.apps.dataPlane.displayName:` |
-| `-TenantDomain` | `automation.tenantDomain:` |
-| `-PruneMissing` | switch -- DESTRUCTIVE: removes orphan tenant entity lists. Names on `-SkipNames` are never removed. |
-| `-DirectionPolicy` | `audit` / `portal-wins` (default) / `repo-wins` -- [ADR 0029](../../adr/0029-source-of-truth-direction-policy.md) source-of-truth direction policy |
-| `-SkipNames` | string array -- workflow-supplied pre-computed skip list; ignored in `audit` mode |
-| `-SkipSchemaValidation` | switch -- bypass the JSON Schema gate (emergency only) |
+| 1 | `Get-InsiderRiskEntityList` **rejects a bare call** — `Either Identity or Type should be provided as parameter`. The reconciler calls it bare, so its read phase had never once run. |
+| 2 | The `type` enum is **fictional**. `UserType` / `GroupType` / `SiteType` are not members of the live `IrmEntityListType` enum, which has 23 entirely different values. `New-InsiderRiskEntityList -Type` takes the same enum, so Create could never have worked either. |
+| 3 | `-IncludeEntities` is **declared by the cmdlet but rejected by the service** as not implemented. |
+| 4 | **`.Entities` is empty on every list** — via per-type enumeration and via a single-object `-Identity` fetch. Membership cannot be read, so it cannot be converged. This is the decisive finding. |
+| 5 | `.Type` is the constant `InsiderRiskEntityList`; the real discriminator is `.ListType`. |
+| 6 | `IRM-Lab-Priority-Users` — the name ADR 0039 pinned into the CI skip baseline — **does not exist** on the tenant. The 2026-06-14 record was portal-read, not cmdlet-read. |
+| 7 | All 32 lists on lab are **Microsoft-provisioned configuration containers**. |
 
-## What `-WhatIf` shows vs apply
+Full evidence ladder, with error strings and the run id, is in [ADR 0064](../../adr/0064-irm-entity-lists-are-microsoft-managed.md) §Context.
 
-| Mode | Behaviour |
-|---|---|
-| `-DirectionPolicy audit` | Reads `Get-InsiderRiskEntityList`; prints `[ADR0029-AUDIT]` marker plus the categorized plan rows. **No writes under any circumstance.** |
-| `-WhatIf` (default `portal-wins`) | Reads `Get-InsiderRiskEntityList`; applies the skip baseline; prints Create / Update / NoChange / Orphan / Skipped rows. No writes. |
-| (default) | Same read, then per-row `New-`, `Set-`, or `Remove-InsiderRiskEntityList` for Create / Update / (Orphan + `-PruneMissing`). Every write is gated by `$PSCmdlet.ShouldProcess`. |
-| `-DirectionPolicy repo-wins` | Apply Update rows even on shared-property drift. Emits one `Write-Warning` per overwrite. CI gates this on the typed `confirm_overwrite_irm_entity_list='overwrite portal'` token. |
+## What the cmdlets actually manage
 
-## Schema
+Not priority user groups. The `*-InsiderRiskEntityList` family manages the containers behind the Insider Risk Management **settings** pages — global exclusions, excluded domains and sites, excluded printers and applications, indicator policy bindings, DSPM sensitive types, connected AI apps. Lab holds 32 of them across 13 of the 23 list types, every name Microsoft-assigned:
 
-YAML conforms to [`data-plane/irm/entity-lists.schema.json`](../../../data-plane/irm/entity-lists.schema.json) (JSON Schema Draft-07). Schema is validated at script start via [`Test-Json -Schema`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/test-json) before any reconcile work.
-
-## Required roles
-
-| Caller | Role | Scope |
+| Type | Count | Examples |
 |---|---|---|
-| Data-plane OIDC service principal (workload identity) | Microsoft Purview `Insider Risk Management` (or `Compliance Administrator`) | Tenant |
-| Caller''s identity in Azure | `Key Vault Crypto User` on the data-plane app cert key | Key Vault (granted by [`New-AutomationRbac.ps1`](../../../scripts/New-AutomationRbac.ps1)) |
+| `GlobalExclusionSGMapping` | 10 | `IrmXSGDomains`, `IrmXSGPrinters`, `IrmXSGApplications` |
+| `DomainLists` | 4 | `IrmWhitelistDomains`, `IrmBlacklistDomains`, `IrmEnterpriseDomains`, `IrmPublicDomains` |
+| `SensitiveTypeLists` | 4 | `IrmCustomExSensitiveTypes`, `IrmDsbldSysExMLClassifiers` |
+| `WindowsFilePathRegexLists`, `KeywordLists`, `PrinterLists`, `P4AIAppLists` | 2 each | `IrmExcludedPrinters`, `IrmExcludedKeywords`, `PurviewCopilots` |
+| `CriticalAssetLists`, `SiteLists`, `ApplicationLists`, `DlpPolicyLists`, `CcPolicyLists`, `DspmSensitiveTypeLists` | 1 each | `IrmExcludedSites`, `IrmExcludedApplications`, `IrmDlpIndicatorPolicies` |
+| the other 10 types | 0 | — |
 
-Reference: [Permissions in the Microsoft Purview portal](https://learn.microsoft.com/en-us/purview/purview-permissions).
+This is the same class of object as the `IRM_Tenant_Setting_<tenant-guid>` policy that [ADR 0036](../../adr/0036-irm-tenant-setting-immovable.md) ratified as permanently system-managed — reached through a different cmdlet family.
 
-## Local-dev runs from outside the Key Vault network
+## Operating guidance
 
-CI runs app-only via the workflow''s `kv-open` / `kv-close` firewall window. For local-dev runs from a workstation outside the approved network, see [`audit-log.md` §Local-dev runs from outside the Key Vault network](audit-log.md#local-dev-runs-from-outside-the-key-vault-network).
+- **Do not populate `data-plane/irm/entity-lists.yaml`.** An export would capture 32 Microsoft containers as if they were desired state.
+- **Do not run `Deploy-IRMEntityLists.ps1`.** It is parked. Its read phase cannot succeed, and its Create path targets an enum that does not exist.
+- **Do not enable `-PruneMissing` against this surface.** Every container would classify as an orphan. The prune guards do hold — an empty desired set trips guard 1, and 31-of-32 trips the ratio guard — but that is a backstop, not a plan.
+- **Manage IRM exclusions and priority user groups in the portal.** See [Insider Risk Management settings](https://learn.microsoft.com/en-us/purview/insider-risk-management-settings).
+- **The schema is retained** only so the empty document validates. Its `type` enum is the fictional ADR 0039 one; do not author against it.
 
-## Audit mode - read-only view of the raw live tenant vs YAML
+## If this ever becomes buildable
 
-```pwsh
-./scripts/Deploy-IRMEntityLists.ps1 -WhatIf -DirectionPolicy audit
-```
+[ADR 0064](../../adr/0064-irm-entity-lists-are-microsoft-managed.md) carries the re-open triggers. The load-bearing one is finding 4: if `Get-InsiderRiskEntityList` ever returns populated `Entities`, or implements `-IncludeEntities`, membership becomes readable and the surface becomes reconcilable. Un-parking starts with a new ADR, not with an edit to the YAML or the script.
 
-Expected output when YAML is the default empty list and the lab tenant carries `IRM-Lab-Priority-Users`:
+Whoever picks that up inherits two known repairs: the bare enumerate call needs to become a per-type loop over the real 23-value enum, and `ConvertTo-TenantEntityListHash` needs to read `.ListType` rather than `.Type`.
 
-```text
-[ADR0029-AUDIT] DirectionPolicy=audit - no writes will fire. Plan below is read-only.
-Category Name                    Reason
--------- ----                    ------
-Orphan   IRM-Lab-Priority-Users  Tenant-only; skipped (no -PruneMissing).
-```
+## The durable lesson
 
-For the noise-free `portal-wins` view (matches what CI runs by default):
+ADR 0039's model was assembled from four documented cmdlet names, a Microsoft Learn concept page, and one portal observation. Every one of those inputs was true, and the model built on them was wrong. Cmdlet existence is not capability; a documented concept is not a documented API; a portal object is not a cmdlet-visible object; and — finding 3 — a declared parameter is not an implemented one.
 
-```pwsh
-./scripts/Deploy-IRMEntityLists.ps1 -WhatIf -DirectionPolicy portal-wins `
-  -SkipNames @('IRM-Lab-Priority-Users')
-```
+The repository already required a live `Get-Command -Syntax` probe before trusting Learn docs. That was not enough here: the syntax block advertised `-IncludeEntities` and made every parameter look optional. **A field is not modellable until a live call has been observed returning it.**
 
-Expected: 1 `Skipped` row, zero anything else.
+## Related
 
-## CI wiring
-
-> **No automated apply path yet.** IRM *policies* have a per-solution workflow ([`deploy-irm.yml`](../../../.github/workflows/deploy-irm.yml)); IRM **entity lists** do **not**. Merging `data-plane/irm/entity-lists.yaml` applies nothing on its own. **Interim apply path: run [`scripts/Deploy-IRMEntityLists.ps1`](../../../scripts/Deploy-IRMEntityLists.ps1) locally.** The monolithic `deploy-data-plane.yml` that once carried a `Deploy IRM entity lists` step (inputs `irm_entity_list_direction_policy`, `confirm_overwrite_irm_entity_list`, `skip_names_irm_entity_list`) was retired by [ADR 0051](../../adr/0051-per-solution-workflow-unit-of-data-plane-apply.md) — it declared 32 `workflow_dispatch` inputs against GitHub's 25-property cap and therefore **never once executed** (90 runs, 0 successes, 0 jobs scheduled), so that step never applied anything. Nothing was lost. Backfilling a `deploy-irm-entity-lists.yml` is tracked in [#80](https://github.com/marcusjacobson/Purview-as-Code/issues/80).
-
-The script-side contract is unaffected and remains the live surface:
-
-- `-DirectionPolicy` -- `audit` / `portal-wins` (default) / `repo-wins`, per [ADR 0029](../../adr/0029-source-of-truth-direction-policy.md).
-- `-SkipNames` -- pass `IRM-Lab-Priority-Users` per [ADR 0039](../../adr/0039-irm-entity-list-tracked-fields.md). **This was a workflow input default; with the workflow gone it is no longer applied for you** — supply it explicitly on the command line, or the declared orphan will surface as drift.
-
-**The typed `overwrite portal` confirmation that gated `repo-wins` was a workflow pre-flight step, not a script parameter** — locally, `-DirectionPolicy repo-wins` is destructive with no prompt. Preview with `-DirectionPolicy audit` first.
-
-## Related ADRs and runbooks
-
-- [ADR 0029 -- Source-of-truth direction policy](../../adr/0029-source-of-truth-direction-policy.md)
-- [ADR 0036 -- IRM tenant-setting immovable](../../adr/0036-irm-tenant-setting-immovable.md)
-- [ADR 0039 -- IRM entity-list tracked fields](../../adr/0039-irm-entity-list-tracked-fields.md)
-- Sibling solution: [`insider-risk-management.md`](insider-risk-management.md)
-
-## Follow-ups
-
-- [#604](../../../../../issues/604) -- Adopt live IRM Lab pilot policies into desired state (post-testing-window)
-- [#606](../../../../../issues/606) -- this item (entity-list reconciler coverage)
+- [ADR 0064](../../adr/0064-irm-entity-lists-are-microsoft-managed.md) — parks this surface (supersedes ADR 0039)
+- [ADR 0039](../../adr/0039-irm-entity-list-tracked-fields.md) — the superseded model
+- [ADR 0036](../../adr/0036-irm-tenant-setting-immovable.md) — the same disposition for the policy-family analogue
+- [`insider-risk-management.md`](insider-risk-management.md) — IRM policies, the surface that **is** managed as code
+- [Insider Risk Management settings](https://learn.microsoft.com/en-us/purview/insider-risk-management-settings)

@@ -15,6 +15,14 @@
         `repo:<org>/<repo>:environment:<env>`, pulled from
         `automation.githubOrg / automation.githubRepo /
         automation.githubEnvironment` in `infra/parameters/lab.yaml`.
+        Per ADR 0058 this is a two-format contract: repositories created
+        on or after 2026-07-15 (or renamed/transferred/opted-in after
+        that date) mint GitHub's immutable (ID-embedded) subject
+        `repo:<org>@<ownerId>/<repo>@<repoId>:environment:<env>` instead.
+        The script resolves the numeric IDs at runtime (gh CLI, falling
+        back to api.github.com), prefers whichever format the repository
+        mints for creation, and accepts either on verification. See
+        -SubjectFormat.
       * Single-subject invariant (ADR 0010 decision #4): the app MUST have
         exactly one federated credential with exactly the expected subject,
         issuer, and audiences. The script treats any second credential or
@@ -61,6 +69,11 @@
         https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-azure
       OIDC subject claim formats:
         https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect
+      Immutable subject claims (ADR 0058):
+        https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/
+        https://docs.github.com/en/actions/reference/security/oidc
+      Get a repository (numeric owner/repo IDs):
+        https://docs.github.com/en/rest/repos/repos#get-a-repository
       az ad app:
         https://learn.microsoft.com/en-us/cli/azure/ad/app
       az ad app federated-credential:
@@ -84,6 +97,21 @@
     Override the Entra app display name. When omitted (the default), the
     name is read from `automation.apps.<plane>Plane.displayName:` in the
     parameters file. Override only for experimental or non-lab runs.
+
+.PARAMETER SubjectFormat
+    Which OIDC subject format to prefer for the federated credential
+    (ADR 0058). `auto` (default) resolves the repository's numeric
+    identity and creation date at runtime and prefers the immutable
+    (ID-embedded) format when the repository was created on or after
+    GitHub's 2026-07-15 cutoff, falling back to classic with a warning
+    when the identity cannot be resolved. `immutable` forces the
+    ID-embedded format (for pre-cutoff repositories that opted in, or
+    were renamed/transferred after the cutoff -- both invisible to the
+    creation-date heuristic); identity-resolution failure is then a hard
+    error. `classic` pins the name-only format and skips GitHub API
+    resolution entirely. Verification accepts either format regardless of
+    the preference; the preference decides what a newly created
+    credential gets.
 
 .EXAMPLE
     ./scripts/New-AutomationEntraApp.ps1 -Plane control -WhatIf
@@ -122,10 +150,138 @@ param(
 
     [Parameter()]
     [ValidatePattern('^[A-Za-z][A-Za-z0-9\-]{1,62}[A-Za-z0-9]$')]
-    [string]$DisplayName
+    [string]$DisplayName,
+
+    [Parameter()]
+    [ValidateSet('auto', 'classic', 'immutable')]
+    [string]$SubjectFormat = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
+
+#region Helpers (AST-extractable for unit tests)
+
+# ADR 0058: GitHub's default-format cutoff. Repositories created on or
+# after 2026-07-15 mint immutable (ID-embedded) OIDC subjects by default;
+# older repositories keep the classic format unless renamed, transferred,
+# or explicitly opted in. Pure function so the cutoff is test-pinned.
+# Reference: https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/
+function Test-ImmutableSubjectDefault {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [datetime]$CreatedAt
+    )
+
+    $cutoffUtc = [datetime]::SpecifyKind([datetime]'2026-07-15T00:00:00', [System.DateTimeKind]::Utc)
+    return ($CreatedAt.ToUniversalTime() -ge $cutoffUtc)
+}
+
+# Resolve the repository's numeric owner and repository IDs (plus the
+# creation date the auto-detection heuristic needs) from the GitHub API.
+# Prefers the gh CLI (honors its authentication, so private repositories
+# work); falls back to an unauthenticated api.github.com request, which
+# suffices for public repositories. Returns $null (with a warning) on any
+# failure -- callers decide whether that is fatal (ADR 0058: fatal only
+# under -SubjectFormat immutable).
+# Reference: https://docs.github.com/en/rest/repos/repos#get-a-repository
+function Resolve-GitHubRepoIdentity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Org,
+
+        [Parameter(Mandatory)]
+        [string]$Repo
+    )
+
+    $json = $null
+    $ghCmd = Get-Command -Name 'gh' -ErrorAction SilentlyContinue
+    if ($ghCmd) {
+        $raw = & $ghCmd api "repos/$Org/$Repo" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $raw) {
+            $json = ($raw -join "`n") | ConvertFrom-Json
+        }
+    }
+    if (-not $json) {
+        try {
+            # Reference: https://docs.github.com/en/rest/repos/repos#get-a-repository
+            $json = Invoke-RestMethod -Uri "https://api.github.com/repos/$Org/$Repo" -Method Get `
+                -Headers @{ Accept = 'application/vnd.github+json' } -ErrorAction Stop
+        }
+        catch {
+            Write-Warning ("Could not resolve the GitHub repository identity for '{0}/{1}' via gh or api.github.com: {2}" -f $Org, $Repo, $_.Exception.Message)
+            return $null
+        }
+    }
+    if (-not $json -or -not $json.id -or -not $json.owner -or -not $json.owner.id) {
+        Write-Warning ("GitHub API response for '{0}/{1}' did not carry the numeric owner/repo IDs; cannot compute the immutable OIDC subject." -f $Org, $Repo)
+        return $null
+    }
+    return [ordered]@{
+        OwnerId   = [string]$json.owner.id
+        RepoId    = [string]$json.id
+        CreatedAt = [datetime]$json.created_at
+    }
+}
+
+# ADR 0058 two-format subject contract for one org/repo/environment. Pure
+# function: computes the classic candidate, the immutable candidate (when
+# the numeric IDs are known), the acceptance set for verification, and --
+# only when the IDs are NOT known -- a shape-only pattern that lets an
+# immutable-format credential for the right names pass with a warning.
+# Reference: https://docs.github.com/en/actions/reference/security/oidc
+function Get-AutomationExpectedSubject {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Org,
+
+        [Parameter(Mandatory)]
+        [string]$Repo,
+
+        [Parameter(Mandatory)]
+        [string]$Environment,
+
+        [Parameter()]
+        [string]$OwnerId,
+
+        [Parameter()]
+        [string]$RepoId,
+
+        [Parameter()]
+        [switch]$PreferImmutableSubject
+    )
+
+    $subjectClassic = 'repo:{0}/{1}:environment:{2}' -f $Org, $Repo, $Environment
+    $subjectImmutable = $null
+    if ($OwnerId -and $RepoId) {
+        $subjectImmutable = 'repo:{0}@{1}/{2}@{3}:environment:{4}' -f $Org, $OwnerId, $Repo, $RepoId, $Environment
+    }
+    if ($PreferImmutableSubject -and -not $subjectImmutable) {
+        throw "PreferImmutableSubject requires the numeric OwnerId and RepoId (ADR 0058). Resolve them first (gh api repos/$Org/$Repo) or drop the preference."
+    }
+
+    $subjects = @($subjectClassic)
+    if ($subjectImmutable) { $subjects += $subjectImmutable }
+
+    $subjectPattern = $null
+    if (-not $subjectImmutable) {
+        $subjectPattern = '^repo:{0}@[0-9]+/{1}@[0-9]+:environment:{2}$' -f `
+            [regex]::Escape($Org), [regex]::Escape($Repo), [regex]::Escape($Environment)
+    }
+
+    return [ordered]@{
+        Subject          = if ($PreferImmutableSubject) { $subjectImmutable } else { $subjectClassic }
+        SubjectClassic   = $subjectClassic
+        SubjectImmutable = $subjectImmutable
+        Subjects         = $subjects
+        SubjectPattern   = $subjectPattern
+    }
+}
+
+#endregion
 
 #region Parameters file resolution
 
@@ -191,8 +347,38 @@ $githubRepo = [string]$automation.githubRepo
 $githubEnv = [string]$automation.githubEnvironment
 if (-not $DisplayName) { $DisplayName = [string]$automation.apps[$planeKey].displayName }
 
-# Expected federated credential shape per ADR 0010 decision #2.
-$expectedSubject = "repo:${githubOrg}/${githubRepo}:environment:${githubEnv}"
+# Expected federated credential shape per ADR 0010 decision #2, widened
+# to the ADR 0058 two-format contract. The preferred format decides what
+# a freshly created credential gets; verification accepts either.
+$preferImmutable = $false
+$repoIdentity = $null
+if ($SubjectFormat -ne 'classic') {
+    $repoIdentity = Resolve-GitHubRepoIdentity -Org $githubOrg -Repo $githubRepo
+    if ($SubjectFormat -eq 'immutable') {
+        if (-not $repoIdentity) {
+            Write-Error 'SubjectFormat immutable requires the numeric GitHub owner/repo IDs, and they could not be resolved (see the warning above). Authenticate gh (gh auth login) or restore network access, then re-run. ADR 0058.'
+            return
+        }
+        $preferImmutable = $true
+    }
+    elseif ($repoIdentity) {
+        # auto: prefer the format the repository actually mints. Created on
+        # or after GitHub's 2026-07-15 cutoff -> immutable by default.
+        $preferImmutable = Test-ImmutableSubjectDefault -CreatedAt $repoIdentity.CreatedAt
+    }
+    else {
+        Write-Warning 'Could not resolve the GitHub repository identity; assuming the classic OIDC subject format. If this repository was created on or after 2026-07-15, or was renamed/transferred/opted in to immutable subject claims, re-run with -SubjectFormat immutable once gh is authenticated (ADR 0058).'
+    }
+}
+
+$expectedShape = if ($repoIdentity) {
+    Get-AutomationExpectedSubject -Org $githubOrg -Repo $githubRepo -Environment $githubEnv `
+        -OwnerId $repoIdentity.OwnerId -RepoId $repoIdentity.RepoId -PreferImmutableSubject:$preferImmutable
+}
+else {
+    Get-AutomationExpectedSubject -Org $githubOrg -Repo $githubRepo -Environment $githubEnv
+}
+$expectedSubject = $expectedShape.Subject
 $expectedIssuer = 'https://token.actions.githubusercontent.com'
 $expectedAudiences = @('api://AzureADTokenExchange')
 $expectedFcName = "gh-env-${githubEnv}"
@@ -202,6 +388,7 @@ Write-Information ("Environment: {0}" -f $parameters.environment) -InformationAc
 Write-Information ("Plane: {0}" -f $Plane) -InformationAction Continue
 Write-Information ("App display name: {0}" -f $DisplayName) -InformationAction Continue
 Write-Information ("Federated credential name: {0}" -f $expectedFcName) -InformationAction Continue
+Write-Information ("Subject format: {0} (preferred: {1})" -f $SubjectFormat, $(if ($preferImmutable) { 'immutable' } else { 'classic' })) -InformationAction Continue
 Write-Information ("Federated credential subject: {0}" -f $expectedSubject) -InformationAction Continue
 
 #endregion
@@ -356,8 +543,17 @@ if ($fcList.Count -eq 1) {
     if ($fc.issuer -ne $expectedIssuer) {
         $mismatches += "issuer: expected '$expectedIssuer', actual '$($fc.issuer)'"
     }
-    if ($fc.subject -ne $expectedSubject) {
-        $mismatches += "subject: expected '$expectedSubject', actual '$($fc.subject)'"
+    # ADR 0058: either subject format passes verification -- the classic
+    # candidate, the exact immutable candidate (when the numeric IDs
+    # resolved), or, only when they did not, an immutable-format subject
+    # matching the org/repo/environment shape (accepted with a warning).
+    $subjectOk = $expectedShape.Subjects -contains $fc.subject
+    if (-not $subjectOk -and $expectedShape.SubjectPattern -and $fc.subject -match $expectedShape.SubjectPattern) {
+        $subjectOk = $true
+        Write-Warning ("Application '{0}' federated credential subject '{1}' matches the immutable-format shape for this repo/environment, but the numeric owner/repo IDs could not be resolved for exact verification (offline, or unauthenticated against a private repo). Authenticate gh (gh auth login) and re-run to verify the IDs exactly (ADR 0058)." -f $DisplayName, $fc.subject)
+    }
+    if (-not $subjectOk) {
+        $mismatches += "subject: expected '$($expectedShape.Subjects -join "' or '")', actual '$($fc.subject)'"
     }
     $actualAudiences = @($fc.audiences)
     $audienceMismatch = $false
@@ -385,6 +581,13 @@ if ($fcList.Count -eq 1) {
         # subject/issuer/audiences are security-critical. Canonicalize later
         # by deleting the credential and re-running this script (ADR 0057 section 7).
         Write-Warning ("Application '{0}' federated credential name is '{1}' (expected canonical name '{2}'). Subject/issuer/audiences match -- continuing. To canonicalize: delete the credential and re-run this script." -f $DisplayName, $fc.name, $expectedFcName)
+    }
+
+    if ($preferImmutable -and $fc.subject -eq $expectedShape.SubjectClassic) {
+        # ADR 0058 decision #5: valid shape, but dormant -- this repository
+        # mints immutable subjects, so azure/login can never match a
+        # classic credential. Never silently rewritten (ADR 0010).
+        Write-Warning ("Application '{0}' carries the CLASSIC subject '{1}', but this repository mints IMMUTABLE subjects -- azure/login will fail with AADSTS700213 until the credential is cut over. Cutover: delete the credential and re-run this script (it will mint '{2}'), or follow the bounded add-verify-remove window in ADR 0057 section 7. ADR 0058." -f $DisplayName, $fc.subject, $expectedShape.SubjectImmutable)
     }
 
     Write-Information ("  = Federated credential matches ADR 0010 (id: {0})." -f $fc.id) -InformationAction Continue

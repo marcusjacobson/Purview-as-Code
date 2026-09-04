@@ -398,6 +398,372 @@ $BodyText
     }
 }
 
+# ---------------------------------------------------------------------------
+# Issue #13 (part C prerequisite) -- -PruneMissing prune delete-order safety.
+#
+# Unified Catalog is a containment hierarchy and a parent delete cascades its
+# children server-side (Business Domain -> Data Products / Objectives / Critical
+# Data Elements / Terms; Objective -> Key Results). `$orphans` is assembled
+# parent-first, so the pre-fix flat pass could delete a parent and then issue an
+# explicit DELETE for an already-cascaded child, taking the resulting 404 as a
+# real failure.
+#
+# The fix, mirroring Deploy-Labels.ps1's depth-descending orphan sort (#154):
+#   1. sort orphans deepest-child-first so parents are deleted LAST, and
+#   2. tolerate a post-cascade 404 as already-gone (Test-UCDeleteAlreadyGone),
+#      while still surfacing every non-404 error.
+#
+# These tests drive the REAL top-level delete-loop AST extracted from the
+# committed script -- not a reimplementation -- against stubbed Invoke-UC*Delete
+# cmdlets, per the RED-REPLAY spirit of the #106 tests above.
+# ---------------------------------------------------------------------------
+Describe 'Issue #13 -- prune delete order + 404 tolerance (Deploy-UnifiedCatalog.ps1)' {
+
+    BeforeAll {
+        $tokens = $null
+        $errors = $null
+        $script:Issue13Ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:ScriptPath, [ref]$tokens, [ref]$errors)
+        if ($errors.Count -gt 0) { throw ($errors | ForEach-Object Message | Out-String) }
+
+        # Dot-source the real 404-tolerance helper the loop depends on.
+        $helperAst = $script:Issue13Ast.Find({
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Test-UCDeleteAlreadyGone'
+            }, $true)
+        if (-not $helperAst) { throw 'Function Test-UCDeleteAlreadyGone not found in the script.' }
+        . ([ScriptBlock]::Create($helperAst.Extent.Text))
+
+        # Lift the real top-level -PruneMissing delete loop (the SAME statement
+        # the #106 tests bind, matched on $PruneMissing.IsPresent + $orphans.ToArray()).
+        $script:Issue13DeleteLoopAst = @($script:Issue13Ast.EndBlock.Statements) | Where-Object {
+            $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+            $_.Extent.Text -match '\$PruneMissing\.IsPresent' -and
+            $_.Extent.Text -match '\$orphans\.ToArray\(\)'
+        } | Select-Object -First 1
+        if (-not $script:Issue13DeleteLoopAst) { throw 'Could not locate the top-level -PruneMissing delete-loop statement.' }
+        $script:Issue13DeleteLoopBody = $script:Issue13DeleteLoopAst.Extent.Text
+
+        # Dot-sourcing the CALL to this builder runs its body -- and the inner
+        # function definition -- in the CALLER (It) scope, so Invoke-Issue13Replay
+        # lands where the per-It stubs live. Mirrors Register-Issue106ReplayFunction.
+        function Register-Issue13ReplayFunction {
+            param([Parameter(Mandatory)][string]$BodyText)
+            $functionText = @"
+function Invoke-Issue13Replay {
+    [CmdletBinding(SupportsShouldProcess = `$true, ConfirmImpact = 'High')]
+    param()
+$BodyText
+}
+"@
+            . ([ScriptBlock]::Create($functionText))
+        }
+
+        # Builds an exception shaped like PS7's HttpResponseException: a live
+        # .Response.StatusCode the helper reads. Used to fake a cascade 404 (and
+        # a non-404 that must still fail).
+        function Get-Issue13HttpError {
+            param([Parameter(Mandatory)][int]$StatusCode, [string]$Message = 'stub http error')
+            $ex = [System.Exception]::new($Message)
+            $ex | Add-Member -NotePropertyName 'Response' -NotePropertyValue ([pscustomobject]@{ StatusCode = $StatusCode }) -Force
+            return $ex
+        }
+
+        # Records every stub delete as "Kind:id", in the order fired.
+        # Also stubs Write-PruneFailure: the part-C reporter (batch 6) calls it
+        # in the non-404 delete catch, so the lifted -PruneMissing block now
+        # references it. Records reported failures for the batch-6 tests below.
+        function Register-Issue13DeleteStub {
+            function Invoke-UCBusinessDomainDelete { param($Context, $DomainId) $null = $Context; $script:Issue13Deletes.Add("BusinessDomain:$DomainId") }
+            function Invoke-UCDataProductDelete { param($Context, $DataProductId) $null = $Context; $script:Issue13Deletes.Add("DataProduct:$DataProductId") }
+            function Invoke-UCObjectiveDelete { param($Context, $ObjectiveId) $null = $Context; $script:Issue13Deletes.Add("Okr:$ObjectiveId") }
+            function Invoke-UCKeyResultDelete { param($Context, $ObjectiveId, $KeyResultId) $null = $Context; $null = $ObjectiveId; $script:Issue13Deletes.Add("OkrKeyResult:$KeyResultId") }
+            function Invoke-UCCriticalDataElementDelete { param($Context, $CriticalDataElementId) $null = $Context; $script:Issue13Deletes.Add("CriticalDataElement:$CriticalDataElementId") }
+            function Invoke-UCTermDelete { param($Context, $TermId) $null = $Context; $script:Issue13Deletes.Add("Term:$TermId") }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $script:Issue13Reported.Add($Message) }
+        }
+    }
+
+    It 'unit: Test-UCDeleteAlreadyGone tolerates only a 404' {
+        Test-UCDeleteAlreadyGone -ErrorRecord ([System.Management.Automation.ErrorRecord]::new((Get-Issue13HttpError -StatusCode 404), 'id', 'NotSpecified', $null)) | Should -BeTrue
+        Test-UCDeleteAlreadyGone -ErrorRecord ([System.Management.Automation.ErrorRecord]::new((Get-Issue13HttpError -StatusCode 500), 'id', 'NotSpecified', $null)) | Should -BeFalse
+        Test-UCDeleteAlreadyGone -ErrorRecord ([System.Management.Automation.ErrorRecord]::new([System.Exception]::new('no response'), 'id', 'NotSpecified', $null)) | Should -BeFalse
+    }
+
+    It 'deletes orphans deepest-child-first, parents last, for a mixed cross-kind set' {
+        $script:Issue13Deletes = [System.Collections.Generic.List[string]]::new()
+        . Register-Issue13DeleteStub
+        . Register-Issue13ReplayFunction -BodyText $script:Issue13DeleteLoopBody
+
+        $script:PruneMissing = [switch]$true
+        $script:context = [pscustomobject]@{ Stub = $true }
+        # Added parent-first -- the exact order $orphans is assembled in the real
+        # script (Business Domains first). A correct fix must re-order this.
+        $script:orphans = New-Object 'System.Collections.Generic.List[object]'
+        $script:orphans.Add([pscustomobject]@{ Kind = 'BusinessDomain'; Item = [pscustomobject]@{ id = 'bd-1'; name = 'Finance' } }) | Out-Null
+        $script:orphans.Add([pscustomobject]@{ Kind = 'DataProduct'; Item = [pscustomobject]@{ id = 'dp-1'; name = 'Ledger' } }) | Out-Null
+        $script:orphans.Add([pscustomobject]@{ Kind = 'Okr'; Item = [pscustomobject]@{ id = 'okr-1'; definition = 'Improve quality' } }) | Out-Null
+        $script:orphans.Add([pscustomobject]@{ Kind = 'OkrKeyResult'; Item = [pscustomobject]@{ id = 'kr-1'; definition = '95% coverage'; __objectiveId = 'okr-1'; __objectiveName = 'Improve quality' } }) | Out-Null
+        $script:orphans.Add([pscustomobject]@{ Kind = 'CriticalDataElement'; Item = [pscustomobject]@{ id = 'cde-1'; name = 'SSN' } }) | Out-Null
+        $script:orphans.Add([pscustomobject]@{ Kind = 'Term'; Item = [pscustomobject]@{ id = 'term-1'; name = 'Revenue' } }) | Out-Null
+
+        Invoke-Issue13Replay -Confirm:$false
+
+        $order = @($script:Issue13Deletes)
+        $order.Count | Should -Be 6 -Because 'every orphan is deleted exactly once'
+
+        $kinds = @($order | ForEach-Object { ($_ -split ':')[0] })
+
+        # (a) deepest first: the Key Result (depth 2) is deleted before any other.
+        $kinds[0] | Should -Be 'OkrKeyResult'
+        # ...and before its own parent Objective.
+        [array]::IndexOf($kinds, 'OkrKeyResult') | Should -BeLessThan ([array]::IndexOf($kinds, 'Okr'))
+
+        # (b) parents last: the Business Domain (top-level) is deleted last, after
+        #     every one of its direct children.
+        $kinds[-1] | Should -Be 'BusinessDomain'
+        $bdIndex = [array]::IndexOf($kinds, 'BusinessDomain')
+        foreach ($child in @('DataProduct', 'Okr', 'CriticalDataElement', 'Term')) {
+            [array]::IndexOf($kinds, $child) | Should -BeLessThan $bdIndex -Because "$child is contained by the Business Domain and must be deleted before it"
+        }
+
+        # Mutation check: the pre-fix flat pass deleted in $orphans' assembled
+        # order, i.e. Business Domain FIRST. Assert the fix did not preserve that.
+        $kinds[0] | Should -Not -Be 'BusinessDomain' -Because 'the pre-fix flat order deleted the parent Business Domain first -- the ordering fix must not reproduce it'
+    }
+
+    It 'treats a post-cascade 404 on a child as already-gone and keeps pruning the rest' {
+        $script:Issue13Deletes = [System.Collections.Generic.List[string]]::new()
+        . Register-Issue13DeleteStub
+        # The Term's parent domain already cascaded it away -> explicit DELETE 404s.
+        function Invoke-UCTermDelete { param($Context, $TermId) $null = $Context; $null = $TermId; throw (Get-Issue13HttpError -StatusCode 404 -Message 'Term already removed by cascade') }
+        . Register-Issue13ReplayFunction -BodyText $script:Issue13DeleteLoopBody
+
+        $script:PruneMissing = [switch]$true
+        $script:context = [pscustomobject]@{ Stub = $true }
+        $script:orphans = New-Object 'System.Collections.Generic.List[object]'
+        $script:orphans.Add([pscustomobject]@{ Kind = 'BusinessDomain'; Item = [pscustomobject]@{ id = 'bd-1'; name = 'Finance' } }) | Out-Null
+        $script:orphans.Add([pscustomobject]@{ Kind = 'Term'; Item = [pscustomobject]@{ id = 'term-1'; name = 'Revenue' } }) | Out-Null
+
+        { Invoke-Issue13Replay -Confirm:$false } | Should -Not -Throw -Because 'a 404 from an already-cascaded child is idempotent-delete success, not a prune failure'
+
+        # The Business Domain (deleted after the tolerated 404) still ran.
+        @($script:Issue13Deletes) | Should -Contain 'BusinessDomain:bd-1'
+    }
+
+    It 'still fails on a non-404 delete error (now via the batch-6 aggregate throw)' {
+        $script:Issue13Deletes = [System.Collections.Generic.List[string]]::new()
+        $script:Issue13Reported = [System.Collections.Generic.List[string]]::new()
+        . Register-Issue13DeleteStub
+        function Invoke-UCTermDelete { param($Context, $TermId) $null = $Context; $null = $TermId; throw (Get-Issue13HttpError -StatusCode 500 -Message 'server error') }
+        . Register-Issue13ReplayFunction -BodyText $script:Issue13DeleteLoopBody
+
+        $script:PruneMissing = [switch]$true
+        $script:context = [pscustomobject]@{ Stub = $true }
+        $script:orphans = New-Object 'System.Collections.Generic.List[object]'
+        $script:orphans.Add([pscustomobject]@{ Kind = 'Term'; Item = [pscustomobject]@{ id = 'term-1'; name = 'Revenue' } }) | Out-Null
+
+        # Behaviour change (part C batch 6): the non-404 error is no longer
+        # rethrown inline; it is reported via Write-PruneFailure and collected,
+        # and the aggregate throw at the end of the -PruneMissing block fails the
+        # run non-zero. Still fails -- a non-404 error must not be swallowed.
+        { Invoke-Issue13Replay -Confirm:$false } | Should -Throw -Because 'a non-404 error is a real prune failure and must not be swallowed'
+        @($script:Issue13Reported).Count | Should -Be 1 -Because 'the failure is reported through Write-PruneFailure before the aggregate throw'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Issue #13 part C batch 6: the prune failure REPORTER (attempt-every-orphan,
+# aggregate throw) and guard 2 (per-kind prune sanity ratio). The reporter
+# region is the SAME lifted -PruneMissing delete loop the delete-order tests
+# above bind; these cases drive its new collect-and-continue path.
+# ---------------------------------------------------------------------------
+Describe 'Prune guard 2 and failure reporter wiring (issue #13, batch 6) -- Deploy-UnifiedCatalog.ps1' {
+
+    BeforeAll {
+        $script:B6Source = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:B6Source | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+    It 'still calls guard 1 (empty-desired-set) -- earlier rollout not regressed' {
+        $script:B6Source | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+    It 'calls the sanity-ratio guard with the per-kind Unified Catalog nouns' {
+        $script:B6Source | Should -Match 'Assert-PruneRatioWithinThreshold'
+        foreach ($noun in @('Unified Catalog business domain', 'Unified Catalog data product', 'Unified Catalog objective', 'Unified Catalog key result', 'Unified Catalog critical data element', 'Unified Catalog term')) {
+            $script:B6Source | Should -Match ([regex]::Escape("Noun = '$noun'"))
+        }
+    }
+    It 'keys the key-result tier on the flat tenant key-result list (no single tenant collection)' {
+        $script:B6Source | Should -Match ([regex]::Escape('@($keyResultTenant).Count'))
+    }
+    It 'gates guard 2 on non-audit (AUDIT TRAP: audit flips WhatIfPreference but leaves $orphans populated)' {
+        $script:B6Source | Should -Match ([regex]::Escape("-and `$DirectionPolicy -ne 'audit'"))
+    }
+    It 'surfaces the ratio override and threshold parameters on the Apply parameter set' {
+        $script:B6Source | Should -Match '\[switch\]\$AllowMajorityPrune'
+        $script:B6Source | Should -Match '\[double\]\$MaxPruneRatio\s*=\s*0\.5'
+        $cmd = Get-Command -Name $script:ScriptPath -CommandType ExternalScript
+        $cmd.Parameters['AllowMajorityPrune'].ParameterSets.Keys | Should -Not -Contain 'Export'
+        $cmd.Parameters['MaxPruneRatio'].ParameterSets.Keys | Should -Not -Contain 'Export'
+    }
+    It 'places guard 2 before the ADR 0052 confirmation gate' {
+        $ratioIdx = $script:B6Source.IndexOf('Assert-PruneRatioWithinThreshold')
+        $gateIdx  = $script:B6Source.IndexOf('Assert-DestructiveOperationConfirmed @gateArgs')
+        $ratioIdx | Should -BeGreaterThan 0
+        $gateIdx  | Should -BeGreaterThan 0
+        $ratioIdx | Should -BeLessThan $gateIdx
+    }
+}
+
+Describe 'Per-kind prune sanity-ratio guard executed through the script wiring (issue #13, batch 6)' {
+
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'PruneGuard.psm1') -Force -ErrorAction Stop
+        $lines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $start = -1; $end = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*if \(\$PruneMissing\.IsPresent -and \$DirectionPolicy -ne ''audit''\)') {
+                $depth = 0; $e = -1
+                for ($j = $i; $j -lt $lines.Count; $j++) {
+                    $depth += ([regex]::Matches($lines[$j], '\{')).Count
+                    $depth -= ([regex]::Matches($lines[$j], '\}')).Count
+                    if ($depth -le 0) { $e = $j; break }
+                }
+                $cand = ($lines[$i..$e] -join [Environment]::NewLine)
+                if ($cand -match 'Assert-PruneRatioWithinThreshold') { $start = $i; $end = $e; break }
+            }
+        }
+        if ($start -lt 0) { throw 'Could not locate the guard-2 region in Deploy-UnifiedCatalog.ps1; update the anchor in this test.' }
+        $script:Guard2Region = ($lines[$start..$end] -join [Environment]::NewLine)
+
+        function Invoke-Guard2 {
+            # $OrphanKinds: one entry per orphan, its Kind. Live* set the per-kind
+            # denominators. Only the tested kind needs a non-trivial denominator.
+            param([hashtable]$OrphanCounts = @{}, [hashtable]$Live = @{}, [double]$Max = 0.5, [switch]$Allow, [string]$Direction = 'portal-wins')
+            $PruneMissing = [switch]$true
+            $DirectionPolicy = $Direction
+            $MaxPruneRatio = $Max
+            $AllowMajorityPrune = [switch]$Allow
+            $orphans = New-Object 'System.Collections.Generic.List[object]'
+            foreach ($k in $OrphanCounts.Keys) {
+                for ($i = 0; $i -lt $OrphanCounts[$k]; $i++) { $orphans.Add([pscustomobject]@{ Kind = $k; Item = [pscustomobject]@{ id = "$k-$i" } }) | Out-Null }
+            }
+            $mk = { param($n) @(for ($i = 0; $i -lt $n; $i++) { [pscustomobject]@{ id = $i } }) }
+            $tenantState = [pscustomobject]@{
+                Domains              = & $mk ([int]($Live['BusinessDomain']))
+                DataProducts         = & $mk ([int]($Live['DataProduct']))
+                Objectives           = & $mk ([int]($Live['Okr']))
+                CriticalDataElements = & $mk ([int]($Live['CriticalDataElement']))
+                Terms                = & $mk ([int]($Live['Term']))
+            }
+            $keyResultTenant = & $mk ([int]($Live['OkrKeyResult']))
+            $null = $PruneMissing, $DirectionPolicy, $MaxPruneRatio, $AllowMajorityPrune, $orphans, $tenantState, $keyResultTenant
+            & ([scriptblock]::Create($script:Guard2Region)) 3>$null
+        }
+    }
+
+    It 'passes when every kind sits at or below the threshold' {
+        { Invoke-Guard2 -OrphanCounts @{ Term = 2; BusinessDomain = 1 } -Live @{ Term = 10; BusinessDomain = 4 } } | Should -Not -Throw
+    }
+    It 'throws when ONE kind exceeds the threshold even though the blended ratio would pass (the per-kind point)' {
+        # 4 of 4 terms pruned but 0 of 16 domains: blended 4/20 = 20%, term kind 100%.
+        { Invoke-Guard2 -OrphanCounts @{ Term = 4 } -Live @{ Term = 4; BusinessDomain = 16 } } | Should -Throw
+    }
+    It 'throws when the key-result kind exceeds the threshold (flat-list denominator)' {
+        { Invoke-Guard2 -OrphanCounts @{ OkrKeyResult = 6 } -Live @{ OkrKeyResult = 10; BusinessDomain = 10 } -Max 0.5 } | Should -Throw
+    }
+    It 'permits an over-threshold prune when -AllowMajorityPrune is supplied' {
+        { Invoke-Guard2 -OrphanCounts @{ Term = 4 } -Live @{ Term = 4 } -Allow } | Should -Not -Throw
+    }
+    It 'does NOT fire under -DirectionPolicy audit even above the threshold (audit trap)' {
+        { Invoke-Guard2 -OrphanCounts @{ Term = 4 } -Live @{ Term = 4 } -Direction 'audit' } | Should -Not -Throw
+    }
+    It 'honours a caller-supplied -MaxPruneRatio' {
+        { Invoke-Guard2 -OrphanCounts @{ Term = 6 } -Live @{ Term = 10 } -Max 0.7 } | Should -Not -Throw
+    }
+}
+
+Describe 'Prune failure reporting executed through the delete loop (issue #13, batch 6)' {
+
+    BeforeAll {
+        # Reuse the delete-loop lift from the delete-order Describe by rebuilding
+        # the same AST slice here (self-contained BeforeAll).
+        $tokens = $null; $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($script:ScriptPath, [ref]$tokens, [ref]$errors)
+        if ($errors.Count -gt 0) { throw ($errors | ForEach-Object Message | Out-String) }
+        $helperAst = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-UCDeleteAlreadyGone' }, $true)
+        . ([ScriptBlock]::Create($helperAst.Extent.Text))
+        $loopAst = @($ast.EndBlock.Statements) | Where-Object {
+            $_ -is [System.Management.Automation.Language.IfStatementAst] -and
+            $_.Extent.Text -match '\$PruneMissing\.IsPresent' -and $_.Extent.Text -match '\$orphans\.ToArray\(\)'
+        } | Select-Object -First 1
+        $script:B6LoopBody = $loopAst.Extent.Text
+        $script:B6LoopHasReporter = $script:B6LoopBody -match 'Write-PruneFailure' -and $script:B6LoopBody -match '\$pruneFailures' -and $script:B6LoopBody -match 'throw'
+
+        function Get-B6HttpError { param([int]$StatusCode, [string]$Message = 'stub') $ex = [System.Exception]::new($Message); $ex | Add-Member -NotePropertyName 'Response' -NotePropertyValue ([pscustomobject]@{ StatusCode = $StatusCode }) -Force; return $ex }
+
+        function Invoke-B6Prune {
+            param([string[]]$FailTerms = @())
+            $script:B6Deletes = [System.Collections.Generic.List[string]]::new()
+            $script:B6Reported = [System.Collections.Generic.List[string]]::new()
+            function Invoke-UCBusinessDomainDelete { param($Context, $DomainId) $null = $Context; $script:B6Deletes.Add("BusinessDomain:$DomainId") }
+            function Invoke-UCDataProductDelete { param($Context, $DataProductId) $null = $Context; $script:B6Deletes.Add("DataProduct:$DataProductId") }
+            function Invoke-UCObjectiveDelete { param($Context, $ObjectiveId) $null = $Context; $script:B6Deletes.Add("Okr:$ObjectiveId") }
+            function Invoke-UCKeyResultDelete { param($Context, $ObjectiveId, $KeyResultId) $null = $Context, $ObjectiveId; $script:B6Deletes.Add("OkrKeyResult:$KeyResultId") }
+            function Invoke-UCCriticalDataElementDelete { param($Context, $CriticalDataElementId) $null = $Context; $script:B6Deletes.Add("CriticalDataElement:$CriticalDataElementId") }
+            function Invoke-UCTermDelete { param($Context, $TermId) $null = $Context; $script:B6Deletes.Add("Term:$TermId"); if ($FailTerms -contains [string]$TermId) { throw (Get-B6HttpError -StatusCode 500 -Message "server error on $TermId") } }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $script:B6Reported.Add($Message) }
+            $fnText = @"
+function Invoke-B6Replay {
+    [CmdletBinding(SupportsShouldProcess = `$true, ConfirmImpact = 'High')]
+    param()
+$script:B6LoopBody
+}
+"@
+            . ([ScriptBlock]::Create($fnText))
+            $script:PruneMissing = [switch]$true
+            $script:context = [pscustomobject]@{ Stub = $true }
+            $script:orphans = New-Object 'System.Collections.Generic.List[object]'
+            # Three sibling terms under one domain (all depth 2, so sort keeps them
+            # together and the loop attempts each independently).
+            $script:orphans.Add([pscustomobject]@{ Kind = 'Term'; Item = [pscustomobject]@{ id = 'term-1'; name = 'T1' } }) | Out-Null
+            $script:orphans.Add([pscustomobject]@{ Kind = 'Term'; Item = [pscustomobject]@{ id = 'term-2'; name = 'T2' } }) | Out-Null
+            $script:orphans.Add([pscustomobject]@{ Kind = 'Term'; Item = [pscustomobject]@{ id = 'term-3'; name = 'T3' } }) | Out-Null
+            $thrown = $null
+            try { Invoke-B6Replay -Confirm:$false 6>$null 3>$null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = @($script:B6Deletes); Reported = @($script:B6Reported); Thrown = $thrown }
+        }
+    }
+
+    It 'attempts every orphan after a non-404 failure (no first-failure abort)' {
+        $r = Invoke-B6Prune -FailTerms @('term-1')
+        @($r.Attempted) | Should -Be @('Term:term-1', 'Term:term-2', 'Term:term-3')
+    }
+    It 'reports each failure with the tenant''s own error text' {
+        $r = Invoke-B6Prune -FailTerms @('term-2')
+        @($r.Reported).Count | Should -Be 1
+        $r.Reported[0] | Should -Match 'server error on term-2'
+    }
+    It 'throws one aggregate naming every failed object (non-zero exit preserved)' {
+        $r = Invoke-B6Prune -FailTerms @('term-1', 'term-3')
+        $r.Thrown | Should -Match "Term 'T1'"
+        $r.Thrown | Should -Match "Term 'T3'"
+        $r.Thrown | Should -Match '2 orphan Unified Catalog object'
+    }
+    It 'throws nothing when every delete succeeds' {
+        $r = Invoke-B6Prune
+        $r.Thrown   | Should -BeNullOrEmpty
+        @($r.Reported).Count | Should -Be 0
+    }
+    It 'carries the reporter and the aggregate throw in the lifted -PruneMissing block (mutation check)' {
+        $script:B6LoopHasReporter | Should -BeTrue
+    }
+}
+
 Describe 'Source surface contract' {
     It 'keeps the required reconciler switches and ADR markers in source' {
         $raw = Get-Content -LiteralPath $script:ScriptPath -Raw

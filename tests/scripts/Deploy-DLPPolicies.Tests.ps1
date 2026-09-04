@@ -55,8 +55,11 @@ BeforeAll {
     foreach ($fname in @(
             'ConvertFrom-AdvancedRuleWire',
             'ConvertTo-NormalizedAdvancedRule',
+            'ConvertTo-ExportedAdvancedRule',
             'ConvertTo-AdvancedRuleWire',
             'ConvertTo-NormalizedAdvancedRuleJson',
+            'ConvertTo-SensitivityLabelNameMap',
+            'Test-DlpRuleIsNotesOnly',
             'ConvertFrom-GenericLocationsWire',
             'ConvertTo-NormalizedGenericLocations',
             'ConvertTo-GenericLocationsWire',
@@ -76,9 +79,11 @@ BeforeAll {
             'ConvertTo-TenantDlpPolicyHash',
             'ConvertTo-TenantDlpRuleHash',
             'Compare-DlpPolicy',
+            'Test-DlpParameterLocationSupport',
             'Compare-DlpRule',
             'Get-DlpPolicySplat',
-            'Get-DlpRuleSplat')) {
+            'Get-DlpRuleSplat',
+            'Invoke-DlpExport')) {
         $fnAst = $ast.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -447,11 +452,178 @@ Describe 'Get-DlpRuleSplat builds correct argument sets' {
     }
 }
 
+Describe 'NotifyUserType is gated on the parent policy locations (#108)' {
+
+    # Live failure this closes (dev tenant, 2026-07-27, policy
+    # 'Fabric PII Detection - CoA Demo Workspace', locations.powerBI only):
+    #   Using the 'NotifyUserType' parameter is supported only for Exchange,
+    #   SharePoint, OneDriveForBusiness, Teams, EndpointDevices.
+    # The POLICY created and its rule did not, stranding an enabled ruleless
+    # policy on the tenant. Same class as #92/#93: exports clean, undeployable.
+
+    BeforeAll {
+        $script:NotifyRule = ConvertTo-DesiredDlpRuleHash -Entry @{
+            name               = 'r-notify'
+            sensitiveInfoTypes = @(@{ guid = '50842EB7-EDC8-4019-85DD-5A5C1F2BB085' })
+            notifyUserType     = 'NotSet'
+        }
+    }
+
+    Context 'Test-DlpParameterLocationSupport predicate' {
+
+        It 'returns $false for a policy scoped ONLY to unsupported workloads' -TestCases @(
+            @{ Bucket = 'powerBI' }
+            @{ Bucket = 'onPremisesScanner' }
+            @{ Bucket = 'exchangeOnPremises' }
+            @{ Bucket = 'sharePointServer' }
+            @{ Bucket = 'thirdPartyApp' }
+        ) {
+            param($Bucket)
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' `
+                -PolicyLocations @{ $Bucket = 'All' } | Should -BeFalse
+        }
+
+        # Non-vacuity: the guard MUST NOT fire for the workloads the service
+        # documents as supported. A one-sided test here would pass even if the
+        # predicate returned $false unconditionally.
+        It 'returns $true for each supported workload' -TestCases @(
+            @{ Bucket = 'exchange' }
+            @{ Bucket = 'sharePoint' }
+            @{ Bucket = 'oneDrive' }
+            @{ Bucket = 'teams' }
+            @{ Bucket = 'endpoint' }
+        ) {
+            param($Bucket)
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' `
+                -PolicyLocations @{ $Bucket = 'All' } | Should -BeTrue
+        }
+
+        It 'returns $true for a MIXED policy (one supported bucket is enough)' {
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' `
+                -PolicyLocations @{ exchange = 'All'; powerBI = 'All' } | Should -BeTrue
+        }
+
+        It 'fails OPEN when no parent-policy context is supplied' {
+            Test-DlpParameterLocationSupport -ParameterName 'NotifyUserType' | Should -BeTrue
+        }
+
+        It 'fails OPEN when the policy declares no inclusion bucket' {
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' -PolicyLocations @{} | Should -BeTrue
+        }
+
+        It 'ignores *Exception buckets -- they carve scope out, never turn a workload on' {
+            # sharePointException alone must not make the parameter supported.
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'NotifyUserType' `
+                -PolicyLocations @{ powerBI = 'All'; sharePointException = @('https://contoso.sharepoint.com/sites/x') } | Should -BeFalse
+        }
+
+        It 'leaves an unrestricted parameter alone' {
+            Test-DlpParameterLocationSupport `
+                -ParameterName 'BlockAccess' `
+                -PolicyLocations @{ powerBI = 'All' } | Should -BeTrue
+        }
+    }
+
+    Context 'Get-DlpRuleSplat write path' {
+
+        It 'OMITS -NotifyUserType for a powerBI-only policy and warns' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Fabric' `
+                -PolicyLocations @{ powerBI = 'All' } -WarningVariable warnings -WarningAction SilentlyContinue
+            $splat.ContainsKey('NotifyUserType') | Should -BeFalse
+            # Silent suppression is the failure mode we are NOT shipping.
+            @($warnings).Count                   | Should -BeGreaterThan 0
+            [string]$warnings[0]                 | Should -BeLike '*NotifyUserType*'
+            [string]$warnings[0]                 | Should -BeLike '*P-Fabric\r-notify*'
+        }
+
+        It 'EMITS -NotifyUserType for an exchange-scoped policy' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Exo' `
+                -PolicyLocations @{ exchange = 'All' }
+            $splat.NotifyUserType | Should -Be 'NotSet'
+        }
+
+        It 'EMITS -NotifyUserType when no parent-policy context is supplied (back-compat)' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Legacy'
+            $splat.NotifyUserType | Should -Be 'NotSet'
+        }
+
+        It 'applies the same guard on the Set path, not just Create' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Fabric' -ForSet `
+                -PolicyLocations @{ powerBI = 'All' } -WarningAction SilentlyContinue
+            $splat.Identity                      | Should -Be 'P-Fabric\r-notify'
+            $splat.ContainsKey('NotifyUserType') | Should -BeFalse
+        }
+
+        It 'suppresses ONLY NotifyUserType -- the rest of the splat is untouched' {
+            $splat = Get-DlpRuleSplat -Hash $script:NotifyRule -PolicyName 'P-Fabric' `
+                -PolicyLocations @{ powerBI = 'All' } -WarningAction SilentlyContinue
+            $splat.Name                                        | Should -Be 'r-notify'
+            $splat.Policy                                      | Should -Be 'P-Fabric'
+            $splat.ContentContainsSensitiveInformation[0].Name | Should -Be '50842eb7-edc8-4019-85dd-5a5c1f2bb085'
+        }
+    }
+
+    Context 'Compare-DlpRule diff path' {
+
+        # Without this the reconciler would plan an Update on every single run
+        # for a drift the apply path is now guaranteed never to satisfy.
+        It 'does NOT report notifyUserType drift for a powerBI-only policy' {
+            $tenant = ConvertTo-DesiredDlpRuleHash -Entry @{
+                name               = 'r-notify'
+                sensitiveInfoTypes = @(@{ guid = '50842EB7-EDC8-4019-85DD-5A5C1F2BB085' })
+                notifyUserType     = 'SiteAdmin'
+            }
+            $diffs = Compare-DlpRule -Desired $script:NotifyRule -Tenant $tenant `
+                -PolicyLocations @{ powerBI = 'All' }
+            @($diffs) -contains 'notifyUserType' | Should -BeFalse
+        }
+
+        It 'DOES report notifyUserType drift for an exchange-scoped policy' {
+            $tenant = ConvertTo-DesiredDlpRuleHash -Entry @{
+                name               = 'r-notify'
+                sensitiveInfoTypes = @(@{ guid = '50842EB7-EDC8-4019-85DD-5A5C1F2BB085' })
+                notifyUserType     = 'SiteAdmin'
+            }
+            $diffs = Compare-DlpRule -Desired $script:NotifyRule -Tenant $tenant `
+                -PolicyLocations @{ exchange = 'All' }
+            @($diffs) -contains 'notifyUserType' | Should -BeTrue
+        }
+    }
+}
+
 Describe 'Schema and reconciler accept the post-export tenant shape (PR for #362)' {
 
     BeforeAll {
         $script:SchemaPath = Join-Path $PSScriptRoot '..' '..' 'data-plane' 'dlp' 'policies.schema.json'
         $script:Schema     = Get-Content -LiteralPath $script:SchemaPath -Raw
+        Import-Module powershell-yaml -ErrorAction Stop
+    }
+
+    It 'exporter omits restrictAccess when the tenant items normalize to empty (issue #71 -- never emits schema-invalid restrictAccess: [])' {
+        # A tenant rule whose only RestrictAccess entry has no `setting` is dropped
+        # by ConvertTo-NormalizedRestrictAccess, so a naive exporter would write
+        # `restrictAccess: []` -- which the schema (restrictAccess minItems: 1)
+        # rejects and no round-trip can satisfy. Observed live on the lab Copilot
+        # "Protect sensitive M365 Copilot interactions" rule. The export must omit
+        # the key entirely and stay schema-valid.
+        $policy = [pscustomobject]@{ Name = 'P-71'; Mode = 'Enable'; Priority = 0; TeamsLocation = @('All') }
+        $rule = [pscustomobject]@{
+            ParentPolicyName = 'P-71'
+            Name             = 'R-71'
+            Priority         = 0
+            IsAdvancedRule   = $false
+            RestrictAccess   = @(@{ notASetting = 'value' })
+        }
+        $out = Join-Path $TestDrive 'export-71.yaml'
+        Invoke-DlpExport -Path $out -TenantPolicies @($policy) -TenantRules @($rule)
+        $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+        $doc.policies[0].rules[0].ContainsKey('restrictAccess') | Should -BeFalse
+        { ($doc | ConvertTo-Json -Depth 25) | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Not -Throw
     }
 
     It 'validates a policy that declares the powerBI location bucket (Fabric DLP)' {
@@ -539,33 +711,41 @@ Describe 'AdvancedRule round-trip (PR A2 of #514, ADR 0031)' {
     Context 'ConvertFrom-AdvancedRuleWire parses Microsoft wire JSON' {
 
         It 'returns Recognized=$true and the expected outerOperator + group shape for HIPAA-style input' {
+            # #80: the parse result is now a condition TREE. The HIPAA body is the
+            # single-content-predicate case, so it lands as one condition under an
+            # `And` root -- the exact shape ConvertTo-ExportedAdvancedRule renders
+            # back as the legacy { outerOperator, groups } sugar.
             $r = ConvertFrom-AdvancedRuleWire -Wire $script:HipaaWire
             $r.Recognized | Should -BeTrue
             $r.Reason     | Should -BeNullOrEmpty
-            $r.Normalized.outerOperator                        | Should -Be 'And'
-            @($r.Normalized.groups).Count                       | Should -Be 2
-            $r.Normalized.groups[0].name                        | Should -Be 'PII Identifiers'
-            $r.Normalized.groups[0].operator                    | Should -Be 'Or'
-            @($r.Normalized.groups[0].sensitiveInfoTypes).Count | Should -Be 1
-            $r.Normalized.groups[0].sensitiveInfoTypes[0].guid  | Should -Be 'a44669fe-0d48-453d-a9b1-2cc83f2cba77'
-            $r.Normalized.groups[0].sensitiveInfoTypes[0].name  | Should -Be 'U.S. Social Security Number (SSN)'
-            $r.Normalized.groups[0].sensitiveInfoTypes[0].maxCount      | Should -Be -1
-            $r.Normalized.groups[0].sensitiveInfoTypes[0].minConfidence | Should -Be 75
+            $content = $r.Normalized.conditions[0]
+            $r.Normalized.operator                     | Should -Be 'And'
+            $content.type                              | Should -Be 'ContentContainsSensitiveInformation'
+            $content.outerOperator                     | Should -Be 'And'
+            @($content.groups).Count                       | Should -Be 2
+            $content.groups[0].name                        | Should -Be 'PII Identifiers'
+            $content.groups[0].operator                    | Should -Be 'Or'
+            @($content.groups[0].sensitiveInfoTypes).Count | Should -Be 1
+            $content.groups[0].sensitiveInfoTypes[0].guid  | Should -Be 'a44669fe-0d48-453d-a9b1-2cc83f2cba77'
+            $content.groups[0].sensitiveInfoTypes[0].name  | Should -Be 'U.S. Social Security Number (SSN)'
+            $content.groups[0].sensitiveInfoTypes[0].maxCount      | Should -Be -1
+            $content.groups[0].sensitiveInfoTypes[0].minConfidence | Should -Be 75
         }
 
         It 'routes Classifiertype=MLModel entries into trainableClassifiers, not sensitiveInfoTypes' {
             $r = ConvertFrom-AdvancedRuleWire -Wire $script:HipaaWire
+            $groups = $r.Normalized.conditions[0].groups
             # Group 1 (Trainable Classifiers) carries no SITs, one classifier.
-            $r.Normalized.groups[1].sensitiveInfoTypes   | Should -BeNullOrEmpty
-            @($r.Normalized.groups[1].trainableClassifiers).Count | Should -Be 1
-            $r.Normalized.groups[1].trainableClassifiers[0].guid  | Should -Be 'dcbada08-65bf-4561-b140-25d8fee4d143'
+            $groups[1].sensitiveInfoTypes   | Should -BeNullOrEmpty
+            @($groups[1].trainableClassifiers).Count | Should -Be 1
+            $groups[1].trainableClassifiers[0].guid  | Should -Be 'dcbada08-65bf-4561-b140-25d8fee4d143'
         }
 
         It 'returns Recognized=$false with a reason when SubCondition.ConditionName is unsupported' {
             $bad = '{"Version":"1.0","Condition":{"Operator":"And","SubConditions":[{"ConditionName":"DocumentMatchesPatternsAttachedItem","Value":[]}]}}'
             $r   = ConvertFrom-AdvancedRuleWire -Wire $bad
             $r.Recognized | Should -BeFalse
-            $r.Reason     | Should -Match 'ContentContainsSensitiveInformation'
+            $r.Reason     | Should -Match 'DocumentMatchesPatternsAttachedItem'
         }
 
         It 'returns Recognized=$false when Version is not 1.0' {
@@ -635,9 +815,11 @@ Describe 'AdvancedRule round-trip (PR A2 of #514, ADR 0031)' {
                     groups = @(@{ name = 'g'; operator = 'Or'; sensitiveInfoTypes = @(@{ guid = 'a44669fe-0d48-453d-a9b1-2cc83f2cba77' }) })
                 }
             }
+            # #80: the desired hash normalizes the authored sugar into the tree.
             $r.advancedRule                                  | Should -Not -BeNullOrEmpty
-            $r.advancedRule.outerOperator                    | Should -Be 'And'
-            $r.advancedRule.groups[0].sensitiveInfoTypes[0].guid | Should -Be 'a44669fe-0d48-453d-a9b1-2cc83f2cba77'
+            $r.advancedRule.operator                         | Should -Be 'And'
+            $r.advancedRule.conditions[0].outerOperator      | Should -Be 'And'
+            $r.advancedRule.conditions[0].groups[0].sensitiveInfoTypes[0].guid | Should -Be 'a44669fe-0d48-453d-a9b1-2cc83f2cba77'
         }
 
         It 'emits -AdvancedRule (string JSON) and not -ContentContainsSensitiveInformation on the splat' {
@@ -720,6 +902,249 @@ Describe 'AdvancedRule round-trip (PR A2 of #514, ADR 0031)' {
     }
 }
 
+Describe 'rawAdvancedRule captured-evidence pass-through (#79, ADR 0031)' {
+
+    BeforeAll {
+        $script:SchemaPath = Join-Path $PSScriptRoot '..' '..' 'data-plane' 'dlp' 'policies.schema.json'
+        $script:Schema     = Get-Content -LiteralPath $script:SchemaPath -Raw
+        Import-Module powershell-yaml -ErrorAction Stop
+
+        # Wire bodies that ConvertFrom-AdvancedRuleWire REJECTS.
+        #
+        # UPDATED BY #80. These originally mirrored the two degradation modes seen
+        # across the 10 tenant rules -- a second SubCondition and
+        # Condition.Operator='Or' -- both of which #80 now MODELS, so neither is a
+        # parse failure any more. The #79 contract under test here is not "those two
+        # shapes fail" but "whatever the parser cannot model is captured verbatim as
+        # evidence instead of being discarded", so the fixtures are re-pointed at
+        # shapes that remain unmodelled after #80:
+        #   * an unsupported predicate name (RecipientDomainIs)
+        #   * a sensitivity label the tenant cannot resolve to a display name, which
+        #     must degrade rather than write a raw label GUID into the repo (ADR 0023)
+        $script:UnparseableUnknownPredicate = '{"Version":"1.0","Condition":{"Operator":"And","SubConditions":[{"ConditionName":"ContentContainsSensitiveInformation","Value":[{"Operator":"Or","Groups":[{"Name":"g","Operator":"Or","Sensitivetypes":[{"Name":"U.S. Social Security Number (SSN)","Id":"a44669fe-0d48-453d-a9b1-2cc83f2cba77"}]}]}]},{"ConditionName":"RecipientDomainIs","Value":["contoso.com"]}]}}'
+        $script:UnparseableUnresolvedLabel  = '{"Version":"1.0","Condition":{"Operator":"And","SubConditions":[{"ConditionName":"ContentContainsSensitiveInformation","Value":[{"Operator":"And","Groups":[{"Name":"g","Operator":"Or","Labels":[{"Name":"00000000-0000-0000-0000-000000000821","Id":"00000000-0000-0000-0000-000000000821","Type":"Sensitivity"}]}]}]}]}}'
+
+        # A body the parser DOES accept, for the negative case.
+        $script:ParseableWire = '{"Version":"1.0","Condition":{"Operator":"And","SubConditions":[{"ConditionName":"ContentContainsSensitiveInformation","Value":[{"Operator":"And","Groups":[{"Name":"g","Operator":"Or","Sensitivetypes":[{"Name":"Credit Card Number","Id":"50842eb7-edc8-4019-85dd-5a5c1f2bb085","Mincount":1,"Maxcount":-1}]}]}]}]}}'
+    }
+
+    Context 'Invoke-DlpExport captures the wire body on parse failure' {
+
+        It 'writes rawAdvancedRule verbatim alongside notes when the body does not parse' {
+            $policy = [pscustomobject]@{ Name = 'P-79'; Mode = 'Enable'; Priority = 0; ExchangeLocation = @('All') }
+            $rule   = [pscustomobject]@{
+                ParentPolicyName = 'P-79'
+                Name             = 'R-79'
+                Priority         = 0
+                IsAdvancedRule   = $true
+                AdvancedRule     = $script:UnparseableUnknownPredicate
+            }
+            $out = Join-Path $TestDrive 'export-79-a.yaml'
+            Invoke-DlpExport -Path $out -TenantPolicies @($policy) -TenantRules @($rule)
+            $r = (Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml).policies[0].rules[0]
+
+            $r.ContainsKey('rawAdvancedRule') | Should -BeTrue
+            # Verbatim: the captured string must be byte-identical to the tenant body,
+            # otherwise it is not usable as evidence for modelling the shape.
+            $r.rawAdvancedRule               | Should -BeExactly $script:UnparseableUnknownPredicate
+            $r.notes                         | Should -Match "Unsupported SubCondition.ConditionName='RecipientDomainIs'"
+            $r.ContainsKey('advancedRule')   | Should -BeFalse
+        }
+
+        It 'captures the unresolvable-sensitivity-label degradation mode too (never writes a raw label GUID)' {
+            # The export path resolves Labels[].Id -> display name via Get-Label (#80).
+            # With no label map -- Get-Label unavailable, or a label present on the
+            # rule but absent from the tenant -- the ONLY safe outcome is to degrade
+            # to evidence. Writing the GUID would be an ADR 0023 violation and an
+            # ADR 0055 residue finding.
+            $policy = [pscustomobject]@{ Name = 'P-79b'; Mode = 'Enable'; Priority = 0; ExchangeLocation = @('All') }
+            $rule   = [pscustomobject]@{
+                ParentPolicyName = 'P-79b'
+                Name             = 'R-79b'
+                Priority         = 0
+                IsAdvancedRule   = $true
+                AdvancedRule     = $script:UnparseableUnresolvedLabel
+            }
+            $out = Join-Path $TestDrive 'export-79-b.yaml'
+            Invoke-DlpExport -Path $out -TenantPolicies @($policy) -TenantRules @($rule)
+            $r = (Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml).policies[0].rules[0]
+
+            $r.rawAdvancedRule             | Should -BeExactly $script:UnparseableUnresolvedLabel
+            $r.notes                       | Should -Match 'display name'
+            $r.ContainsKey('advancedRule') | Should -BeFalse
+            # The degradation note itself must stay GUID-free.
+            $r.notes | Should -Not -Match '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+        }
+
+        It 'resolves the label by display name when the map HAS it (the #80 success path)' {
+            $policy = [pscustomobject]@{ Name = 'P-79b2'; Mode = 'Enable'; Priority = 0; ExchangeLocation = @('All') }
+            $rule   = [pscustomobject]@{
+                ParentPolicyName = 'P-79b2'
+                Name             = 'R-79b2'
+                Priority         = 0
+                IsAdvancedRule   = $true
+                AdvancedRule     = $script:UnparseableUnresolvedLabel
+            }
+            $out = Join-Path $TestDrive 'export-79-b2.yaml'
+            Invoke-DlpExport -Path $out -TenantPolicies @($policy) -TenantRules @($rule) `
+                -LabelNameMap @{ '00000000-0000-0000-0000-000000000821' = 'Internal' }
+            $body = Get-Content -LiteralPath $out -Raw
+            $r = ($body | ConvertFrom-Yaml).policies[0].rules[0]
+
+            $r.ContainsKey('rawAdvancedRule') | Should -BeFalse
+            $r.advancedRule.groups[0].sensitivityLabels[0].displayName | Should -Be 'Internal'
+            # The exported FILE must carry no label GUID at all.
+            $body | Should -Not -Match '00000000-0000-0000-0000-000000000821'
+        }
+
+        It 'does NOT write rawAdvancedRule when the body parses cleanly' {
+            $policy = [pscustomobject]@{ Name = 'P-79c'; Mode = 'Enable'; Priority = 0; ExchangeLocation = @('All') }
+            $rule   = [pscustomobject]@{
+                ParentPolicyName = 'P-79c'
+                Name             = 'R-79c'
+                Priority         = 0
+                IsAdvancedRule   = $true
+                AdvancedRule     = $script:ParseableWire
+            }
+            $out = Join-Path $TestDrive 'export-79-c.yaml'
+            Invoke-DlpExport -Path $out -TenantPolicies @($policy) -TenantRules @($rule)
+            $r = (Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml).policies[0].rules[0]
+
+            $r.ContainsKey('rawAdvancedRule') | Should -BeFalse
+            $r.ContainsKey('advancedRule')    | Should -BeTrue
+        }
+
+        It 'captures the wire even when the rule ALSO carries ContentContainsSensitiveInformation (#79 constraint 4)' {
+            # The emit is deliberately NOT gated on $sits.Count. AdvancedRule and
+            # ContentContainsSensitiveInformation are separate tenant properties, so a
+            # rule can populate both; gating would silently drop this case and hand #80
+            # an incomplete sample. This is the hole that option 1 closes.
+            $policy = [pscustomobject]@{ Name = 'P-79d'; Mode = 'Enable'; Priority = 0; ExchangeLocation = @('All') }
+            $rule   = [pscustomobject]@{
+                ParentPolicyName                     = 'P-79d'
+                Name                                 = 'R-79d'
+                Priority                             = 0
+                IsAdvancedRule                       = $true
+                AdvancedRule                         = $script:UnparseableUnknownPredicate
+                ContentContainsSensitiveInformation  = @(@{ id = '50842eb7-edc8-4019-85dd-5a5c1f2bb085' })
+            }
+            $out = Join-Path $TestDrive 'export-79-d.yaml'
+            Invoke-DlpExport -Path $out -TenantPolicies @($policy) -TenantRules @($rule)
+            $r = (Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml).policies[0].rules[0]
+
+            $r.rawAdvancedRule                  | Should -BeExactly $script:UnparseableUnknownPredicate
+            @($r.sensitiveInfoTypes).Count      | Should -Be 1
+            # NOTE: `notes:` is NOT emitted on this path -- its write is still gated on
+            # $sits.Count -eq 0. That residual is pre-existing and out of scope for #79
+            # (which captures the wire, the evidence #80 needs); it is left unasserted
+            # here deliberately so a later fix does not have to fight this test.
+        }
+
+        It 'stays schema-valid for every captured-evidence shape it emits' {
+            $policy = [pscustomobject]@{ Name = 'P-79e'; Mode = 'Enable'; Priority = 0; ExchangeLocation = @('All') }
+            $rule   = [pscustomobject]@{
+                ParentPolicyName = 'P-79e'
+                Name             = 'R-79e'
+                Priority         = 0
+                IsAdvancedRule   = $true
+                AdvancedRule     = $script:UnparseableUnknownPredicate
+            }
+            $out = Join-Path $TestDrive 'export-79-e.yaml'
+            Invoke-DlpExport -Path $out -TenantPolicies @($policy) -TenantRules @($rule)
+            $doc = Get-Content -LiteralPath $out -Raw | ConvertFrom-Yaml
+            { ($doc | ConvertTo-Json -Depth 25) | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Not -Throw
+        }
+    }
+
+    Context 'Schema contract for rawAdvancedRule' {
+
+        It 'accepts notes + rawAdvancedRule together (the normal degradation shape)' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","notes":"body not yet modeled","rawAdvancedRule":"{\"Version\":\"1.0\"}"}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Not -Throw
+        }
+
+        It 'rejects advancedRule + rawAdvancedRule (parse cannot both succeed and fail)' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","rawAdvancedRule":"{\"Version\":\"1.0\"}","advancedRule":{"outerOperator":"And","groups":[{"name":"g","operator":"Or","sensitiveInfoTypes":[{"guid":"a44669fe-0d48-453d-a9b1-2cc83f2cba77"}]}]}}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Throw
+        }
+
+        It 'PERMITS rawAdvancedRule + sensitiveInfoTypes -- by design, not by oversight' {
+            # Mirrors the exporter emit decision above. If this ever starts throwing,
+            # the schema and the exporter have diverged and the #79 constraint-4 case
+            # will silently fail schema validation on a real export.
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","sensitiveInfoTypes":[{"guid":"a44669fe-0d48-453d-a9b1-2cc83f2cba77"}],"rawAdvancedRule":"{\"Version\":\"1.0\"}"}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Not -Throw
+        }
+
+        It 'does NOT let rawAdvancedRule alone satisfy the predicate requirement' {
+            # It is evidence, never a predicate. Without notes (or a real predicate)
+            # the rule must still be rejected.
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","blockAccess":false,"rawAdvancedRule":"{\"Version\":\"1.0\"}"}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Throw
+        }
+
+        It 'rejects an empty rawAdvancedRule string' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","notes":"n","rawAdvancedRule":""}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Throw
+        }
+    }
+
+    Context 'Applier-skip boundary: rawAdvancedRule never reaches the write path' {
+
+        It 'ConvertTo-DesiredDlpRuleHash drops rawAdvancedRule entirely' {
+            $h = ConvertTo-DesiredDlpRuleHash -Entry @{
+                name            = 'r'
+                notes           = 'body not yet modeled'
+                rawAdvancedRule = '{"Version":"1.0"}'
+            }
+            $h.ContainsKey('rawAdvancedRule') | Should -BeFalse
+        }
+
+        It 'Get-DlpRuleSplat NEVER emits -AdvancedRule from a rawAdvancedRule, even when injected directly' {
+            # Belt and braces: bypass ConvertTo-DesiredDlpRuleHash and hand the splat
+            # builder a hash that carries the field, proving the boundary holds even if
+            # a future change starts threading the field through the desired-state hash.
+            $h = ConvertTo-DesiredDlpRuleHash -Entry @{ name = 'r'; notes = 'n' }
+            $h['rawAdvancedRule'] = '{"Version":"1.0","Condition":{"Operator":"Or"}}'
+            $splat = Get-DlpRuleSplat -Hash $h -PolicyName 'P'
+
+            $splat.ContainsKey('rawAdvancedRule') | Should -BeFalse
+            $splat.ContainsKey('AdvancedRule')    | Should -BeFalse
+        }
+
+        It 'Compare-DlpRule reports no drift for rawAdvancedRule' {
+            # Compare-DlpRule is an explicit field allowlist, so an unlisted field is
+            # ignored by construction. Pinned here so a future refactor to a generic
+            # key-walk cannot silently turn captured evidence into perpetual drift.
+            $desired = ConvertTo-DesiredDlpRuleHash -Entry @{ name = 'r'; notes = 'n' }
+            $desired['rawAdvancedRule'] = '{"Version":"1.0"}'
+            $tenant  = @{
+                name = 'r'; sensitiveInfoTypes = @(); sensitivityLabels = @();
+                notifyUser = @(); generateIncidentReport = @(); generateAlert = @();
+                advancedRule = $null
+            }
+            @(Compare-DlpRule -Desired $desired -Tenant $tenant) | Should -Not -Contain 'rawAdvancedRule'
+        }
+
+        It 'a notes + rawAdvancedRule rule still satisfies the notes-only skip predicate' {
+            # The apply-path guard is inline (not a function), so it is out of reach of
+            # this suite's AST-extraction harness. This asserts the exact predicate that
+            # guard evaluates against the normalized desired hash, so a change to the
+            # hash shape that would break the skip is caught here.
+            $dr = ConvertTo-DesiredDlpRuleHash -Entry @{
+                name            = 'r'
+                notes           = 'body not yet modeled'
+                rawAdvancedRule = '{"Version":"1.0"}'
+            }
+            $isNotesOnly = (-not [string]::IsNullOrEmpty([string]$dr.notes)) -and
+                           @($dr.sensitiveInfoTypes).Count -eq 0 -and
+                           @($dr.sensitivityLabels).Count  -eq 0 -and
+                           (-not $dr.advancedRule)
+            $isNotesOnly | Should -BeTrue
+        }
+    }
+}
+
 Describe 'genericLocations / enforcementPlanes / policyTemplateInfo round-trip (PR for #515, ADR 0032)' {
 
     BeforeAll {
@@ -788,6 +1213,36 @@ Describe 'genericLocations / enforcementPlanes / policyTemplateInfo round-trip (
             $wire = ConvertTo-GenericLocationsWire -GenericLocations $h | ConvertFrom-Json
             $wire[0].PSObject.Properties.Match('Inclusions').Count | Should -Be 0
             $wire[0].PSObject.Properties.Match('Exclusions').Count | Should -Be 0
+        }
+
+        It 'emits a JSON ARRAY when the policy declares exactly one location scope (#92)' {
+            # Regression guard. The emitter used to pipe into ConvertTo-Json, which
+            # enumerates the array, so a single scope serialized as a bare JSON object and
+            # New-DlpCompliancePolicy rejected the create: "the type requires a JSON array
+            # (e.g. [1,2,3])".
+            #
+            # Assert on the raw STRING and on the parsed type. Do NOT assert via $wire[0]
+            # or @(...).Count -- indexing a PSCustomObject returns the object itself in
+            # PowerShell 7, so both pass against the broken object shape and prove nothing.
+            # The sibling tests in this Context are index-based and stayed green
+            # throughout the outage; that is exactly how this shipped.
+            $h    = ConvertTo-NormalizedGenericLocations -Source @(@{ workload = 'Applications'; location = 'Copilot.M365' })
+            $json = ConvertTo-GenericLocationsWire -GenericLocations $h
+
+            $json.TrimStart()                                                | Should -Match '^\['
+            ((ConvertFrom-Json -InputObject $json -NoEnumerate) -is [array]) | Should -BeTrue
+        }
+
+        It 'emits a JSON array for multiple location scopes (#92)' {
+            $h = ConvertTo-NormalizedGenericLocations -Source @(
+                @{ workload = 'Applications'; location = 'Copilot.M365' },
+                @{ workload = 'Applications'; location = 'Copilot.Fabric' }
+            )
+            $json = ConvertTo-GenericLocationsWire -GenericLocations $h
+
+            $json.TrimStart()                                                | Should -Match '^\['
+            ((ConvertFrom-Json -InputObject $json -NoEnumerate) -is [array]) | Should -BeTrue
+            @(ConvertFrom-Json -InputObject $json).Count                     | Should -Be 2
         }
     }
 
@@ -1617,16 +2072,20 @@ Describe 'DLP rule tracked-field expansion -- Batch 3a: operator-facing notify c
             { $doc | Test-Json -Schema $script:Schema536 -ErrorAction Stop } | Should -Not -Throw
         }
 
-        It 'schema rejects notifyPolicyTipDisplayOption outside Tip/NotifyOnly/NotificationOnly' {
-            $doc = '{"policies":[{"name":"p","mode":"Enable","locations":{"sharePoint":"All"},"rules":[{"name":"r","sensitiveInfoTypes":[{"guid":"50842eb7-edc8-4019-85dd-5a5c1f2bb085"}],"notifyPolicyTipDisplayOption":"NotAnOption"}]}]}'
-            { $doc | Test-Json -Schema $script:Schema536 -ErrorAction Stop } | Should -Throw
-        }
-
-        It 'schema accepts each of the 3 documented notifyPolicyTipDisplayOption enum values' {
-            foreach ($v in @('Tip','NotifyOnly','NotificationOnly')) {
+        It 'schema accepts notifyPolicyTipDisplayOption values beyond the originally-assumed set (live tenant returns Dialog; issue #71)' {
+            # The enum was relaxed to a non-empty string to match its sibling
+            # notify-* fields: the live service returns values (e.g. Dialog) outside
+            # the originally-pinned [Tip, NotifyOnly, NotificationOnly], and the
+            # cmdlet validates the allowed set server-side at apply time.
+            foreach ($v in @('Tip','NotifyOnly','NotificationOnly','Dialog')) {
                 $doc = '{"policies":[{"name":"p","mode":"Enable","locations":{"sharePoint":"All"},"rules":[{"name":"r","sensitiveInfoTypes":[{"guid":"50842eb7-edc8-4019-85dd-5a5c1f2bb085"}],"notifyPolicyTipDisplayOption":"' + $v + '"}]}]}'
                 { $doc | Test-Json -Schema $script:Schema536 -ErrorAction Stop } | Should -Not -Throw -Because ("notifyPolicyTipDisplayOption=$v should be accepted")
             }
+        }
+
+        It 'schema still rejects an EMPTY notifyPolicyTipDisplayOption (minLength: 1 -- relaxed, not unconstrained)' {
+            $doc = '{"policies":[{"name":"p","mode":"Enable","locations":{"sharePoint":"All"},"rules":[{"name":"r","sensitiveInfoTypes":[{"guid":"50842eb7-edc8-4019-85dd-5a5c1f2bb085"}],"notifyPolicyTipDisplayOption":""}]}]}'
+            { $doc | Test-Json -Schema $script:Schema536 -ErrorAction Stop } | Should -Throw
         }
     }
 
@@ -3308,5 +3767,740 @@ Describe 'SkipNames behavior (ADR 0029) -- DLP' {
             -DisplayName 'lab-dlp-confidential' `
             -HasDrift    $true
         $decision.Action | Should -Be 'Skip'
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Issue #13, part C batch 4: guard 2 (PER-TIER prune sanity ratio) and the
+# failure reporter. The prune catches previously added a 'Failed' report row
+# and moved on -- a failed prune exited 0. The regions below are lifted from
+# the REAL script source (not transcribed) and executed against stubs, so the
+# tests cannot keep passing after the script regresses.
+# ---------------------------------------------------------------------------
+Describe 'Prune guard 2 and failure reporter wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        $script:B4Source = Get-Content -LiteralPath $script:ScriptPath -Raw
+    }
+
+    It 'imports the shared PruneGuard module' {
+        $script:B4Source | Should -Match "Import-Module \(Join-Path \`$PSScriptRoot 'modules[\\/]PruneGuard\.psm1'\)"
+    }
+    It 'still calls guard 1 (empty-desired-set) -- earlier rollout not regressed' {
+        $script:B4Source | Should -Match 'Assert-PruneDesiredSetNotEmpty'
+    }
+    It 'calls the sanity-ratio guard once PER TIER with tier-specific nouns' {
+        ([regex]::Matches($script:B4Source, 'Assert-PruneRatioWithinThreshold\s+`')).Count | Should -Be 2
+        $script:B4Source | Should -Match ([regex]::Escape("-ObjectTypeNoun 'DLP rule'"))
+        $script:B4Source | Should -Match ([regex]::Escape("-ObjectTypeNoun 'DLP policy'"))
+    }
+    It 'keys each tier on its own live denominator' {
+        $script:B4Source | Should -Match ([regex]::Escape('@($tenantRules).Count'))
+        $script:B4Source | Should -Match ([regex]::Escape('@($tenantPolicies).Count'))
+    }
+    It 'surfaces the ratio override and threshold parameters on the Apply parameter set' {
+        $script:B4Source | Should -Match '\[switch\]\$AllowMajorityPrune'
+        $script:B4Source | Should -Match '\[double\]\$MaxPruneRatio\s*=\s*0\.5'
+        $cmd = Get-Command -Name $script:ScriptPath -CommandType ExternalScript
+        $cmd.Parameters['AllowMajorityPrune'].ParameterSets.Keys | Should -Not -Contain 'Export'
+        $cmd.Parameters['MaxPruneRatio'].ParameterSets.Keys | Should -Not -Contain 'Export'
+    }
+    It 'gates guard 2 on non-audit (AUDIT TRAP: script flips WhatIfPreference, does not empty orphan plans)' {
+        $script:B4Source | Should -Match ([regex]::Escape("-and `$DirectionPolicy -ne 'audit'"))
+    }
+    It 'places guard 2 before the ADR 0052 confirmation gates' {
+        $ratioIdx = $script:B4Source.IndexOf('Assert-PruneRatioWithinThreshold')
+        $gateIdx  = $script:B4Source.IndexOf('Assert-DestructiveOperationConfirmed @gateArgs')
+        $ratioIdx | Should -BeGreaterThan 0
+        $gateIdx  | Should -BeGreaterThan 0
+        $ratioIdx | Should -BeLessThan $gateIdx
+    }
+}
+
+Describe 'Per-tier prune sanity-ratio guard executed through the script wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'PruneGuard.psm1') -Force -ErrorAction Stop
+        $lines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $start = -1; $end = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*if \(\$PruneMissing\.IsPresent') {
+                $depth = 0; $e = -1
+                for ($j = $i; $j -lt $lines.Count; $j++) {
+                    $depth += ([regex]::Matches($lines[$j], '\{')).Count
+                    $depth -= ([regex]::Matches($lines[$j], '\}')).Count
+                    if ($depth -le 0) { $e = $j; break }
+                }
+                $cand = ($lines[$i..$e] -join [Environment]::NewLine)
+                if ($cand -match 'Assert-PruneRatioWithinThreshold') { $start = $i; $end = $e; break }
+            }
+        }
+        if ($start -lt 0) { throw 'Could not locate the guard-2 region in Deploy-DLPPolicies.ps1; update the anchor in this test.' }
+        $script:Guard2Region = ($lines[$start..$end] -join [Environment]::NewLine)
+
+        function Invoke-Guard2 {
+            param([int]$RuleOrphans, [int]$LiveRules, [int]$PolicyOrphans, [int]$LivePolicies, [double]$Max = 0.5, [switch]$Allow, [string]$Direction = 'portal-wins')
+            $PruneMissing = [switch]$true
+            $DirectionPolicy = $Direction
+            $MaxPruneRatio = $Max
+            $AllowMajorityPrune = [switch]$Allow
+            $ruleOrphanPlan = @(for ($i = 0; $i -lt $RuleOrphans; $i++) { [pscustomobject]@{ Key = "orphan-rule-$i" } })
+            $policyPlan = @(
+                @(for ($i = 0; $i -lt $PolicyOrphans; $i++) { [pscustomobject]@{ Name = "orphan-policy-$i"; Action = 'Orphan' } }) +
+                @([pscustomobject]@{ Name = 'kept-policy'; Action = 'NoChange' })
+            )
+            $tenantRules    = @(for ($i = 0; $i -lt $LiveRules; $i++) { [pscustomobject]@{ Name = "live-rule-$i" } })
+            $tenantPolicies = @(for ($i = 0; $i -lt $LivePolicies; $i++) { [pscustomobject]@{ Name = "live-policy-$i" } })
+            $null = $PruneMissing, $DirectionPolicy, $MaxPruneRatio, $AllowMajorityPrune, $ruleOrphanPlan, $policyPlan, $tenantRules, $tenantPolicies
+            & ([scriptblock]::Create($script:Guard2Region)) 3>$null
+        }
+    }
+
+    It 'passes when both tiers sit at or below the threshold' {
+        { Invoke-Guard2 -RuleOrphans 2 -LiveRules 10 -PolicyOrphans 1 -LivePolicies 4 } | Should -Not -Throw
+    }
+    It 'throws when the RULE tier exceeds the threshold even though the blended ratio would pass (the per-tier point)' {
+        # 4 of 4 rules pruned but 0 of 16 policies: blended 20%, rules tier 100%.
+        { Invoke-Guard2 -RuleOrphans 4 -LiveRules 4 -PolicyOrphans 0 -LivePolicies 16 } | Should -Throw
+    }
+    It 'throws when the POLICY tier exceeds the threshold' {
+        { Invoke-Guard2 -RuleOrphans 0 -LiveRules 16 -PolicyOrphans 4 -LivePolicies 4 } | Should -Throw
+    }
+    It 'permits an over-threshold prune when -AllowMajorityPrune is supplied' {
+        { Invoke-Guard2 -RuleOrphans 4 -LiveRules 4 -PolicyOrphans 4 -LivePolicies 4 -Allow } | Should -Not -Throw
+    }
+    It 'does NOT fire under -DirectionPolicy audit even above the threshold (audit trap)' {
+        { Invoke-Guard2 -RuleOrphans 4 -LiveRules 4 -PolicyOrphans 4 -LivePolicies 4 -Direction 'audit' } | Should -Not -Throw
+    }
+}
+
+Describe 'Prune failure reporting executed through the script wiring (issue #13, batch 4)' {
+
+    BeforeAll {
+        $script:RepLines = @(Get-Content -LiteralPath $script:ScriptPath)
+        $s = -1
+        for ($i = 0; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*\$pruneFailures = New-Object') { $s = $i; break }
+        }
+        if ($s -lt 0) { throw 'Could not locate the $pruneFailures declaration in Deploy-DLPPolicies.ps1; update the anchor in this test.' }
+        $ifStart = -1
+        for ($i = $s; $i -lt $script:RepLines.Count; $i++) {
+            if ($script:RepLines[$i] -match '^\s*if \(\$pruneFailures\.Count -gt 0\) \{') { $ifStart = $i; break }
+        }
+        if ($ifStart -lt 0) { throw 'Could not locate the aggregate-throw block in Deploy-DLPPolicies.ps1; update the anchor in this test.' }
+        $depth = 0; $e = -1
+        for ($j = $ifStart; $j -lt $script:RepLines.Count; $j++) {
+            $depth += ([regex]::Matches($script:RepLines[$j], '\{')).Count
+            $depth -= ([regex]::Matches($script:RepLines[$j], '\}')).Count
+            if ($depth -le 0) { $e = $j; break }
+        }
+        $script:ReporterRegion = ($script:RepLines[$s..$e] -join [Environment]::NewLine)
+        $script:ReporterShouldProcessCount = ([regex]::Matches($script:ReporterRegion, '\$PSCmdlet\.ShouldProcess\(')).Count
+        $script:ReporterRunnable = $script:ReporterRegion -replace '\$PSCmdlet\.ShouldProcess\(', '$ShouldProcessStub.ShouldProcess('
+
+        function Invoke-PruneRegion {
+            param([string[]]$RuleKeys = @(), [string[]]$PolicyNames = @(), [string[]]$Fail = @())
+            $attempted = New-Object 'System.Collections.Generic.List[string]'
+            $reported  = New-Object 'System.Collections.Generic.List[string]'
+            function Remove-DlpComplianceRule {
+                [CmdletBinding(SupportsShouldProcess)]
+                param([string]$Identity)
+                $attempted.Add("rule:$Identity")
+                if ($Fail -contains $Identity) { throw "TenantBlockerException: $Identity" }
+            }
+            function Remove-DlpCompliancePolicy {
+                [CmdletBinding(SupportsShouldProcess)]
+                param([string]$Identity)
+                $attempted.Add("policy:$Identity")
+                if ($Fail -contains $Identity) { throw "TenantBlockerException: $Identity" }
+            }
+            function Write-PruneFailure { param([Parameter(Position = 0)][string]$Message) $reported.Add($Message) }
+            $PruneMissing = [switch]$true
+            $report = New-Object 'System.Collections.Generic.List[object]'
+            $ruleOrphanPlan = @($RuleKeys | ForEach-Object { [pscustomobject]@{ Key = $_; Reason = 'test' } })
+            $policyPlan = @($PolicyNames | ForEach-Object { [pscustomobject]@{ Name = $_; Action = 'Orphan'; Reason = 'test' } })
+            $ShouldProcessStub = [pscustomobject]@{}
+            $ShouldProcessStub | Add-Member -MemberType ScriptMethod -Name ShouldProcess -Value { param($Target, $Action) $null = $Target, $Action; $true }
+            $null = $PruneMissing, $report, $ruleOrphanPlan, $policyPlan, $ShouldProcessStub
+            $thrown = $null
+            try { & ([scriptblock]::Create($script:ReporterRunnable)) 6>$null 3>$null } catch { $thrown = $_.Exception.Message }
+            [pscustomobject]@{ Attempted = $attempted.ToArray(); Reported = $reported.ToArray(); Thrown = $thrown }
+        }
+    }
+
+    It 'attempts every orphan in both tiers after a failure, rules before policies' {
+        $r = Invoke-PruneRegion -RuleKeys @('r1', 'r2') -PolicyNames @('p1') -Fail @('r1')
+        $r.Attempted | Should -Be @('rule:r1', 'rule:r2', 'policy:p1')
+    }
+    It 'reports each failure with the tenant''s own error text' {
+        $r = Invoke-PruneRegion -RuleKeys @('r1') -PolicyNames @('p1') -Fail @('p1')
+        $r.Reported.Count | Should -Be 1
+        $r.Reported[0] | Should -Match 'TenantBlockerException: p1'
+    }
+    It 'throws one aggregate naming every failure across both tiers (exit-0 defect fixed)' {
+        $r = Invoke-PruneRegion -RuleKeys @('r1', 'r2') -PolicyNames @('p1') -Fail @('r2', 'p1')
+        $r.Thrown | Should -Match "rule 'r2'"
+        $r.Thrown | Should -Match "policy 'p1'"
+        $r.Thrown | Should -Match '2 orphan DLP object'
+    }
+    It 'throws nothing when every prune succeeds' {
+        $r = Invoke-PruneRegion -RuleKeys @('r1') -PolicyNames @('p1')
+        $r.Thrown   | Should -BeNullOrEmpty
+        $r.Reported | Should -BeNullOrEmpty
+    }
+    It 'keeps the deletes behind a ShouldProcess gate (substitution non-vacuous)' {
+        $script:ReporterShouldProcessCount | Should -BeGreaterThan 0
+    }
+    It 'carries the reporter and the aggregate throw in the lifted region (mutation check vs pre-batch exit-0)' {
+        $script:ReporterRegion | Should -Match 'Write-PruneFailure'
+        $script:ReporterRegion | Should -Match 'throw'
+        $script:ReporterRegion | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}
+
+Describe 'AdvancedRule widened predicate vocabulary (#80, ADR 0031 amendment)' {
+
+    BeforeAll {
+        $script:SchemaPath = Join-Path $PSScriptRoot '..' '..' 'data-plane' 'dlp' 'policies.schema.json'
+        $script:Schema     = Get-Content -LiteralPath $script:SchemaPath -Raw
+
+        # Synthetic identifiers only (ADR 0055 rule 1 reserved namespace).
+        $script:SitA   = '00000000-0000-0000-0000-000000000801'
+        $script:SitB   = '00000000-0000-0000-0000-000000000802'
+        $script:LblInt = '00000000-0000-0000-0000-000000000811'
+        $script:LblCnf = '00000000-0000-0000-0000-000000000812'
+        $script:LabelNames = @{
+            $script:LblInt = 'Internal'
+            $script:LblCnf = 'Confidential'
+        }
+        $script:LabelGuids = @{
+            'Internal'     = $script:LblInt
+            'Confidential' = $script:LblCnf
+        }
+
+        # Shape of the lab "Protect sensitive M365 Copilot interactions" rule:
+        # Condition.Operator=And over [HasActivity, nested Or [content]].
+        $script:NestedWire = @"
+{
+  "Version": "1.0",
+  "Condition": {
+    "Operator": "And",
+    "SubConditions": [
+      { "ConditionName": "HasActivity", "Value": "UploadText" },
+      {
+        "Operator": "Or",
+        "SubConditions": [
+          {
+            "ConditionName": "ContentContainsSensitiveInformation",
+            "Value": [
+              {
+                "Groups": [
+                  {
+                    "Name": "Default",
+                    "Operator": "Or",
+                    "Sensitivetypes": [
+                      { "Name": "Synthetic SIT A", "Id": "$($script:SitA)", "Mincount": 1, "Maxcount": -1, "Confidencelevel": "Medium", "Minconfidence": 75, "Maxconfidence": 100 }
+                    ]
+                  }
+                ],
+                "Operator": "And"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+"@
+
+        # Shape of the lab "DSPM for AI" rule: Condition.Operator=Or over
+        # [content-with-labels, FromScope].
+        $script:LabelWire = @"
+{
+  "Version": "1.0",
+  "Condition": {
+    "Operator": "Or",
+    "SubConditions": [
+      {
+        "ConditionName": "ContentContainsSensitiveInformation",
+        "Value": [
+          {
+            "Groups": [
+              {
+                "Name": "Default",
+                "Operator": "Or",
+                "Labels": [
+                  { "Name": "$($script:LblInt)", "Id": "$($script:LblInt)", "Type": "Sensitivity" },
+                  { "Name": "Confidential", "Id": "$($script:LblCnf)", "Type": "Sensitivity" }
+                ]
+              }
+            ],
+            "Operator": "And"
+          }
+        ]
+      },
+      { "ConditionName": "FromScope", "Value": "NotInOrganization" }
+    ]
+  }
+}
+"@
+    }
+
+    Context 'ConvertFrom-AdvancedRuleWire models the full observed vocabulary' {
+
+        It 'captures Condition.Operator=Or, which the pre-#80 parser asserted away' {
+            $r = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap $script:LabelNames
+            $r.Recognized              | Should -BeTrue
+            $r.Normalized.operator     | Should -Be 'Or'
+            @($r.Normalized.conditions).Count | Should -Be 2
+        }
+
+        It 'keeps Condition.Operator distinct from the deeper Value[].Operator (outerOperator)' {
+            # The captured body has Condition.Operator=Or and Value[0].Operator=And.
+            # Conflating them is the exact defect that made `Or` rules unmodelable.
+            $r = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap $script:LabelNames
+            $r.Normalized.operator                    | Should -Be 'Or'
+            $r.Normalized.conditions[0].outerOperator | Should -Be 'And'
+        }
+
+        It 'walks nested SubConditions into a nested condition group' {
+            $r = ConvertFrom-AdvancedRuleWire -Wire $script:NestedWire
+            $r.Recognized                                  | Should -BeTrue
+            $r.Normalized.operator                         | Should -Be 'And'
+            $r.Normalized.conditions[0].type               | Should -Be 'HasActivity'
+            $r.Normalized.conditions[0].value              | Should -Be 'UploadText'
+            $r.Normalized.conditions[1].operator           | Should -Be 'Or'
+            $r.Normalized.conditions[1].conditions[0].type | Should -Be 'ContentContainsSensitiveInformation'
+            $r.Normalized.conditions[1].conditions[0].groups[0].sensitiveInfoTypes[0].guid | Should -Be $script:SitA
+        }
+
+        It 'models each scalar predicate type observed on the tenants' -ForEach @(
+            @{ CName = 'AccessScope';      CValue = 'NotInOrganization' }
+            @{ CName = 'FromScope';        CValue = 'NotInOrganization' }
+            @{ CName = 'HasActivity';      CValue = 'UploadText' }
+            @{ CName = 'DocumentSizeOver'; CValue = '1 B' }
+        ) {
+            $wire = '{"Version":"1.0","Condition":{"Operator":"And","SubConditions":[{"ConditionName":"' + $CName + '","Value":"' + $CValue + '"}]}}'
+            $r = ConvertFrom-AdvancedRuleWire -Wire $wire
+            $r.Recognized                     | Should -BeTrue
+            $r.Normalized.conditions[0].type  | Should -Be $CName
+            $r.Normalized.conditions[0].value | Should -Be $CValue
+        }
+
+        It 'still refuses a predicate outside the modeled vocabulary (degrades to evidence, never widens silently)' {
+            $wire = '{"Version":"1.0","Condition":{"Operator":"And","SubConditions":[{"ConditionName":"DocumentIsPasswordProtected","Value":"true"}]}}'
+            $r = ConvertFrom-AdvancedRuleWire -Wire $wire
+            $r.Recognized | Should -BeFalse
+            $r.Reason     | Should -Match 'DocumentIsPasswordProtected'
+        }
+
+        It 'refuses a scalar predicate whose Value is an array rather than a scalar' {
+            $wire = '{"Version":"1.0","Condition":{"Operator":"And","SubConditions":[{"ConditionName":"HasActivity","Value":["UploadText","Print"]}]}}'
+            $r = ConvertFrom-AdvancedRuleWire -Wire $wire
+            $r.Recognized | Should -BeFalse
+            $r.Reason     | Should -Match 'non-scalar'
+        }
+    }
+
+    Context 'Sensitivity labels are modeled by display name (ADR 0023)' {
+
+        It 'resolves Labels[].Id to a display name and never surfaces the GUID' {
+            $r = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap $script:LabelNames
+            $r.Recognized | Should -BeTrue
+            $labels = $r.Normalized.conditions[0].groups[0].sensitivityLabels
+            @($labels).Count          | Should -Be 2
+            $labels[0].displayName    | Should -Be 'Internal'
+            $labels[1].displayName    | Should -Be 'Confidential'
+            # Wire Name was the raw GUID on the first entry; the model must not carry it.
+            ($r.Normalized | ConvertTo-Json -Depth 20) | Should -Not -Match $script:LblInt
+        }
+
+        It 'FAILS the parse when a label cannot be resolved, rather than writing a raw tenant GUID' {
+            $r = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap @{}
+            $r.Recognized | Should -BeFalse
+            $r.Reason     | Should -Match 'display name'
+        }
+
+        It 'never quotes a GUID in the failure reason (the reason is written into policies.yaml as notes:)' {
+            $r = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap @{}
+            $r.Reason | Should -Not -Match '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+        }
+
+        It 'refuses a label whose Type is not Sensitivity' {
+            $wire = $script:LabelWire -replace '"Type": "Sensitivity"', '"Type": "Retention"'
+            $r = ConvertFrom-AdvancedRuleWire -Wire $wire -LabelNameMap $script:LabelNames
+            $r.Recognized | Should -BeFalse
+            $r.Reason     | Should -Match 'Type='
+        }
+
+        It 'resolves display names back to this tenant''s own GUIDs on the write path' {
+            $r    = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap $script:LabelNames
+            $wire = ConvertTo-AdvancedRuleWire -AdvancedRule $r.Normalized -LabelGuidMap $script:LabelGuids | ConvertFrom-Json
+            $emitted = $wire.Condition.SubConditions[0].Value[0].Groups[0].Labels
+            @($emitted).Count   | Should -Be 2
+            $emitted[0].Id      | Should -Be $script:LblInt
+            # Name carries the GUID, NOT the display name. The service resolves this entry
+            # by Name and rejects a human-readable display name -- "The label name
+            # '<x>' ... does not exist" -- because a label's Name is not its DisplayName
+            # (#93). This assertion previously pinned 'Internal' and so pinned the bug.
+            $emitted[0].Name    | Should -Be $script:LblInt
+            $emitted[0].Type    | Should -Be 'Sensitivity'
+        }
+
+        It 'throws when a referenced label display name is absent from the tenant map' {
+            $r = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap $script:LabelNames
+            { ConvertTo-AdvancedRuleWire -AdvancedRule $r.Normalized -LabelGuidMap @{} } |
+                Should -Throw -ExpectedMessage '*was not found via Get-Label*'
+        }
+
+        It 'omits Sensitivetypes entirely on a labels-only group (an empty array is a different document)' {
+            $r    = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap $script:LabelNames
+            $wire = ConvertTo-AdvancedRuleWire -AdvancedRule $r.Normalized -LabelGuidMap $script:LabelGuids | ConvertFrom-Json
+            $group = $wire.Condition.SubConditions[0].Value[0].Groups[0]
+            $group.PSObject.Properties.Name | Should -Not -Contain 'Sensitivetypes'
+        }
+    }
+
+    Context 'Round-trip and anti-phantom-drift' {
+
+        It 'wire -> YAML -> wire is stable under the canonical hash for the nested tree' {
+            $r1 = ConvertFrom-AdvancedRuleWire -Wire $script:NestedWire
+            $w  = ConvertTo-AdvancedRuleWire   -AdvancedRule $r1.Normalized
+            $r2 = ConvertFrom-AdvancedRuleWire -Wire $w
+            $r2.Recognized | Should -BeTrue
+            (ConvertTo-NormalizedAdvancedRuleJson -AdvancedRule $r2.Normalized) |
+                Should -Be (ConvertTo-NormalizedAdvancedRuleJson -AdvancedRule $r1.Normalized)
+        }
+
+        It 'wire -> YAML -> wire is stable for the label-bearing Or-rooted tree' {
+            $r1 = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap $script:LabelNames
+            $w  = ConvertTo-AdvancedRuleWire   -AdvancedRule $r1.Normalized -LabelGuidMap $script:LabelGuids
+            $r2 = ConvertFrom-AdvancedRuleWire -Wire $w -LabelNameMap $script:LabelNames
+            $r2.Recognized | Should -BeTrue
+            (ConvertTo-NormalizedAdvancedRuleJson -AdvancedRule $r2.Normalized) |
+                Should -Be (ConvertTo-NormalizedAdvancedRuleJson -AdvancedRule $r1.Normalized)
+        }
+
+        It 'canonicalises every widened field: a tenant tree and the identical desired tree diff to nothing' {
+            # The phantom-drift guard. A field the comparator does not canonicalise
+            # produces an advancedRule diff on EVERY reconcile that no apply can settle.
+            $tenantParse = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap $script:LabelNames
+            $desired = ConvertTo-DesiredDlpRuleHash -Entry @{
+                name         = 'r'
+                advancedRule = $tenantParse.Normalized
+            }
+            $tenant = @{
+                name = 'r'; sensitiveInfoTypes = @(); sensitivityLabels = @()
+                notifyUser = @(); generateIncidentReport = @(); generateAlert = @()
+                advancedRule = $tenantParse.Normalized
+            }
+            (Compare-DlpRule -Desired $desired -Tenant $tenant).Count | Should -Be 0
+        }
+
+        It 'flags drift when only the root operator changes (And vs Or)' {
+            $tenantParse = ConvertFrom-AdvancedRuleWire -Wire $script:LabelWire -LabelNameMap $script:LabelNames
+            $drifted = ConvertTo-NormalizedAdvancedRule -Source $tenantParse.Normalized
+            $drifted['operator'] = 'And'
+            $desired = ConvertTo-DesiredDlpRuleHash -Entry @{ name = 'r'; advancedRule = $drifted }
+            $tenant = @{
+                name = 'r'; sensitiveInfoTypes = @(); sensitivityLabels = @()
+                notifyUser = @(); generateIncidentReport = @(); generateAlert = @()
+                advancedRule = $tenantParse.Normalized
+            }
+            (Compare-DlpRule -Desired $desired -Tenant $tenant) | Should -Contain 'advancedRule'
+        }
+
+        It 'flags drift when only a scalar predicate value changes' {
+            $base = ConvertFrom-AdvancedRuleWire -Wire $script:NestedWire
+            $drift = ConvertFrom-AdvancedRuleWire -Wire ($script:NestedWire -replace 'UploadText', 'Print')
+            $desired = ConvertTo-DesiredDlpRuleHash -Entry @{ name = 'r'; advancedRule = $drift.Normalized }
+            $tenant = @{
+                name = 'r'; sensitiveInfoTypes = @(); sensitivityLabels = @()
+                notifyUser = @(); generateIncidentReport = @(); generateAlert = @()
+                advancedRule = $base.Normalized
+            }
+            (Compare-DlpRule -Desired $desired -Tenant $tenant) | Should -Contain 'advancedRule'
+        }
+    }
+
+    Context 'Legacy { outerOperator, groups } sugar stays first-class' {
+
+        It 'up-converts the legacy shape to the equivalent single-condition tree' {
+            $n = ConvertTo-NormalizedAdvancedRule -Source @{
+                outerOperator = 'And'
+                groups = @(@{ name = 'g'; operator = 'Or'; sensitiveInfoTypes = @(@{ guid = $script:SitA }) })
+            }
+            $n.operator                    | Should -Be 'And'
+            @($n.conditions).Count         | Should -Be 1
+            $n.conditions[0].type          | Should -Be 'ContentContainsSensitiveInformation'
+            $n.conditions[0].outerOperator | Should -Be 'And'
+        }
+
+        It 'compares equal to the tree form of the same predicate (no forced migration)' {
+            $sugar = ConvertTo-NormalizedAdvancedRule -Source @{
+                outerOperator = 'Or'
+                groups = @(@{ name = 'g'; operator = 'Or'; sensitiveInfoTypes = @(@{ guid = $script:SitA }) })
+            }
+            $tree = ConvertTo-NormalizedAdvancedRule -Source @{
+                operator = 'And'
+                conditions = @(@{
+                        type = 'ContentContainsSensitiveInformation'
+                        outerOperator = 'Or'
+                        groups = @(@{ name = 'g'; operator = 'Or'; sensitiveInfoTypes = @(@{ guid = $script:SitA }) })
+                    })
+            }
+            (ConvertTo-NormalizedAdvancedRuleJson -AdvancedRule $sugar) |
+                Should -Be (ConvertTo-NormalizedAdvancedRuleJson -AdvancedRule $tree)
+        }
+
+        It 'exports back as sugar when the tree allows it (zero YAML churn on already-clean rules)' {
+            $n = ConvertTo-NormalizedAdvancedRule -Source @{
+                outerOperator = 'And'
+                groups = @(@{ name = 'g'; operator = 'Or'; sensitiveInfoTypes = @(@{ guid = $script:SitA }) })
+            }
+            $e = ConvertTo-ExportedAdvancedRule -AdvancedRule $n
+            $e.Contains('outerOperator') | Should -BeTrue
+            $e.Contains('conditions')    | Should -BeFalse
+            $e.outerOperator             | Should -Be 'And'
+        }
+
+        It 'exports as a tree when the predicate cannot be expressed as sugar' {
+            $r = ConvertFrom-AdvancedRuleWire -Wire $script:NestedWire
+            $e = ConvertTo-ExportedAdvancedRule -AdvancedRule $r.Normalized
+            $e.Contains('conditions')    | Should -BeTrue
+            $e.Contains('outerOperator') | Should -BeFalse
+        }
+
+        It 'export rendering is semantics-preserving in both directions' {
+            $r = ConvertFrom-AdvancedRuleWire -Wire $script:NestedWire
+            $e = ConvertTo-ExportedAdvancedRule -AdvancedRule $r.Normalized
+            (ConvertTo-NormalizedAdvancedRuleJson -AdvancedRule (ConvertTo-NormalizedAdvancedRule -Source $e)) |
+                Should -Be (ConvertTo-NormalizedAdvancedRuleJson -AdvancedRule $r.Normalized)
+        }
+    }
+
+    Context 'ConvertTo-SensitivityLabelNameMap inverts the Get-Label map' {
+
+        It 'maps GUID -> displayName with lower-cased keys' {
+            $inv = ConvertTo-SensitivityLabelNameMap -LabelGuidMap @{ 'Internal' = $script:LblInt.ToUpperInvariant() }
+            $inv[$script:LblInt] | Should -Be 'Internal'
+        }
+
+        It 'returns an empty map for an empty input (Get-Label unavailable)' {
+            (ConvertTo-SensitivityLabelNameMap -LabelGuidMap @{}).Count | Should -Be 0
+        }
+    }
+
+    Context 'Hollow-policy create guard shares one notes-only definition' {
+
+        It 'treats a notes-only rule as unmodeled' {
+            Test-DlpRuleIsNotesOnly -Rule (ConvertTo-DesiredDlpRuleHash -Entry @{ name = 'r'; notes = 'not modeled' }) |
+                Should -BeTrue
+        }
+
+        It 'treats a rule with sensitiveInfoTypes as modeled even when it also carries notes' {
+            Test-DlpRuleIsNotesOnly -Rule (ConvertTo-DesiredDlpRuleHash -Entry @{
+                    name = 'r'; notes = 'x'; sensitiveInfoTypes = @(@{ guid = $script:SitA })
+                }) | Should -BeFalse
+        }
+
+        It 'treats a rule with an advancedRule as modeled' {
+            Test-DlpRuleIsNotesOnly -Rule (ConvertTo-DesiredDlpRuleHash -Entry @{
+                    name = 'r'; notes = 'x'
+                    advancedRule = @{ outerOperator = 'And'; groups = @(@{ name = 'g'; operator = 'Or'; sensitiveInfoTypes = @(@{ guid = $script:SitB }) }) }
+                }) | Should -BeFalse
+        }
+
+        It 'treats a rule with sensitivityLabels as modeled' {
+            Test-DlpRuleIsNotesOnly -Rule (ConvertTo-DesiredDlpRuleHash -Entry @{
+                    name = 'r'; notes = 'x'; sensitivityLabels = @(@{ displayName = 'Internal' })
+                }) | Should -BeFalse
+        }
+
+        It 'treats a rule with no notes marker as NOT a notes-only pass-through' {
+            Test-DlpRuleIsNotesOnly -Rule (ConvertTo-DesiredDlpRuleHash -Entry @{ name = 'r' }) | Should -BeFalse
+        }
+
+        It 'a rawAdvancedRule evidence rule is still notes-only (the shape the guard must catch)' {
+            Test-DlpRuleIsNotesOnly -Rule (ConvertTo-DesiredDlpRuleHash -Entry @{
+                    name = 'r'; notes = 'wire shape not yet modeled'
+                    rawAdvancedRule = '{"Version":"1.0"}'
+                }) | Should -BeTrue
+        }
+    }
+
+    Context 'Schema accepts the widened shape and still rejects nonsense' {
+
+        It 'accepts the tree form with a nested group and a scalar predicate' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","advancedRule":{"operator":"And","conditions":[{"type":"HasActivity","value":"UploadText"},{"operator":"Or","conditions":[{"type":"ContentContainsSensitiveInformation","outerOperator":"And","groups":[{"name":"g","operator":"Or","sensitiveInfoTypes":[{"guid":"' + $script:SitA + '"}]}]}]}]}}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Not -Throw
+        }
+
+        It 'accepts a content group that carries sensitivityLabels by display name' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","advancedRule":{"operator":"Or","conditions":[{"type":"ContentContainsSensitiveInformation","outerOperator":"And","groups":[{"name":"g","operator":"Or","sensitivityLabels":[{"displayName":"Internal"}]}]}]}}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Not -Throw
+        }
+
+        It 'still accepts the legacy flat form unchanged (no forced migration)' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","advancedRule":{"outerOperator":"And","groups":[{"name":"g","operator":"Or","sensitiveInfoTypes":[{"guid":"' + $script:SitA + '"}]}]}}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Not -Throw
+        }
+
+        It 'rejects a scalar predicate type outside the modeled enum' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","advancedRule":{"operator":"And","conditions":[{"type":"DocumentIsPasswordProtected","value":"true"}]}}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Throw
+        }
+
+        It 'rejects a tree that mixes the two authored forms' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","advancedRule":{"operator":"And","outerOperator":"And","conditions":[{"type":"HasActivity","value":"UploadText"}]}}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Throw
+        }
+
+        It 'rejects a sensitivity label referenced by raw GUID key instead of displayName' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","advancedRule":{"operator":"And","conditions":[{"type":"ContentContainsSensitiveInformation","outerOperator":"And","groups":[{"name":"g","operator":"Or","sensitivityLabels":[{"guid":"' + $script:LblInt + '"}]}]}]}}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Throw
+        }
+
+        It 'rejects an empty conditions list' {
+            $doc = '{"policies":[{"name":"x","mode":"Enable","rules":[{"name":"r","advancedRule":{"operator":"And","conditions":[]}}]}]}'
+            { $doc | Test-Json -Schema $script:Schema -ErrorAction Stop } | Should -Throw
+        }
+    }
+}
+
+Describe 'Desired-state schema validation serializes deeply enough for the modelled shape (#80)' {
+
+    BeforeAll {
+        $script:ScriptPathForDepth = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-DLPPolicies.ps1'
+        $script:SchemaForDepth     = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..' '..' 'data-plane' 'dlp' 'policies.schema.json') -Raw
+
+        # The DEEPEST shape the model can express, as a desired-state document:
+        # policies > [] > rules > [] > advancedRule > conditions > [] >
+        # conditions > [] > groups > [] > sensitiveInfoTypes > [] > guid.
+        # This is the real lab "Protect sensitive M365 Copilot interactions" shape
+        # (a nested condition group wrapping a content predicate).
+        $script:DeepestDoc = @{
+            policies = @(
+                @{
+                    name  = 'P-deep'
+                    mode  = 'Enable'
+                    rules = @(
+                        @{
+                            name         = 'R-deep'
+                            advancedRule = @{
+                                operator   = 'And'
+                                conditions = @(
+                                    @{ type = 'HasActivity'; value = 'UploadText' }
+                                    @{
+                                        operator   = 'Or'
+                                        conditions = @(
+                                            @{
+                                                type          = 'ContentContainsSensitiveInformation'
+                                                outerOperator = 'And'
+                                                groups        = @(
+                                                    @{
+                                                        name               = 'Default'
+                                                        operator           = 'Or'
+                                                        sensitiveInfoTypes = @(
+                                                            @{ guid = '00000000-0000-0000-0000-000000000801'; minCount = 1; maxCount = -1 }
+                                                        )
+                                                    }
+                                                )
+                                            }
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    )
+                }
+            )
+        }
+    }
+
+    It 'reads the serialization depth from the script itself, not from a copy in this test' {
+        # A test that hard-codes its own depth cannot catch this defect -- which is
+        # exactly how it escaped: every schema test here serialized at a generous
+        # depth of its own choosing while the script shipped -Depth 10.
+        $src = Get-Content -LiteralPath $script:ScriptPathForDepth -Raw
+        $m = [regex]::Match($src, '\$docJson\s*=\s*\$desiredRoot\s*\|\s*ConvertTo-Json\s+-Depth\s+(?<d>\d+)')
+        $m.Success | Should -BeTrue -Because 'the desired-state validation site must stay greppable for this regression test'
+        $script:ValidationDepth = [int]$m.Groups['d'].Value
+        $script:ValidationDepth | Should -BeGreaterThan 0
+    }
+
+    It 'serializes the deepest modelled shape WITHOUT truncating at that depth' {
+        # ConvertTo-Json warns and rewrites deeper nodes as strings when it hits the
+        # depth cap; the resulting document then fails schema validation with an
+        # error pointing at an unrelated shallow field. Found live on dev, where a
+        # valid file was rejected for `locations/powerBI`.
+        $src = Get-Content -LiteralPath $script:ScriptPathForDepth -Raw
+        $depth = [int][regex]::Match($src, '\$docJson\s*=\s*\$desiredRoot\s*\|\s*ConvertTo-Json\s+-Depth\s+(?<d>\d+)').Groups['d'].Value
+
+        $warnings = @()
+        $null = $script:DeepestDoc | ConvertTo-Json -Depth $depth -WarningVariable warnings -WarningAction SilentlyContinue
+        $warnings | Should -BeNullOrEmpty -Because 'a truncation warning means the validation site would reject a valid document'
+    }
+
+    It 'validates the deepest modelled shape against the schema at that depth' {
+        $src = Get-Content -LiteralPath $script:ScriptPathForDepth -Raw
+        $depth = [int][regex]::Match($src, '\$docJson\s*=\s*\$desiredRoot\s*\|\s*ConvertTo-Json\s+-Depth\s+(?<d>\d+)').Groups['d'].Value
+
+        $json = $script:DeepestDoc | ConvertTo-Json -Depth $depth
+        { $json | Test-Json -Schema $script:SchemaForDepth -ErrorAction Stop } | Should -Not -Throw
+    }
+
+    It 'demonstrates the defect: the same document at the old -Depth 10 does NOT survive' {
+        # Mutation check -- proves the three assertions above are non-vacuous.
+        $warnings = @()
+        $null = $script:DeepestDoc | ConvertTo-Json -Depth 10 -WarningVariable warnings -WarningAction SilentlyContinue
+        $warnings | Should -Not -BeNullOrEmpty
+    }
+}
+
+Describe 'Prune-ratio guard call avoids the PS 7.6 List[object] @() array-wrap crash (#110)' {
+    <#
+        Found live at first -PruneMissing contact against a real tenant: PowerShell 7.6.x
+        throws "Argument types do not match" when @() directly wraps a
+        System.Collections.Generic.List[object] VARIABLE REFERENCE (as opposed to a pipeline
+        result), independent of element count -- reproduced crashing at 0, 1, and 2 elements
+        alike. $ruleOrphanPlan is exactly this shape (built via New-Object + .Add()). The fix
+        drops the unnecessary @() wrap in favor of List<T>'s own .Count property, which carries
+        none of the pipeline single-result-unwrapping hazard @(...) normally guards against --
+        that hazard is a property of PIPELINE output, not of a pre-built List<T>.
+
+        This suite does not try to reproduce the PS-7.6-specific crash directly (that would make
+        the test fragile across different PowerShell versions in CI); instead it (a) source-reads
+        the fixed call site to pin the exact pattern, and (b) proves the guard's actual behavior
+        -- refuse an oversized prune, allow a sane one -- survives unchanged at 0/1/many elements,
+        so the fix could not have silently defanged the ratio guard it touches.
+    #>
+
+    BeforeAll {
+        $script:ScriptPathForPruneCount = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-DLPPolicies.ps1'
+        Import-Module (Join-Path $PSScriptRoot '..' '..' 'scripts' 'modules' 'PruneGuard.psm1') -Force
+    }
+
+    It 'the ruleOrphanPlan prune-count argument reads .Count directly, not @(...).Count' {
+        $src = Get-Content -LiteralPath $script:ScriptPathForPruneCount -Raw
+        $src | Should -Not -Match '@\(\$ruleOrphanPlan\)\.Count' -Because 'wrapping a List[object] variable in @() crashes on PowerShell 7.6.x (issue #110)'
+        $src | Should -Match '-PruneCount\s+\$ruleOrphanPlan\.Count'
+    }
+
+    It 'passing a real List[object].Count through the guard at 0, 1, and many elements does not throw' {
+        foreach ($n in 0, 1, 5) {
+            $list = New-Object 'System.Collections.Generic.List[object]'
+            for ($i = 0; $i -lt $n; $i++) { $list.Add([pscustomobject]@{ Action = 'Orphan' }) }
+            { Assert-PruneRatioWithinThreshold -PruneCount $list.Count -LiveCount 100 -ObjectTypeNoun 'DLP rule' -MaxPruneRatio 0.75 -Allow:$false } |
+                Should -Not -Throw -Because "a List[object] with $n elements must not crash the guard call (issue #110)"
+        }
+    }
+
+    It 'the guard still refuses a genuinely oversized prune (non-vacuous: the fix did not defang it)' {
+        $list = New-Object 'System.Collections.Generic.List[object]'
+        1..90 | ForEach-Object { $list.Add([pscustomobject]@{ Action = 'Orphan' }) }
+        { Assert-PruneRatioWithinThreshold -PruneCount $list.Count -LiveCount 100 -ObjectTypeNoun 'DLP rule' -MaxPruneRatio 0.75 -Allow:$false } |
+            Should -Throw -Because '90 of 100 (90%) exceeds the 75% threshold and must still be refused'
     }
 }

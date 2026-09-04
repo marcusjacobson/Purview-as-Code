@@ -205,6 +205,21 @@ Then verify — this is a hard gate; do not hand off if it fails:
 
 ## Step 4 — Handoff to @operator-tenant (Pattern B)
 
+For a **spin-off GitHub repository**, remind the owner (read-only note — you do not run it) that
+GitHub's "Use this template" does not copy labels, so the label-gated automation
+(`owner-approved` auto-merge, `needs-review`, `destructive`, `squad:*` routing) is dormant until
+the labels are seeded, and the first merge would otherwise fail with `'owner-approved' not found`.
+Point them at the idempotent seeder, to run once with an authenticated `gh`:
+
+```pwsh
+./scripts/New-RepoLabels.ps1
+```
+
+This is a spin-off-only step (a local-workspace copy with no GitHub remote has no labels to seed
+until it gains one). It is safe to re-run; three labels — `owner-approved`, `destructive`,
+`surface-watch` — have no run-time self-seeding fallback, so the seeder is the only thing that
+creates them.
+
 Present a selectable menu per [`INTERACTION-MENUS.md`](INTERACTION-MENUS.md) (Pattern B):
 
 1. `[Hand off to @operator-tenant: tailor this copy for your tenant]` (typed alias: `@operator-tenant`)
