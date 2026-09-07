@@ -22,7 +22,7 @@ Reconcilers materialize desired-state YAML under `data-plane/` against the live 
 | [Deploy-EntraDirectoryRoles.ps1](../scripts/Deploy-EntraDirectoryRoles.ps1) | Reconcile `data-plane/entra-directory-roles/role-assignments |
 | [Deploy-FilePlan.ps1](../scripts/Deploy-FilePlan.ps1) | Reconcile Microsoft Purview retention labels and file plan properties (Records Management) from declarative YAML |
 | [Deploy-Glossary.ps1](../scripts/Deploy-Glossary.ps1) | Reconcile Microsoft Purview business glossary terms against `data-plane/glossary/glossary |
-| [Deploy-IRMEntityLists.ps1](../scripts/Deploy-IRMEntityLists.ps1) | Reconcile Microsoft Purview Insider Risk Management entity lists against `data-plane/irm/entity-lists |
+| [Deploy-IRMEntityLists.ps1](../scripts/Deploy-IRMEntityLists.ps1) | PARKED (ADR 0064) -- Reconcile Microsoft Purview Insider Risk Management entity lists against `data-plane/irm/entity-lists |
 | [Deploy-IRMPolicies.ps1](../scripts/Deploy-IRMPolicies.ps1) | Reconcile Microsoft Purview Insider Risk Management (IRM) policies against `data-plane/irm/policies |
 | [Deploy-LabelPolicies.ps1](../scripts/Deploy-LabelPolicies.ps1) | Reconcile Microsoft Purview / Microsoft 365 sensitivity-label POLICIES against `data-plane/information-protection/label-policies |
 | [Deploy-Labels.ps1](../scripts/Deploy-Labels.ps1) | Reconcile Microsoft Purview / Microsoft 365 sensitivity labels against `data-plane/information-protection/labels |
@@ -49,7 +49,6 @@ Support scripts, smoke-test wrappers, and infrastructure primitives.
 | [Get-PurviewAccountShape.ps1](../scripts/Get-PurviewAccountShape.ps1) | Detect whether a Microsoft Purview account exposes the classic Data Map host, the unified data plane, both, or neither |
 | [Get-PurviewIPPSAccessToken.ps1](../scripts/Get-PurviewIPPSAccessToken.ps1) | Acquire an OAuth2 access token for Microsoft Security & Compliance PowerShell (Connect-IPPSSession -AccessToken) using a JWT client_assertion signed by either a local-machine certificate (interactive dev loop) or an Azure Key Vault key (CI) |
 | [Get-TenantResidualScanCommand.ps1](../scripts/Get-TenantResidualScanCommand.ps1) | Emit the ready-to-run Step 6 placeholder-scan `git grep` command(s) from the tenant placeholder manifest, so the operator agent body never hand-copies the exclude list |
-| [Get-UpstreamDelta.ps1](../scripts/Get-UpstreamDelta.ps1) | Report every change the operator branches carry that is owed upstream to the template repo |
 | [Grant-EntraDirectoryRole.ps1](../scripts/Grant-EntraDirectoryRole.ps1) | Grant (or revoke) a single Entra security group's membership in a single Microsoft Entra ID directory role at directory scope, idempotently, via Microsoft Graph |
 | [Grant-ExchangeManageAsApp.ps1](../scripts/Grant-ExchangeManageAsApp.ps1) | Idempotently grant a workload identity the Microsoft 365 surface needed for app-only Connect-IPPSSession (Security & Compliance PowerShell) |
 | [Grant-PurviewDataMapRole.ps1](../scripts/Grant-PurviewDataMapRole.ps1) | Grant (or revoke) Microsoft Purview data-plane roles to a principal at the lowest collection that works |
@@ -60,6 +59,8 @@ Support scripts, smoke-test wrappers, and infrastructure primitives.
 | [Invoke-DSPMSmokeTest.ps1](../scripts/Invoke-DSPMSmokeTest.ps1) | Near-unattended wrapper around docs/runbooks/dspm-end-to-end-smoke |
 | [Invoke-GlossarySmokeTest.ps1](../scripts/Invoke-GlossarySmokeTest.ps1) | Near-unattended wrapper around docs/runbooks/glossary-end-to-end-smoke |
 | [Invoke-IRMSmokeTest.ps1](../scripts/Invoke-IRMSmokeTest.ps1) | Near-unattended wrapper around docs/runbooks/irm-end-to-end-smoke |
+| [Invoke-LocalDlpDriftSync.ps1](../scripts/Invoke-LocalDlpDriftSync.ps1) | Local, operator-run equivalent of sync-dlp-from-tenant |
+| [Invoke-LocalIrmDriftSync.ps1](../scripts/Invoke-LocalIrmDriftSync.ps1) | Local, operator-run drift-back sync for the Insider Risk Management (IRM) policy surface on a governance-locked tenant (ADR 0060) |
 | [Invoke-RecordsSmokeTest.ps1](../scripts/Invoke-RecordsSmokeTest.ps1) | Near-unattended wrapper around docs/runbooks/records-end-to-end-smoke |
 | [Invoke-ScansSmokeTest.ps1](../scripts/Invoke-ScansSmokeTest.ps1) | Near-unattended wrapper around docs/runbooks/scans-end-to-end-smoke |
 | [Invoke-SITConfidenceAnalysis.ps1](../scripts/Invoke-SITConfidenceAnalysis.ps1) | Read-only Microsoft Purview Sensitive Information Type (SIT) hit-volume and confidence analyzer |
@@ -77,7 +78,6 @@ Support scripts, smoke-test wrappers, and infrastructure primitives.
 | [Resolve-EnvTokens.ps1](../scripts/Resolve-EnvTokens.ps1) | Substitute `${env:VAR}` tokens in YAML-derived strings against an explicit allow-list of environment variables |
 | [Set-AuditRetentionPolicy.ps1](../scripts/Set-AuditRetentionPolicy.ps1) | Reconcile Microsoft Purview unified audit log retention policies against `data-plane/audit/retention-policies |
 | [Set-KickoffGuard.ps1](../scripts/Set-KickoffGuard.ps1) | Install the ADR 0045 no-push-back guard on a consumer's copy of the Purview-as-Code template, so it cannot contribute content back to the source template repository |
-| [Start-OperationsConsole.ps1](../scripts/Start-OperationsConsole.ps1) | Local, read-only Purview Operations Console: a dev-vs-lab data-plane status dashboard served from an operator's own workstation |
 | [Sync-SITCatalog.ps1](../scripts/Sync-SITCatalog.ps1) | Reconcile Microsoft Purview / Microsoft 365 Sensitive Information Type (SIT) catalog against `data-plane/classifications/sit-catalog |
 | [Test-DSPMforAIPosture.ps1](../scripts/Test-DSPMforAIPosture.ps1) | Read-only Microsoft Purview Data Security Posture Management (DSPM) for AI posture verifier driven by `data-plane/dspm-ai/dspm-ai-config |
 | [Test-DSPMPosture.ps1](../scripts/Test-DSPMPosture.ps1) | Read-only Microsoft Purview Data Security Posture Management (DSPM) signal-source posture verifier driven by `data-plane/dspm/dspm-config |
@@ -85,7 +85,6 @@ Support scripts, smoke-test wrappers, and infrastructure primitives.
 | [Test-KickoffGuard.ps1](../scripts/Test-KickoffGuard.ps1) | Verify the ADR 0045 no-push-back guard: assert this workspace cannot contribute content back to the source template repository |
 | [Test-M365Licensing.ps1](../scripts/Test-M365Licensing.ps1) | Preflight: verifies that the signed-in Microsoft 365 tenant has the licenses and service plans required by a caller script |
 | [Update-LandingPageEmbeds.ps1](../scripts/Update-LandingPageEmbeds.ps1) | Refresh (or verify) the offline documentation snapshots embedded in the repository landing page, index |
-| [Update-UpstreamLedger.ps1](../scripts/Update-UpstreamLedger.ps1) | Record one upstream delta-scan run in the git-tracked ledger (idempotent per delta checksum) |
 | [Verify-SetLabelAutoApply.ps1](../scripts/Verify-SetLabelAutoApply.ps1) | Verifies the Set-Label cmdlet parameter shape for client-side auto-application conditions against the contoso-lab Microsoft Purview tenant |
 
 ## References
@@ -96,4 +95,4 @@ Support scripts, smoke-test wrappers, and infrastructure primitives.
 
 ---
 
-_Last regenerated: 2026-08-31 06:09:12 UTC by [docs-regen.yml](../.github/workflows/docs-regen.yml)_
+_Last regenerated: 2026-09-07 06:41:39 UTC by [docs-regen.yml](../.github/workflows/docs-regen.yml)_
