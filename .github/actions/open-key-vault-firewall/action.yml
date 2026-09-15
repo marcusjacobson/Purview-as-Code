@@ -1,0 +1,189 @@
+name: Open the Key Vault firewall for this run
+description: >
+  Opens the shared Key Vault public endpoint only if it is not already open,
+  so that exactly one run in a fan-out owns the window and is responsible for
+  re-locking it.
+
+# WHY THIS EXISTS (issues #306 and #311)
+#
+# Eleven workflows in this repository open the ONE shared Key Vault firewall at
+# the start of their tenant-touching job and close it in an `if: always()` step
+# at the end. Nothing serialises them, and a single push can fan out to five of
+# them -- any push touching `scripts/Get-PurviewIPPSAccessToken.ps1`,
+# `infra/parameters/*.yaml`, or `scripts/modules/DirectionPolicy.psm1`.
+#
+# Two defects came out of that, and they need different halves of the fix:
+#
+#   #306 -- the first run to FINISH re-locks the vault while the others are
+#   still working, and each of those dies at its next data-plane call with
+#   ForbiddenByConnection. Fixed in Get-PurviewIPPSAccessToken.ps1 by a bounded
+#   re-open-and-retry.
+#
+#   #311 -- retry alone provably CANNOT save the last run standing. Measured on
+#   dev run 34775754734 (2026-09-13): `deploy-label-policies` spent all three
+#   attempts and lost every one, because each retry was defeated by the NEXT
+#   sibling to finish. Four siblings re-locking across ~65 seconds beats any
+#   fixed retry budget, and the spread grows with the number of workflows.
+#
+# The half this action supplies is OWNERSHIP. The old step wrote `opened=true`
+# unconditionally, without ever reading the vault, so the flag meant "this job
+# ran the open command" rather than "this job opened it" -- and it was true for
+# every run, which is why all five re-locked. Reading the posture first makes
+# the flag truthful, and the existing restore condition then does the rest:
+# N-1 re-locks collapse to at most one, which the #306 retry absorbs.
+#
+# Neither half is sufficient alone, and both failure modes are measured rather
+# than argued: ownership alone still loses when the opener finishes first
+# (2026-09-07), and retry alone still loses when it is last out (2026-09-13).
+#
+# NOT the fix: a shared GitHub `concurrency.group`. GitHub permits one PENDING
+# run per group and cancels the previously pending one, so five workflows from
+# one push become one run, one pending, and three SILENTLY CANCELLED -- a loud
+# failure converted into a silent no-apply, which is the confusion #245 exists
+# to remove. The two workflows that already share `kv-firewall-<env>` are
+# dispatch-only and never fan out.
+#
+# Reference: https://learn.microsoft.com/en-us/azure/key-vault/general/network-security
+# Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
+
+inputs:
+  key-vault-name:
+    description: Name of the Key Vault whose public endpoint should be opened.
+    required: true
+  propagation-seconds:
+    description: >
+      How long to wait after actually changing the network rule before the
+      first data-plane call. Ignored when the vault was already open, since
+      nothing changed. 30s matches the value this step has used since #144.
+    required: false
+    default: '30'
+  max-attempts:
+    description: >
+      Attempts for the `az keyvault update` itself. ARM rejects simultaneous
+      writes to one vault with ConflictError (#311), which is transient by
+      definition -- five runs issuing the update within six seconds is enough
+      to trigger it, observed on dev run 34774457895.
+    required: false
+    default: '4'
+
+outputs:
+  opened:
+    description: >
+      'true' only when THIS run changed the vault from locked to open, and is
+      therefore the run responsible for re-locking it. Callers must gate their
+      restore step on this. 'false' means another run owns the window.
+    value: ${{ steps.open.outputs.opened }}
+
+runs:
+  using: composite
+  steps:
+    - name: Open the Key Vault firewall if this run is the one to do it
+      id: open
+      shell: pwsh
+      env:
+        KV_NAME: ${{ inputs.key-vault-name }}
+        KV_PROPAGATION_SECONDS: ${{ inputs.propagation-seconds }}
+        KV_MAX_ATTEMPTS: ${{ inputs.max-attempts }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        # Read the posture first. FAIL OPEN on purpose: if this read does not
+        # work -- a role without Microsoft.KeyVault/vaults/read, a transient
+        # ARM error -- fall back to the unconditional open this step did before
+        # #311. That is the pre-existing behaviour, so a failure here degrades
+        # to today rather than to a job that cannot start.
+        # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-show
+        # The predicate lives in a module so it can be unit-tested. The first
+        # version of it was inline and required defaultAction -eq 'Allow',
+        # which this vault reads back as 'None' once open -- so the branch was
+        # dead code and every run claimed ownership (issue #315). Workflow
+        # steps already import from scripts/modules the same way.
+        Import-Module ./scripts/modules/KeyVaultFirewall.psm1 -Force -ErrorAction Stop
+
+        $alreadyOpen = $false
+        $posture = 'unread'
+        $state = az keyvault show --name $env:KV_NAME `
+          --query '{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}' `
+          --only-show-errors -o tsv 2>&1
+        if ($LASTEXITCODE -eq 0 -and $state) {
+          $parsed = ConvertFrom-KeyVaultPostureTsv -Tsv ([string]$state)
+          $posture = "$($parsed.PublicNetworkAccess)/$($parsed.DefaultAction)"
+          $alreadyOpen = Test-KeyVaultIsOpen `
+            -PublicNetworkAccess $parsed.PublicNetworkAccess `
+            -DefaultAction $parsed.DefaultAction
+        }
+        else {
+          Write-Host "::warning::Could not read the Key Vault posture ($state). Falling back to an unconditional open, which is the pre-#311 behaviour."
+        }
+
+        if ($alreadyOpen) {
+          # Another run in this fan-out owns the window. Do not touch the
+          # vault, and above all do not claim ownership: claiming it is what
+          # made every run re-lock and strand the stragglers (#311).
+          Write-Host "Key Vault '$env:KV_NAME' is already open ($posture); another run owns this window. Not opening, and NOT re-locking on exit (issue #311)."
+          Add-Content -Path $env:GITHUB_OUTPUT -Value 'opened=false'
+          exit 0
+        }
+
+        Write-Host "Key Vault '$env:KV_NAME' posture is '$posture'. Opening, and this run owns the window."
+
+        $maxAttempts = [int]$env:KV_MAX_ATTEMPTS
+        $opened = $false
+        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+          $out = az keyvault update `
+            --name $env:KV_NAME `
+            --public-network-access Enabled `
+            --default-action Allow `
+            --only-show-errors `
+            -o none 2>&1
+          if ($LASTEXITCODE -eq 0) { $opened = $true; break }
+
+          $text = ($out | Out-String)
+          if ($text -notmatch 'ConflictError') {
+            Write-Host "::error::Opening the Key Vault firewall failed: $text"
+            exit 1
+          }
+          if ($attempt -ge $maxAttempts) {
+            Write-Host "::error::Opening the Key Vault firewall still conflicted after $maxAttempts attempts (issue #311): $text"
+            exit 1
+          }
+          # A ConflictError means another run wrote to this vault at the same
+          # moment. Re-read before retrying: if that run won and the vault is
+          # now open, IT owns the window and this one must stand down. This is
+          # the ownership signal the fully simultaneous case never otherwise
+          # produces -- on dev run 34778953168 all five read 'Disabled/Deny'
+          # before any of them had written, so a read-once check cannot
+          # deduplicate them and every run claimed the window (issue #315).
+          $afterState = az keyvault show --name $env:KV_NAME `
+            --query '{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}' `
+            --only-show-errors -o tsv 2>&1
+          if ($LASTEXITCODE -eq 0 -and $afterState) {
+            $afterParsed = ConvertFrom-KeyVaultPostureTsv -Tsv ([string]$afterState)
+            if (Test-KeyVaultIsOpen -PublicNetworkAccess $afterParsed.PublicNetworkAccess -DefaultAction $afterParsed.DefaultAction) {
+              Write-Host "Key Vault '$env:KV_NAME' was opened by another run while this one was writing ($($afterParsed.PublicNetworkAccess)/$($afterParsed.DefaultAction)); that run owns this window. Not re-locking on exit (issue #315)."
+              Add-Content -Path $env:GITHUB_OUTPUT -Value 'opened=false'
+              exit 0
+            }
+          }
+
+          # ARM rejects simultaneous writes to one vault. Back off with jitter
+          # so two conflicting runs do not retry in lockstep forever.
+          $delay = (2 * $attempt) + (Get-Random -Minimum 1 -Maximum 5)
+          Write-Host "::warning::Key Vault '$env:KV_NAME' returned ConflictError -- another run is writing to it (issue #311). Retrying in ${delay}s (attempt $($attempt + 1) of $maxAttempts)."
+          Start-Sleep -Seconds $delay
+        }
+
+        if (-not $opened) {
+          Write-Host '::error::Key Vault firewall was not opened.'
+          exit 1
+        }
+
+        Add-Content -Path $env:GITHUB_OUTPUT -Value 'opened=true'
+
+        # Only wait when something actually changed. A run that found the vault
+        # already open has nothing to wait for.
+        $wait = [int]$env:KV_PROPAGATION_SECONDS
+        if ($wait -gt 0) {
+          Write-Host "Waiting ${wait}s for the network rule change to propagate before the first data-plane call."
+          Start-Sleep -Seconds $wait
+        }

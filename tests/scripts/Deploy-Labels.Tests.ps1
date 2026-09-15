@@ -775,3 +775,241 @@ Describe 'SkipNames behavior (ADR 0029)' {
         $decision.Action | Should -Be 'Skip'
     }
 }
+
+Describe 'The redacted export emits rightsDefinitions in a canonical order (#225 follow-up to #194)' {
+    # Found by diffing merged dev against PR #229 -- an actual
+    # -RedactIdentities export of the live dev tenant. #238 had just
+    # redacted dev's 12 real identities, and the sync was declared fixed;
+    # the export still produced a 12-line diff, because the committed file
+    # and the exporter disagreed on the ORDER of the two rights entries in
+    # each of six labels. Nothing had drifted.
+    #
+    # Root cause: the redaction collapses every Identity to the same
+    # literal, so the export's `Sort-Object Identity` had become an
+    # ALL-TIES key. Sort-Object is not stable without -Stable, and the
+    # tenant's return order is not a contract either, so emission order was
+    # undefined. Fixed by giving the sort a real total order (Identity,
+    # Rights) rather than reaching for -Stable, which has no precedent
+    # here -- the same resolution #194 took on the IRM surface.
+    #
+    # This matters because a re-export is a PRODUCER on this surface:
+    # sync-labels-from-tenant.yml runs daily and opens a drift-back PR from
+    # the result, so a reordering-only diff is indistinguishable at a glance
+    # from a real portal edit -- the noise that got #170 and #172 merged
+    # reflexively on the sibling surface.
+    #
+    # The compare path is order-blind (Compare-LabelHash sorts before
+    # comparing), which is why the audit reported clean and no existing
+    # test caught this. Only the export path is order-sensitive.
+
+    BeforeAll {
+        $script:TrackedLabelsPath = Join-Path $PSScriptRoot '..' '..' 'data-plane' 'information-protection' 'labels.yaml'
+        Import-Module powershell-yaml -ErrorAction Stop
+        $script:TrackedLabels = @((Get-Content -LiteralPath $script:TrackedLabelsPath -Raw | ConvertFrom-Yaml).labels)
+
+        # Anchor to the EXPORT path's sort statement, not the whole file:
+        # lines ~408 and ~589 also sort by Identity on the compare path,
+        # where identities are real and distinct and a single key IS a
+        # total order. A whole-file regex would match those and assert
+        # nothing about the line that actually broke.
+        $script:ExportSortLine = (((Get-Content -LiteralPath $script:ScriptPath -Raw) -split "`r?`n") |
+            Where-Object { $_ -match '\$rightsDefs\s*=\s*@\(\$redacted\s*\|\s*Sort-Object' })
+    }
+
+    It 'the exporter sorts redacted rights definitions on a total order, not an all-ties key' {
+        # Read the production sort rather than restating it: if this line
+        # changes, the ordering assertion below is no longer describing the
+        # same contract and must be revisited deliberately.
+        $script:ExportSortLine | Should -Not -BeNullOrEmpty -Because 'the export sort statement must exist for the rest of this Describe to test anything real'
+        $script:ExportSortLine | Should -Match 'Sort-Object Identity, Rights' -Because 'after redaction Identity alone is an all-ties key, so it cannot define the canonical order the tracked file must match'
+    }
+
+    It 'every tracked label lists its rightsDefinitions in that same order' {
+        $checked = 0
+        foreach ($label in $script:TrackedLabels) {
+            $rights = @($label.encryption.rightsDefinitions)
+            if ($rights.Count -lt 2) { continue }
+            $checked++
+            $actual = @($rights | ForEach-Object { '{0}|{1}' -f $_.Identity, $_.Rights })
+            $expected = @($rights | Sort-Object Identity, Rights | ForEach-Object { '{0}|{1}' -f $_.Identity, $_.Rights })
+            # -SyncWindow 0 catches a reordering; without it two lists holding
+            # the same entries in a different order compare equal.
+            $diff = Compare-Object -ReferenceObject $actual -DifferenceObject $expected -SyncWindow 0
+            $diff | Should -BeNullOrEmpty -Because ("label '{0}' lists its rights entries out of canonical order, so a re-export would open a drift-back PR whose diff is a pure reordering" -f $label.displayName)
+        }
+        $checked | Should -BeGreaterThan 0 -Because 'a file with no multi-entry rightsDefinitions would satisfy this vacuously'
+    }
+
+    It 'the secondary key is what orders a fully-redacted pair (red-replay of the exact defect)' {
+        # Data-independent regression anchor, using the two real Rights
+        # strings from dev. Independent of what this branch happens to track.
+        $owner = 'DOCEDIT,EDIT,EDITRIGHTSDATA,EXPORT,EXTRACT,FORWARD,OBJMODEL,OWNER,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA'
+        $coauthor = 'DOCEDIT,EDIT,EXTRACT,FORWARD,OBJMODEL,PRINT,REPLY,REPLYALL,VIEW,VIEWRIGHTSDATA'
+        $tenantOrder = @(
+            [pscustomobject]@{ Identity = 'user@contoso.com'; Rights = $coauthor }
+            [pscustomobject]@{ Identity = 'user@contoso.com'; Rights = $owner }
+        )
+
+        # RED: the pre-fix single-key sort has nothing to order by, so it
+        # simply echoes whatever order the tenant returned. This is the
+        # defect -- proved here rather than asserted about.
+        (@($tenantOrder | Sort-Object Identity))[0].Rights | Should -Be $coauthor -Because 'an all-ties key leaves emission order at the mercy of the tenant, which is not a contract'
+
+        # GREEN: the two-key sort produces the same output from either input
+        # order, which is what makes a re-export reproduce the tracked file.
+        (@($tenantOrder | Sort-Object Identity, Rights))[0].Rights | Should -Be $owner
+        $reversed = @($tenantOrder[1], $tenantOrder[0])
+        (@($reversed | Sort-Object Identity, Rights))[0].Rights | Should -Be $owner -Because 'order-stability means the tenant may return these either way round and the export must not change'
+    }
+}
+
+Describe 'The redacting export preserves well-known symbolic identities (#225)' {
+    # Found live: the dev tenant's `Pilot - Confidential A1 (Lab)` label
+    # holds IPC_USER_ID_OWNER -- a Microsoft rights-management constant
+    # meaning "the content owner", not a principal. -RedactIdentities
+    # rewrote it to user@contoso.com like any UPN, which was wrong twice:
+    # it is a disclosure no-op (the value is identical in every tenant on
+    # earth), and it destroys real desired-state meaning, replacing "the
+    # owner holds OWNER" with a placeholder principal that means something
+    # else. The label then drifted forever, because the tenant kept
+    # returning the symbolic form while the repo committed the placeholder.
+    #
+    # labels.schema.json's own Identity description already anticipated
+    # this by naming AuthenticatedUsers as a legitimate value; only the
+    # redaction path did not know.
+
+    BeforeAll {
+        $script:LabelsSource = Get-Content -LiteralPath $script:ScriptPath -Raw
+        $symbolicBlock = [regex]::Match($script:LabelsSource,
+            '\$script:WellKnownSymbolicIdentities\s*=\s*@\(([^)]*)\)')
+        $script:SymbolicList = @(
+            [regex]::Matches($symbolicBlock.Groups[1].Value, "'([^']+)'") |
+                ForEach-Object { $_.Groups[1].Value })
+    }
+
+    It 'the allow-list exists in production source and is fail-closed in shape' {
+        $script:SymbolicList.Count | Should -BeGreaterThan 0 -Because 'the export path consults this list; an empty one silently restores the old redact-everything behaviour'
+        $script:SymbolicList | Should -Contain 'IPC_USER_ID_OWNER'
+    }
+
+    It 'the redaction branch consults the allow-list rather than redacting unconditionally' {
+        # Anchored to the export path's own decision, not a mention: the
+        # constant is also described in prose above its definition.
+        $script:LabelsSource | Should -Match 'WellKnownSymbolicIdentities -contains' -Because 'the redaction must be a lookup, not an unconditional rewrite'
+    }
+
+    It 'redacts addressable principals but preserves symbolic ones (the live dev shape)' {
+        # Mirrors the production expression rather than invoking the
+        # exporter, which would need a tenant connection. The three inputs
+        # inputs mirror the SHAPE the dev tenant returns -- a UPN, a
+        # group SMTP address and a service constant -- with the two
+        # addressable ones written in the synthetic namespace, because
+        # this file ports to the public template (issue #329).
+        $tenant = @(
+            [pscustomobject]@{ Identity = 'owner@contoso-dev.cloud'; Rights = 'OWNER' }
+            [pscustomobject]@{ Identity = 'allcompany@contoso.onmicrosoft.com'; Rights = 'VIEW' }
+            [pscustomobject]@{ Identity = 'IPC_USER_ID_OWNER'; Rights = 'OWNER' }
+        )
+        $out = foreach ($rd in $tenant) {
+            if ($script:SymbolicList -contains [string]$rd.Identity) { [string]$rd.Identity } else { 'user@contoso.com' }
+        }
+        $out[0] | Should -Be 'user@contoso.com' -Because 'a real UPN must be redacted'
+        $out[1] | Should -Be 'user@contoso.com' -Because 'a real group SMTP address must be redacted'
+        $out[2] | Should -Be 'IPC_USER_ID_OWNER' -Because 'a service constant carries no tenant information and must survive verbatim, or the label drifts forever'
+    }
+
+    It 'an unknown symbolic-looking value is still redacted (fail-closed)' {
+        # The list is an allow-list on purpose: a future constant we have
+        # not seen is over-redacted, which shows up as drift and prompts
+        # review, rather than being disclosed silently.
+        $unknown = 'IPC_USER_ID_SOMETHING_NEW'
+        $script:SymbolicList | Should -Not -Contain $unknown
+        $result = if ($script:SymbolicList -contains $unknown) { $unknown } else { 'user@contoso.com' }
+        $result | Should -Be 'user@contoso.com'
+    }
+}
+
+Describe 'rightsDefinitions comparison is PER-ENTRY, not all-or-nothing (#225)' {
+    # Preserving well-known symbolic identities made MIXED files the normal
+    # case: lab's tenant produces one `AuthenticatedUsers` alongside four
+    # redacted placeholders. The original mitigation only engaged when EVERY
+    # desired identity was a placeholder, so a mixed file fell through to
+    # strict identity comparison and compared `user@contoso.com` literally
+    # against real tenant principals it can never equal -- reporting drift on
+    # three lab labels forever.
+    #
+    # Caught by running a repo-wins -WhatIf against the live lab tenant after
+    # the symbolic-identity change: the plan showed 4 Updates where only 1 was
+    # intended. This is #225's option 3, deferred at the time and made
+    # necessary by the symbolic fix.
+    #
+    # The rule: a REDACTED identity is opaque and may only be matched on
+    # Rights; a real or symbolic identity is matched exactly. Both sides must
+    # pair one-to-one.
+
+    BeforeAll {
+        function Get-TestRightsEntry { param([string]$Id, [string]$Rights) [pscustomobject]@{ Identity = $Id; Rights = $Rights } }
+        function Get-TestEncryptionHash { param([object[]]$Rd) @{ encryption = @{ enabled = $true; rightsDefinitions = $Rd } } }
+        function Test-Drift {
+            param([object[]]$Desired, [object[]]$Tenant)
+            @(Compare-LabelHash -Desired (Get-TestEncryptionHash $Desired) -Tenant (Get-TestEncryptionHash $Tenant)) -contains 'encryption.rightsDefinitions'
+        }
+        $script:MixedDesired = @(
+            (Get-TestRightsEntry 'AuthenticatedUsers' 'OBJMODEL,VIEW')
+            (Get-TestRightsEntry 'user@contoso.com' 'EDIT,VIEW')
+            (Get-TestRightsEntry 'user@contoso.com' 'OWNER')
+        )
+    }
+
+    It 'a MIXED file matching the tenant reports NO drift (the regression)' {
+        $tenant = @(
+            (Get-TestRightsEntry 'AuthenticatedUsers' 'OBJMODEL,VIEW')
+            (Get-TestRightsEntry 'real@lab.test' 'EDIT,VIEW')
+            (Get-TestRightsEntry 'other@lab.test' 'OWNER')
+        )
+        Test-Drift -Desired $script:MixedDesired -Tenant $tenant | Should -BeFalse -Because 'the placeholders are opaque and the symbolic identity matches, so nothing has actually drifted'
+    }
+
+    It 'a MIXED file still reports drift when a placeholder''s Rights change' {
+        $tenant = @(
+            (Get-TestRightsEntry 'AuthenticatedUsers' 'OBJMODEL,VIEW')
+            (Get-TestRightsEntry 'real@lab.test' 'EDIT,VIEW')
+            (Get-TestRightsEntry 'other@lab.test' 'PRINT')
+        )
+        Test-Drift -Desired $script:MixedDesired -Tenant $tenant | Should -BeTrue -Because 'opaque means unknown WHO, not unknown WHAT -- a rights change is real drift'
+    }
+
+    It 'a MIXED file reports drift when the SYMBOLIC identity is absent from the tenant' {
+        $tenant = @(
+            (Get-TestRightsEntry 'someone@lab.test' 'OBJMODEL,VIEW')
+            (Get-TestRightsEntry 'real@lab.test' 'EDIT,VIEW')
+            (Get-TestRightsEntry 'other@lab.test' 'OWNER')
+        )
+        Test-Drift -Desired $script:MixedDesired -Tenant $tenant | Should -BeTrue -Because 'a symbolic identity is meaningful and must be matched exactly, never treated as opaque'
+    }
+
+    It 'a FULLY redacted file still compares opaquely (the #137 behaviour must survive)' {
+        $desired = @( (Get-TestRightsEntry 'user@contoso.com' 'A'), (Get-TestRightsEntry 'user@contoso.com' 'B') )
+        Test-Drift -Desired $desired -Tenant @( (Get-TestRightsEntry 'x@lab.test' 'A'), (Get-TestRightsEntry 'y@lab.test' 'B') ) | Should -BeFalse
+        Test-Drift -Desired $desired -Tenant @( (Get-TestRightsEntry 'x@lab.test' 'A'), (Get-TestRightsEntry 'y@lab.test' 'Z') ) | Should -BeTrue
+        Test-Drift -Desired $desired -Tenant @( (Get-TestRightsEntry 'x@lab.test' 'A') ) | Should -BeTrue -Because 'a count mismatch is drift regardless of opacity'
+    }
+
+    It 'the apply path omits EncryptionRightsDefinitions when ANY identity is a placeholder' {
+        # Not just when ALL are. EncryptionRightsDefinitions is written whole,
+        # so a mixed set has no correct partial write: sending it would push
+        # user@contoso.com at the tenant (TextEmptyException), and if it landed
+        # it would drop the rights of every entry not named.
+        $mixed = ConvertTo-LabelCmdletArgument -Desired @{
+            displayName = 'X'
+            encryption  = @{ enabled = $true; protectionType = 'Template'; rightsDefinitions = $script:MixedDesired }
+        }
+        $mixed.ContainsKey('EncryptionRightsDefinitions') | Should -BeFalse -Because 'a mixed set cannot be written without either failing server-side or silently revoking the unnamed entries'
+
+        $realOnly = ConvertTo-LabelCmdletArgument -Desired @{
+            displayName = 'X'
+            encryption  = @{ enabled = $true; protectionType = 'Template'; rightsDefinitions = @((Get-TestRightsEntry 'real@lab.test' 'OWNER')) }
+        }
+        $realOnly['EncryptionRightsDefinitions'] | Should -Be 'real@lab.test:OWNER' -Because 'a fully resolvable set must still be written'
+    }
+}

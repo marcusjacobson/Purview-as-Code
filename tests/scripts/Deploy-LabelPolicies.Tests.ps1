@@ -1,4 +1,4 @@
-#Requires -Version 7.4
+﻿#Requires -Version 7.4
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.5.0' }
 <#
 .SYNOPSIS
@@ -39,7 +39,7 @@ BeforeAll {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile(
         $script:ScriptPath, [ref]$tokens, [ref]$errors)
 
-    foreach ($fname in @('ConvertTo-TenantPolicyHash')) {
+    foreach ($fname in @('ConvertTo-TenantPolicyHash', 'Get-GroupingParentLabelGuid')) {
         $fnAst = $ast.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -754,7 +754,8 @@ Describe 'exchangeLocationException tracking (issue #492; ADR 0030 row 3)' {
         foreach ($fname in @(
             'ConvertTo-PolicyHash',
             'Compare-PolicyHash',
-            'ConvertTo-TenantPolicyHash'
+            'ConvertTo-TenantPolicyHash',
+            'Get-GroupingParentLabelGuid'
         )) {
             $fnAst = $ast.Find({
                     param($node)
@@ -920,7 +921,8 @@ Describe 'ModernGroupLocation tracking (#471 row 4; ADR 0030)' {
         foreach ($fname in @(
             'ConvertTo-PolicyHash',
             'Compare-PolicyHash',
-            'ConvertTo-TenantPolicyHash'
+            'ConvertTo-TenantPolicyHash',
+            'Get-GroupingParentLabelGuid'
         )) {
             $fnAst = $ast.Find({
                     param($node)
@@ -1278,7 +1280,8 @@ Describe 'powerBIComplianceInformation tracking (#471 row 7; ADR 0041)' {
             'ConvertTo-PolicyHash',
             'Compare-PolicyHash',
             'ConvertTo-TenantPolicyHash',
-            'ConvertTo-PolicyInputMode'
+            'ConvertTo-PolicyInputMode',
+            'Get-GroupingParentLabelGuid'
         )) {
             $fnAst = $ast.Find({
                     param($node)
@@ -1471,7 +1474,8 @@ Describe 'includedAdministrativeUnits tracking (#471 row 6; ADR 0042)' {
             'Compare-PolicyHash',
             'ConvertTo-TenantPolicyHash',
             'ConvertTo-PolicyInputMode',
-            'Resolve-TenantPolicyStatus'
+            'Resolve-TenantPolicyStatus',
+            'Get-GroupingParentLabelGuid'
         )) {
             $fnAst = $ast.Find({
                     param($node)
@@ -2192,5 +2196,256 @@ Describe 'Prune failure reporting executed through the script wiring (issue #13,
         # Pins the fix against a regression to the pre-part-C shape.
         $script:ReporterRegionSource | Should -Not -Match '(?m)^\s*return\s*$'
         $script:ReporterRegionSource | Should -Not -Match '(?m)^\s*Write-Error'
+    }
+}
+
+Describe 'Export/compare label identity: Purview Name vs displayName (issue #299)' {
+
+    BeforeAll {
+        # Same AST-extract-and-stub pattern the blocks above use.
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $script:ScriptPath, [ref]$tokens, [ref]$errors)
+
+        foreach ($fname in @(
+            'ConvertTo-TenantPolicyHash',
+            'ConvertTo-LabelGuidLookup',
+            'ConvertTo-LabelCompositeKey',
+            'Get-GroupingParentLabelGuid'
+        )) {
+            $fnAst = $ast.Find({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                    $node.Name -eq $fname
+                }, $true)
+            if (-not $fnAst) { throw "$fname not found in $script:ScriptPath" }
+            . ([ScriptBlock]::Create($fnAst.Extent.Text))
+        }
+
+        $script:AdvancedSettingsAllowlist = @()
+        function script:ConvertTo-PolicyInputMode { param([string]$Mode) return $Mode }
+
+        # Tenant labels shaped like a live Get-Label result: each carries the
+        # immutable `Name` and a `ContentType`. The two top-level labels are
+        # pure grouping parents (empty ContentType, and both have children).
+        # The em-dash names reproduce lab's pilot taxonomy, which is the set
+        # that exported as slugs on 2026-09-08.
+        $script:LiveLabels = @(
+            [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000001'; DisplayName = 'Confidential';        Name = 'Confidential';             ParentId = $null; ContentType = 'None' }
+            [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000002'; DisplayName = 'Highly Confidential'; Name = 'Highly ConfidentialGroup'; ParentId = $null; ContentType = 'None' }
+            [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000011'; DisplayName = 'Internal';            Name = 'Internal';                 ParentId = '00000000-0000-0000-0000-000000000001'; ContentType = 'File, Email' }
+            [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000021'; DisplayName = 'External (Restricted)'; Name = 'External--Restricted-';  ParentId = '00000000-0000-0000-0000-000000000002'; ContentType = 'File, Email' }
+            [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000031'; DisplayName = 'Pilot — Confidential A0 (Lab)'; Name = 'Pilot---Confidential-A0--Lab-'; ParentId = $null; ContentType = 'File, Email' }
+            [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000032'; DisplayName = 'Pilot — General (Lab)';        Name = 'Pilot---General--Lab-';        ParentId = $null; ContentType = 'File, Email' }
+        )
+
+        function script:New-LivePolicy {
+            param([string[]]$Labels)
+            [pscustomobject]@{
+                Name             = 'Lab — IP A0B0 (user-perm + default)'
+                Guid             = '00000000-0000-0000-0000-0000000000ff'
+                Mode             = 'Enable'
+                Status           = 'Published'
+                ExchangeLocation = @()
+                Labels           = $Labels
+                Settings         = @()
+            }
+        }
+    }
+
+    Context 'A tenant Name that the old slug guess could not reproduce' {
+
+        It 'resolves an em-dash display name read back as its Name slug' {
+            # The exact string dev exported on 2026-09-08. Before #299 this
+            # fell through unresolved and was written into label-policies.yaml
+            # as though it were a display name.
+            $hash = ConvertTo-TenantPolicyHash -Policy (New-LivePolicy -Labels @('Pilot---Confidential-A0--Lab-')) -TenantLabels $script:LiveLabels
+            $hash.labels | Should -HaveCount 1
+            $hash.labels[0] | Should -Be '00000000-0000-0000-0000-000000000031'
+        }
+
+        It 'resolves a Name that is not a slug of the current display name' {
+            # 'Highly ConfidentialGroup' is not derivable from 'Highly
+            # Confidential' by any character substitution, so the tenant's
+            # own Name has to be keyed directly. It is a grouping parent, so
+            # the resolved GUID is then dropped -- what this pins is that the
+            # entry does NOT survive as a raw string.
+            $hash = ConvertTo-TenantPolicyHash -Policy (New-LivePolicy -Labels @('Highly ConfidentialGroup')) -TenantLabels $script:LiveLabels
+            $hash.labels | Should -Not -Contain 'Highly ConfidentialGroup'
+        }
+
+        It 'still resolves the parenthesis-and-space slug shape from issue #230' {
+            $hash = ConvertTo-TenantPolicyHash -Policy (New-LivePolicy -Labels @('External--Restricted-')) -TenantLabels $script:LiveLabels
+            $hash.labels | Should -HaveCount 1
+            $hash.labels[0] | Should -Be '00000000-0000-0000-0000-000000000021'
+        }
+
+        It 'uses the same slug formula the label create path writes' {
+            # Read the production constant instead of restating it: the slug
+            # this function guesses must match the one Deploy-Labels.ps1 sets
+            # as `Name` when it creates a label.
+            $createPath = Join-Path $PSScriptRoot '..' '..' 'scripts' 'Deploy-Labels.ps1'
+            $createText = Get-Content -LiteralPath $createPath -Raw
+            $createText | Should -Match "Name'\]\s*=\s*\(\`$Desired\.displayName\s*-replace\s*'\[\^A-Za-z0-9\]'"
+            $hashText = Get-Content -LiteralPath $script:ScriptPath -Raw
+            $hashText | Should -Match "-replace '\[\^A-Za-z0-9\]', '-'"
+            $hashText | Should -Not -Match "-replace '\[\\s\(\)\]', '-'"
+        }
+    }
+
+    Context 'Pure grouping parents are dropped from both sides' {
+
+        It 'drops a grouping parent the tenant publishes' {
+            # New-LabelPolicy rejects publishing 'Confidential' / 'Highly
+            # Confidential', so a tenant-side entry for one cannot be
+            # expressed in YAML and must not read as drift (2026-07-22).
+            $hash = ConvertTo-TenantPolicyHash -Policy (New-LivePolicy -Labels @(
+                    '00000000-0000-0000-0000-000000000001',
+                    '00000000-0000-0000-0000-000000000002',
+                    '00000000-0000-0000-0000-000000000011'
+                )) -TenantLabels $script:LiveLabels
+            $hash.labels | Should -HaveCount 1
+            $hash.labels[0] | Should -Be '00000000-0000-0000-0000-000000000011'
+        }
+
+        It 'keeps a childless top-level label that has a ContentType' {
+            $hash = ConvertTo-TenantPolicyHash -Policy (New-LivePolicy -Labels @('Pilot — General (Lab)')) -TenantLabels $script:LiveLabels
+            $hash.labels | Should -HaveCount 1
+            $hash.labels[0] | Should -Be '00000000-0000-0000-0000-000000000032'
+        }
+
+        It 'treats the tenant sentinel None as no content types at all' {
+            # THE defect that made the first cut of this filter a no-op
+            # against the live dev tenant: Get-Label does not return an
+            # empty ContentType for a grouping parent, it returns the
+            # literal string 'None' (issue #129, filtered the same way in
+            # Deploy-Labels.ps1). Treating 'None' as a real content type
+            # meant zero grouping parents were ever detected.
+            $grouping = Get-GroupingParentLabelGuid -Labels $script:LiveLabels
+            $grouping.Contains('00000000-0000-0000-0000-000000000001') | Should -BeTrue
+            $grouping.Contains('00000000-0000-0000-0000-000000000002') | Should -BeTrue
+            $grouping.Count | Should -Be 2
+        }
+
+        It 'ignores None when it is mixed into a real content-type list' {
+            $mixed = @(
+                [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000001'; DisplayName = 'Confidential'; ParentId = $null; ContentType = 'None, File' }
+                [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000011'; DisplayName = 'Internal';     ParentId = '00000000-0000-0000-0000-000000000001'; ContentType = 'File' }
+            )
+            (Get-GroupingParentLabelGuid -Labels $mixed).Count | Should -Be 0
+        }
+
+        It 'returns a set that still answers .Contains() when it is EMPTY' {
+            # Red-replay of the live failure on dev run 34771135830. A bare
+            # `return $hashSet` is ENUMERATED by PowerShell, so an empty set
+            # reaches the caller as $null and the desired-side
+            # `$groupingParents.Contains(...)` throws. `$null.Count` is 0,
+            # so asserting only on .Count cannot detect it -- assert the
+            # method call the production code actually makes.
+            $none = Get-GroupingParentLabelGuid -Labels @()
+            $none.GetType().Name | Should -BeLike 'HashSet*'
+            { $none.Contains('00000000-0000-0000-0000-000000000001') } | Should -Not -Throw
+            $none.Contains('00000000-0000-0000-0000-000000000001') | Should -BeFalse
+            $none.Count | Should -Be 0
+        }
+
+        It 'returns a set that answers .Contains() when NO label qualifies' {
+            # Same defect, reached through the other early exit: a non-empty
+            # label list in which nothing is a grouping parent.
+            $nonQualifying = @(
+                [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000051'; DisplayName = 'Solo'; ParentId = $null; ContentType = 'File' }
+            )
+            $result = Get-GroupingParentLabelGuid -Labels $nonQualifying
+            { $result.Contains('00000000-0000-0000-0000-000000000051') } | Should -Not -Throw
+            $result.Count | Should -Be 0
+        }
+
+        It 'requires positive evidence: no ContentType property means no filtering' {
+            # A label object that does not carry the property at all is not
+            # evidence of a grouping parent -- same no-evidence / contrary-
+            # evidence split the tenant-context guard draws (#242).
+            $minimal = @(
+                [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000001'; DisplayName = 'Confidential'; ParentId = $null }
+                [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000011'; DisplayName = 'Internal';     ParentId = '00000000-0000-0000-0000-000000000001' }
+            )
+            $grouping = Get-GroupingParentLabelGuid -Labels $minimal
+            $grouping.Contains('00000000-0000-0000-0000-000000000001') | Should -BeFalse
+            $grouping.Count | Should -Be 0
+        }
+
+        It 'does not treat a childless no-content-type label as a grouping parent' {
+            $orphan = @(
+                [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000041'; DisplayName = 'Lonely'; ParentId = $null; ContentType = 'None' }
+            )
+            $grouping = Get-GroupingParentLabelGuid -Labels $orphan
+            $grouping.Contains('00000000-0000-0000-0000-000000000041') | Should -BeFalse
+            $grouping.Count | Should -Be 0
+        }
+
+        It 'pins the production return against re-introducing the unrolled shape' {
+            $text = Get-Content -LiteralPath $script:ScriptPath -Raw
+            ([regex]::Matches($text, 'return\s*,\s*\$grouping')).Count | Should -Be 2
+            $text | Should -Not -Match '(?m)^\s*return \$grouping\s*$'
+        }
+
+        It 'flattens a multi-valued ContentType before testing it' {
+            $multi = @(
+                [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000001'; DisplayName = 'Confidential'; ParentId = $null; ContentType = @('File', 'Email') }
+                [pscustomobject]@{ Guid = '00000000-0000-0000-0000-000000000011'; DisplayName = 'Internal';     ParentId = '00000000-0000-0000-0000-000000000001'; ContentType = @('File') }
+            )
+            $grouping = Get-GroupingParentLabelGuid -Labels $multi
+            $grouping.Contains('00000000-0000-0000-0000-000000000001') | Should -BeFalse
+            $grouping.Count | Should -Be 0
+        }
+    }
+
+    Context 'The export emission loop writes composite keys, never a Name' {
+
+        It 'maps every GUID back to its displayName-based composite key' {
+            # ConvertTo-LabelCompositeKey is what the -ExportCurrentState
+            # block uses to translate the normalized GUID list back to YAML
+            # keys. Inverting ConvertTo-LabelGuidLookup instead (the pre-#299
+            # code) is many-to-one and can yield a slug.
+            $guidToKey = ConvertTo-LabelCompositeKey -Labels $script:LiveLabels
+            $guidToKey['00000000-0000-0000-0000-000000000031'] | Should -Be 'Pilot — Confidential A0 (Lab)'
+            $guidToKey['00000000-0000-0000-0000-000000000021'] | Should -Be 'Highly Confidential/External (Restricted)'
+            $guidToKey['00000000-0000-0000-0000-000000000011'] | Should -Be 'Confidential/Internal'
+        }
+
+        It 'round-trips a tenant policy to the keys the apply path resolves' {
+            # The whole point of #299: what the exporter writes must be what
+            # Resolve-DesiredLabelGuid can read back. Slugs are not.
+            $hash = ConvertTo-TenantPolicyHash -Policy (New-LivePolicy -Labels @(
+                    'Pilot---Confidential-A0--Lab-',
+                    'Pilot---General--Lab-'
+                )) -TenantLabels $script:LiveLabels
+            $guidToKey = ConvertTo-LabelCompositeKey -Labels $script:LiveLabels
+            $exported = @(@($hash.labels | Sort-Object) | ForEach-Object { $guidToKey[$_] } | Sort-Object)
+            $exported | Should -Be @('Pilot — Confidential A0 (Lab)', 'Pilot — General (Lab)')
+
+            $lookup = ConvertTo-LabelGuidLookup -Labels $script:LiveLabels
+            foreach ($key in $exported) { $lookup.ContainsKey($key) | Should -BeTrue }
+        }
+
+        It 'pins the export block to the direct composite-key helper' {
+            $text = Get-Content -LiteralPath $script:ScriptPath -Raw
+            $text | Should -Match 'ConvertTo-LabelCompositeKey -Labels \$allLabels'
+            $text | Should -Not -Match 'foreach \(\$k in \$byKey\.Keys\)'
+        }
+    }
+
+    Context 'Both sides of the comparison drop grouping parents' {
+
+        It 'filters the desired side in the Apply and Verify loops' {
+            # lab's committed file declares 'Confidential' and 'Highly
+            # Confidential'; dev's deliberately does not. An asymmetric
+            # filter would make lab drift forever.
+            $text = Get-Content -LiteralPath $script:ScriptPath -Raw
+            ([regex]::Matches($text, 'Get-GroupingParentLabelGuid -Labels \$tenantLabels')).Count |
+                Should -Be 2
+            ([regex]::Matches($text, '\$groupingParents\.Contains\(\[string\]\$g')).Count |
+                Should -Be 2
+        }
     }
 }

@@ -132,9 +132,26 @@ Describe 'drift-detection.yml preflight gate is wired correctly (ADR 0054 pilot,
         }
 
         It 'no longer throws on a missing KEY_VAULT_NAME in the Key Vault open step (folded into preflight)' {
-            $runText = Get-JobRunText -Job $script:DetectDrift -StepName 'Temporarily allow Key Vault public access'
-            $runText | Should -Not -BeNullOrEmpty
-            $runText | Should -Not -Match 'throw' -Because 'the misplaced throw guard (previously step 5, unreachable behind the azure/login failure) is removed -- the same signal is now checked once, in preflight, with the correct skip verb'
+            # Since #311 this step is the shared composite action rather than
+            # an inline script, so there is no `run:` text to inspect. The
+            # intent is unchanged and is asserted against whichever shape the
+            # step currently has: the misplaced throw guard (previously step 5,
+            # unreachable behind the azure/login failure) must not come back,
+            # because that signal is checked once, in preflight, with the
+            # correct skip verb.
+            $step = @($script:DetectDrift['steps']) |
+                Where-Object { [string]$_['name'] -eq 'Temporarily allow Key Vault public access' } |
+                Select-Object -First 1
+            $step | Should -Not -BeNullOrEmpty
+
+            if ($step.Contains('uses')) {
+                [string]$step['uses'] | Should -BeExactly './.github/actions/open-key-vault-firewall'
+                $actionPath = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path '.github' 'actions' 'open-key-vault-firewall' 'action.yml'
+                (Get-Content -LiteralPath $actionPath -Raw) | Should -Not -Match 'throw '
+            }
+            else {
+                [string]$step['run'] | Should -Not -Match 'throw'
+            }
         }
     }
 }

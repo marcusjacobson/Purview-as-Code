@@ -82,6 +82,27 @@ Operator downstream repositories (ADR 0057 §8) mirror upstream `main` and must 
 
 **Ruling:** upstream changes that establish or extend the multi-environment contract (including PRs like #123) should land on public `main` via **merge commit or rebase merge**, not squash merge, when operator repos are known consumers. Operator sync procedures should prefer `git merge --ff-only upstream/main` after upstream merges; if upstream used squash and histories diverged, `git merge upstream/main` still resolves content but operators should expect a merge commit. Document this in the operator runbook alongside the branch model in §8.
 
+
+**Extended 2026-09-07 — the same ruling governs `dev` → `lab` promotions.** A promotion is the
+identical shape one level down: `lab` mirrors `dev` for everything outside the per-tenant
+`data-plane/**` files, and must stay merge-compatible with it. Squash-merging a promotion gives
+`lab` the **content** of dev's commits but not their **ancestry**, so
+`git merge-base --is-ancestor origin/dev origin/lab` stays false and
+`git log origin/lab..origin/dev` reports every already-promoted commit as outstanding, forever.
+
+Measured directly after a squashed promotion on 2026-09-07: git reported **12 unpromoted commits**
+where the only real difference outside `data-plane/**` was a single regenerated `docs-regen`
+timestamp. The practical cost is not cosmetic — with the ancestry broken, a promotion can no longer
+be a plain `git merge origin/dev` (which would conflict only on the per-tenant files, exactly where
+a deliberate decision is wanted). It degrades into abort-verify-cherry-pick, done three times that
+day, and that manual reconstruction is precisely where a file gets missed.
+
+**Ruling:** `dev` → `lab` promotion PRs land as a **merge commit**, never squashed.
+[`pr-auto-merge.yml`](../../.github/workflows/pr-auto-merge.yml) selects this automatically from the
+`promote/` branch prefix — deliberately *not* from the `merge-commit` label, because a rule that
+depends on remembering to apply a label is a rule that gets forgotten. The label remains the opt-in
+for any other shared-history PR. Feature PRs stay squashed: one tidy commit each is right for them,
+and they carry no downstream mirror.
 ### 8. The operator branch model; `validate` runs on `main`, `dev`, and `lab`; ADR 0056 is enforced for `main`
 
 The downstream operator repository uses: `main` (upstream mirror — empty desired state, template-shaped), `dev` and `lab` (operator branches — populated desired state), with `lab` as the default branch so scheduled workflows run there. Deployment branch policies on each Environment pin `lab` → branch `lab` and `dev` → branch `dev` ([Deployment branch policies](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments#deployment-branches-and-tags)), so even a mis-routed expression cannot deploy a branch into the wrong environment — the Environment refuses the deployment before a token is minted.

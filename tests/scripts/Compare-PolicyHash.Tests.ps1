@@ -1,4 +1,4 @@
-#Requires -Version 7.4
+﻿#Requires -Version 7.4
 #Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.5.0' }
 <#
 .SYNOPSIS
@@ -43,7 +43,7 @@ BeforeAll {
     $ast = [System.Management.Automation.Language.Parser]::ParseFile(
         $script:ScriptPath, [ref]$tokens, [ref]$errors)
 
-    foreach ($fname in @('ConvertTo-PolicyHash', 'ConvertTo-TenantPolicyHash', 'Compare-PolicyHash')) {
+    foreach ($fname in @('ConvertTo-PolicyHash', 'ConvertTo-TenantPolicyHash', 'Compare-PolicyHash', 'Get-GroupingParentLabelGuid')) {
         $fnAst = $ast.Find({
                 param($node)
                 $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and

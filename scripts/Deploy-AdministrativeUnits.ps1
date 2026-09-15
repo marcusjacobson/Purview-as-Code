@@ -106,6 +106,13 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$Path = (Join-Path $PSScriptRoot '..\data-plane\administrative-units\administrative-units.yaml'),
 
+    # Issue #235: supplies the declared environment this script's az context
+    # is checked against. Resolved in the body (explicit argument, then
+    # $env:PURVIEW_PARAMETERS_FILE, then infra/parameters/lab.yaml) so the
+    # env-var override works the same way it does on every other reconciler.
+    [Parameter()]
+    [string]$ParametersFile,
+
     [switch]$PruneMissing,
 
     [switch]$AllowMajorityPrune,
@@ -141,6 +148,11 @@ Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
 # classifying every live tenant object as an orphan. Shared with the other
 # Deploy-*.ps1 reconcilers that implement -PruneMissing.
 Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+
+# In-repo az-context / tenant-match guard (issue #235). See the call site
+# below for why this reconciler needs it more than most.
+Import-Module (Join-Path $PSScriptRoot 'modules/TenantContextGuard.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 # ---------------------------------------------------------------------------
@@ -200,6 +212,56 @@ if ($PruneMissing.IsPresent) {
         -SourcePath     $Path `
         -CollectionKey  'administrativeUnits'
 }
+
+# --- az context / tenant-match guard (issue #235; the #41 incident) ---
+#
+# This reconciler talks to https://graph.microsoft.com/v1.0, a GLOBAL,
+# tenant-agnostic endpoint. Nothing in the URL names a tenant, so the
+# acquired token's tenant is the ONLY thing deciding which directory is
+# read, created in, and -- under -PruneMissing -- DELETED from. A stale az
+# session therefore reconciles the wrong tenant silently. That is the #41
+# incident, with a delete path attached.
+#
+# -ParametersFile exists on this script solely to close that gap (added
+# under #235): before it, nothing here declared which tenant the run was
+# meant for, so there was no value for the guard to compare against. It
+# resolves the same way as on every other reconciler -- explicit argument,
+# then $env:PURVIEW_PARAMETERS_FILE, then the lab.yaml default -- per the
+# ADR 0012 contract.
+#
+# Placed immediately before the token acquisition below, this script's
+# first tenant contact, and after the #13 prune guard so a destructive run
+# still refuses on an empty desired set before either check reaches out.
+# Reference: docs/adr/0012-environment-parameters-file.md
+# Reference: https://learn.microsoft.com/en-us/cli/azure/account#az-account-show
+if (-not $ParametersFile) {
+    $ParametersFile = if ($env:PURVIEW_PARAMETERS_FILE) {
+        $env:PURVIEW_PARAMETERS_FILE
+    } else {
+        Join-Path $PSScriptRoot '..\infra\parameters\lab.yaml'
+    }
+}
+if (-not (Test-Path -LiteralPath $ParametersFile)) {
+    throw ("Parameters file not found: '{0}'." -f $ParametersFile)
+}
+$ParametersFile = (Resolve-Path -LiteralPath $ParametersFile).Path
+$parameters = Get-Content -LiteralPath $ParametersFile -Raw | ConvertFrom-Yaml
+if (-not $parameters) {
+    throw ("Parameters file '{0}' parsed as empty or null." -f $ParametersFile)
+}
+$expectedTenantDomain = [string]$parameters.automation.tenantDomain
+if (-not $expectedTenantDomain) {
+    throw ("Parameters file '{0}' is missing required key 'automation.tenantDomain'. Reference: docs/adr/0012-environment-parameters-file.md." -f $ParametersFile)
+}
+$accountJson = az account show -o json --only-show-errors 2>$null
+if (-not $accountJson) {
+    throw 'No active Azure CLI session. Run az login before invoking this script.'
+}
+$account = ($accountJson -join "`n") | ConvertFrom-Json
+Assert-TenantContextMatchesParametersFile -Account $account -ExpectedDomain $expectedTenantDomain `
+    -EnvironmentName $parameters.environment -ParametersFile $ParametersFile
+Write-Information ("Parameters file : {0}" -f $ParametersFile) -InformationAction Continue
+Write-Information ("Subscription    : {0}" -f $account.name) -InformationAction Continue
 
 $graphBase = 'https://graph.microsoft.com/v1.0'
 $token     = Get-GraphToken

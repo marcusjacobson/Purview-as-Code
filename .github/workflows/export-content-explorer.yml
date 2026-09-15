@@ -89,13 +89,16 @@ jobs:
         shell: pwsh
         run: |
           if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
-            Write-Host "::notice::secrets.AZURE_CLIENT_ID is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Write-Host "::warning::secrets.AZURE_CLIENT_ID is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## NOT VERIFIED -- the tenant was not contacted`n`nThis run skipped its tenant-touching job, so it checked nothing. A green tick here means the run completed, **not** that the tenant matches this repository. See issue #245."
           } elseif ($env:EVENT_NAME -eq 'schedule' -and $env:CI_DATA_PLANE_ENABLED -eq 'false') {
-            Write-Host "::notice::vars.CI_DATA_PLANE_ENABLED is 'false' on this GitHub Environment (ADR 0060) -- skipping this scheduled tenant-touching run. Trigger workflow_dispatch manually to run anyway."
+            Write-Host "::warning::vars.CI_DATA_PLANE_ENABLED is 'false' on this GitHub Environment (ADR 0060) -- skipping this scheduled tenant-touching run. Trigger workflow_dispatch manually to run anyway."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## NOT VERIFIED -- the tenant was not contacted`n`nThis run skipped its tenant-touching job, so it checked nothing. A green tick here means the run completed, **not** that the tenant matches this repository. See issue #245."
           } else {
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=true"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Tenant-touching job will run`n`nPreflight passed, so this run contacts the tenant. Whether it verified clean is reported by that job, not here."
           }
 
   export:
