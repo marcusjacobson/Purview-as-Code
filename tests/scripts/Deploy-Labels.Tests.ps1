@@ -824,21 +824,13 @@ Describe 'The redacted export emits rightsDefinitions in a canonical order (#225
         $script:ExportSortLine | Should -Match 'Sort-Object Identity, Rights' -Because 'after redaction Identity alone is an all-ties key, so it cannot define the canonical order the tracked file must match'
     }
 
-    It 'every tracked label lists its rightsDefinitions in that same order' {
-        $checked = 0
-        foreach ($label in $script:TrackedLabels) {
-            $rights = @($label.encryption.rightsDefinitions)
-            if ($rights.Count -lt 2) { continue }
-            $checked++
-            $actual = @($rights | ForEach-Object { '{0}|{1}' -f $_.Identity, $_.Rights })
-            $expected = @($rights | Sort-Object Identity, Rights | ForEach-Object { '{0}|{1}' -f $_.Identity, $_.Rights })
-            # -SyncWindow 0 catches a reordering; without it two lists holding
-            # the same entries in a different order compare equal.
-            $diff = Compare-Object -ReferenceObject $actual -DifferenceObject $expected -SyncWindow 0
-            $diff | Should -BeNullOrEmpty -Because ("label '{0}' lists its rights entries out of canonical order, so a re-export would open a drift-back PR whose diff is a pure reordering" -f $label.displayName)
-        }
-        $checked | Should -BeGreaterThan 0 -Because 'a file with no multi-entry rightsDefinitions would satisfy this vacuously'
-    }
+    # NOTE: the operations repo also asserts here that every tracked label in
+    # data-plane/information-protection/labels.yaml lists its rightsDefinitions
+    # in this same canonical order. That case does not port: this template ships
+    # data-plane/**/*.yaml EMPTY by ADR 0056, so it has no populated desired
+    # state to read and fails its own non-vacuity guard rather than passing
+    # quietly. The ordering CONTRACT is covered by the two cases around it,
+    # which exercise the comparator directly and need no tenant data.
 
     It 'the secondary key is what orders a fully-redacted pair (red-replay of the exact defect)' {
         # Data-independent regression anchor, using the two real Rights
