@@ -799,6 +799,8 @@ Import-Module 'powershell-yaml' -ErrorAction Stop
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules/TenantContextGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
 
 # In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
 # refusal, which prevents a prune against a zero-entry desired state from
@@ -894,6 +896,20 @@ if (-not $accountJson) {
 }
 $account = ($accountJson -join "`n") | ConvertFrom-Json
 $deployIdentity = [string]$account.user.name
+# --- az context / tenant-match guard (issue #235; the #41 incident) ---
+# This reconciler's endpoint is tenant-scoped: Connect-Purview.ps1 builds
+# https://<purviewAccountName>.purview.azure.com from the parameters file, so a
+# wrong az context already fails CLOSED with a 401 rather than writing to the
+# wrong tenant. The guard is still worth its two lines: it converts that opaque
+# 401 -- which reads like a permissions or certificate problem -- into a named
+# tenant mismatch, before any tenant contact.
+$expectedTenantDomain = [string]$parameters.automation.tenantDomain
+if (-not $expectedTenantDomain) {
+    Write-Error ("Parameters file '{0}' is missing required key 'automation.tenantDomain'. Reference: docs/adr/0012-environment-parameters-file.md." -f $ParametersFile)
+    return
+}
+Assert-TenantContextMatchesParametersFile -Account $account -ExpectedDomain $expectedTenantDomain `
+    -EnvironmentName $parameters.environment -ParametersFile $ParametersFile
 Write-Information ("Subscription    : {0}" -f $account.name) -InformationAction Continue
 
 $connectScript = Join-Path $scriptRoot 'Connect-Purview.ps1'

@@ -13,7 +13,15 @@
          pre-refactor inline logic to prove the extraction changed
          nothing (Non-vacuity pattern used across this repo's workflow
          suites).
-      2. WORKFLOW PARITY -- the three sync-<domain>-from-tenant.yml
+      2. ARRAY INPUT (issue #224) -- every real caller invokes this
+         module with `$diff = git diff -U0 -- $path`, which PowerShell
+         captures as a line-per-element array, not a single string. A
+         `[string]` parameter throws on that input under strict
+         argument-transformation, latent until a surface actually had a
+         multi-line diff to pass. A red-replay against a pinned pre-fix
+         `[string]`-typed fixture proves the fixture reproduces the real
+         defect before asserting the shipped function no longer has it.
+      3. WORKFLOW PARITY -- the three sync-<domain>-from-tenant.yml
          workflows that carry this filter step import the module and
          call Test-ExportDiffMeaningful, rather than each re-implementing
          the regex inline; their run blocks are identical modulo the
@@ -22,6 +30,7 @@
 
     Reference: https://pester.dev/docs/quick-start
     Reference: issue #508
+    Reference: issue #224
 #>
 
 BeforeAll {
@@ -216,6 +225,70 @@ Describe 'Non-vacuity -- the module agrees with the pre-refactor inline logic (r
             $module = Test-ExportDiffMeaningful -DiffText $fixture
             $module | Should -Be $legacy -Because "module and pre-refactor logic must agree on: $fixture"
         }
+    }
+}
+
+Describe 'Array input (issue #224) -- every real caller passes what git diff actually returns' {
+    BeforeAll {
+        # Pre-fix signature, verbatim: [string]$DiffText, otherwise byte-for-byte
+        # the shipped Test-ExportDiffMeaningful body before issue #224. Kept as a
+        # *function* (not a scriptblock invoked with &), so PowerShell's own
+        # parameter binder performs the argument-transformation that actually
+        # throws -- calling a scriptblock directly does not reproduce it.
+        function Test-PreFix224DiffMeaningful {
+            [CmdletBinding()]
+            param(
+                [Parameter()][AllowNull()][AllowEmptyString()][string]$DiffText
+            )
+            if ([string]::IsNullOrEmpty($DiffText)) { return $false }
+            foreach ($line in ($DiffText -split "`n")) {
+                if ($line -notmatch '^[-+]') { continue }
+                if ($line -match '^(---|\+\+\+)') { continue }
+                $payload = $line.Substring(1)
+                if ($payload -match '^\s*$') { continue }
+                if ($payload -match '^\s*#') { continue }
+                return $true
+            }
+            return $false
+        }
+    }
+
+    It 'red-replay: the pre-fix [string] signature throws on array input (proves the fixture reproduces the real defect)' {
+        $arrayDiff = @('--- a/x.yaml', '+++ b/x.yaml', '+    mode: Enable', '-    mode: TestWithoutNotifications')
+        { Test-PreFix224DiffMeaningful -DiffText $arrayDiff } |
+            Should -Throw -Because 'this is the exact "Cannot process argument transformation" defect issue #224 reports'
+    }
+
+    It 'Test-ExportDiffMeaningful accepts the array git diff actually returns, and classifies it correctly' {
+        $arrayDiff = @('--- a/x.yaml', '+++ b/x.yaml', '+    mode: Enable', '-    mode: TestWithoutNotifications')
+        Test-ExportDiffMeaningful -DiffText $arrayDiff | Should -BeTrue
+    }
+
+    It 'Test-ExportDiffMeaningful accepts an array whose lines are only cosmetic' {
+        $arrayDiff = @('--- a/x.yaml', '+++ b/x.yaml', '+# comment', '+')
+        Test-ExportDiffMeaningful -DiffText $arrayDiff | Should -BeFalse
+    }
+
+    It 'Test-ExportDiffMeaningful accepts an empty array' {
+        Test-ExportDiffMeaningful -DiffText @() | Should -BeFalse
+    }
+
+    It 'Get-ExportDiffSummary accepts array input and agrees with the equivalent joined string' {
+        $arrayDiff = @('--- a/x.yaml', '+++ b/x.yaml', '+    mode: Enable', '-    mode: TestWithoutNotifications')
+        $stringDiff = $arrayDiff -join "`n"
+        $fromArray = Get-ExportDiffSummary -DiffText $arrayDiff
+        $fromString = Get-ExportDiffSummary -DiffText $stringDiff
+        $fromArray.AddedLines | Should -Be $fromString.AddedLines
+        $fromArray.RemovedLines | Should -Be $fromString.RemovedLines
+        $fromArray.MeaningfulLines | Should -Be $fromString.MeaningfulLines
+        $fromArray.CosmeticOnly | Should -Be $fromString.CosmeticOnly
+    }
+
+    It 'array input still agrees with the pre-refactor inline logic (extends the existing red-replay to the array shape)' {
+        $arrayDiff = @('--- a/x.yaml', '+++ b/x.yaml', '+# comment', '+    mode: Enable')
+        $legacy = Test-LegacyDiffMeaningful -DiffText ($arrayDiff -join "`n")
+        $module = Test-ExportDiffMeaningful -DiffText $arrayDiff
+        $module | Should -Be $legacy
     }
 }
 

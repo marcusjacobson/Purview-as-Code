@@ -17,7 +17,11 @@
 
     Coverage:
       1. Get-ExpectedEnvironmentForBranch -- ADR 0057's branch mapping.
-      2. Test-TenantDomainMatch -- the #41-incident tenant-match guard.
+      2. The #41-incident tenant-match guard itself lives in
+         scripts/modules/TenantContextGuard.psm1 (issue #215) and is
+         tested there, not here -- this file's static-source checks below
+         assert this script imports that module and no longer carries its
+         own copy of Test-TenantDomainMatch.
       3. ConvertFrom-DlpInformationCount -- parses Deploy-DLPPolicies.ps1's
          three count lines out of a captured -InformationVariable.
       4. ConvertTo-DlpAuditRecord -- the JSON audit-record shape, including
@@ -60,8 +64,8 @@ BeforeAll {
 
     foreach ($fname in @(
             'Get-ExpectedEnvironmentForBranch',
-            'Test-TenantDomainMatch',
             'ConvertFrom-DlpInformationCount',
+            'Get-DesiredPolicyCountFromYaml',
             'ConvertTo-DlpAuditRecord',
             'ConvertFrom-GitRemoteUrl',
             'Invoke-ChildProcess')) {
@@ -100,52 +104,6 @@ Describe 'Get-ExpectedEnvironmentForBranch' {
     }
     It 'maps an arbitrary feature branch -> lab' {
         Get-ExpectedEnvironmentForBranch -Branch 'fix/some-thing' | Should -Be 'lab'
-    }
-}
-
-Describe 'Test-TenantDomainMatch' {
-    BeforeAll {
-        # Synthetic tenant IDs (reserved 00000000-0000-0000-0000-<counter>
-        # namespace, ADR 0055) and .example domains (RFC 2606) -- never
-        # real tenant identifiers, per the ADR 0055 residue scan.
-        $script:LabTenantId = '00000000-0000-0000-0000-000000000001'
-        $script:DevTenantId = '00000000-0000-0000-0000-000000000002'
-        $script:Tenants = @(
-            [pscustomobject]@{
-                tenantId       = $script:LabTenantId
-                defaultDomain  = 'contoso-lab.example'
-                domains        = @('contosolab.onmicrosoft.example', 'contoso-lab.example')
-            },
-            [pscustomobject]@{
-                tenantId       = $script:DevTenantId
-                defaultDomain  = 'contoso-dev.example'
-                domains        = @('contosodev.onmicrosoft.example', 'contoso-dev.example')
-            }
-        )
-    }
-
-    It 'matches on defaultDomain' {
-        Test-TenantDomainMatch -Tenants $script:Tenants -CurrentTenantId $script:LabTenantId -ExpectedDomain 'contoso-lab.example' | Should -BeTrue
-    }
-
-    It 'matches on a domains[] entry that is not the default' {
-        Test-TenantDomainMatch -Tenants $script:Tenants -CurrentTenantId $script:LabTenantId -ExpectedDomain 'contosolab.onmicrosoft.example' | Should -BeTrue
-    }
-
-    It 'matches case-insensitively' {
-        Test-TenantDomainMatch -Tenants $script:Tenants -CurrentTenantId $script:LabTenantId.ToUpper() -ExpectedDomain 'CONTOSO-LAB.EXAMPLE' | Should -BeTrue
-    }
-
-    It 'returns $false when the tenant matches but the domain does not (wrong tenant, the #41 trap)' {
-        Test-TenantDomainMatch -Tenants $script:Tenants -CurrentTenantId $script:DevTenantId -ExpectedDomain 'contoso-lab.example' | Should -BeFalse
-    }
-
-    It 'returns $false when the current tenant ID is absent from the list' {
-        Test-TenantDomainMatch -Tenants $script:Tenants -CurrentTenantId '00000000-0000-0000-0000-000000000000' -ExpectedDomain 'contoso-lab.example' | Should -BeFalse
-    }
-
-    It 'returns $false for an empty tenants list' {
-        Test-TenantDomainMatch -Tenants @() -CurrentTenantId $script:LabTenantId -ExpectedDomain 'contoso-lab.example' | Should -BeFalse
     }
 }
 
@@ -346,6 +304,12 @@ Describe 'Static-source checks' {
         $script:ScriptSource | Should -Match 'ExportDiffFilter\.psm1'
     }
 
+    It 'imports TenantContextGuard.psm1, and no longer carries its own Test-TenantDomainMatch (issue #215)' {
+        $script:ScriptSource | Should -Match 'TenantContextGuard\.psm1'
+        $script:ScriptSource | Should -Not -Match 'function Test-TenantDomainMatch' -Because 'this used to be a byte-identical copy shared with Invoke-LocalIrmDriftSync.ps1; both now import the shared module instead'
+        $script:ScriptSource | Should -Match 'Assert-TenantContextMatchesParametersFile'
+    }
+
     It 'uses git worktree rather than switching the operator''s own checkout' {
         # git calls go through Invoke-ChildProcess with -ArgumentList as
         # an array literal (e.g. @('-C', $repoRoot, 'worktree', 'add', ...)),
@@ -369,8 +333,150 @@ Describe 'Static-source checks' {
     It 'never calls Connect-IPPSSession directly (delegates auth to Deploy-DLPPolicies.ps1)' {
         $script:ScriptSource | Should -Not -Match 'Connect-IPPSSession'
     }
+}
 
-    It 'pins the ARM tenants API version literal' {
-        $script:ScriptSource | Should -Match 'tenants\?api-version=2022-12-01'
+Describe 'Get-DesiredPolicyCountFromYaml (issue #258)' {
+    # A SYNC run drives Deploy-DlpPolicies.ps1 with -ExportCurrentState,
+    # whose desired-state load region is guarded `if ($mode -eq 'Apply')`.
+    # So "Desired policies: N" is never emitted on a sync run's success
+    # path, and the audit record used to ship counts.desiredPolicies =
+    # null -- which site/app.js renders as "Desired: --" for every
+    # drifted surface. This helper is where the count now comes from.
+
+    It 'counts the entries of a well-formed desired-state document' {
+        $yaml = @'
+policies:
+  - name: alpha
+    enabled: false
+  - name: beta
+    enabled: true
+  - name: gamma
+    enabled: true
+'@
+        Get-DesiredPolicyCountFromYaml -YamlText $yaml | Should -Be 3
+    }
+
+    It 'ignores comment headers, which every committed file carries' {
+        $yaml = @'
+# ----------------------------------------------------------------
+# A long explanatory header, as shipped on every data-plane file.
+# ----------------------------------------------------------------
+policies:
+  - name: only-one
+    enabled: false
+'@
+        Get-DesiredPolicyCountFromYaml -YamlText $yaml | Should -Be 1
+    }
+
+    It 'returns 0 for an explicitly empty policy list' {
+        Get-DesiredPolicyCountFromYaml -YamlText "policies: []`n" | Should -Be 0
+    }
+
+    It 'returns 0, not 1, for a null policies key (the @($null).Count trap)' {
+        # @($null).Count is 1 in PowerShell, so a naive implementation
+        # reports one desired policy for a document that declares none.
+        Get-DesiredPolicyCountFromYaml -YamlText "policies:`n" | Should -Be 0
+    }
+
+    It 'returns 0 for a document with no policies key at all' {
+        Get-DesiredPolicyCountFromYaml -YamlText "entityLists: []`n" | Should -Be 0
+    }
+
+    It 'returns 0 rather than throwing on empty, whitespace, or null input' {
+        Get-DesiredPolicyCountFromYaml -YamlText '' | Should -Be 0
+        Get-DesiredPolicyCountFromYaml -YamlText "   `n  " | Should -Be 0
+        Get-DesiredPolicyCountFromYaml -YamlText $null | Should -Be 0
+    }
+
+    It 'returns 0 rather than throwing on a document that does not parse' {
+        # This feeds a reporting field. A desired-state file this broken
+        # fails the reconciler with a far better message than this helper
+        # could give, so it must not be the thing that raises.
+        { Get-DesiredPolicyCountFromYaml -YamlText "policies:`n  - name: [unclosed`n" } | Should -Not -Throw
+    }
+
+    It 'exactly one entry is a real count, not a truthiness test' {
+        Get-DesiredPolicyCountFromYaml -YamlText "policies:`n  - name: solo`n" | Should -Be 1
+    }
+}
+
+Describe 'the sync-mode desired count is wired in (red-replay for issue #258)' {
+    It 'ConvertFrom-DlpInformationCount really does return $null on a sync run''s captured stream' {
+        # The defect, reproduced directly: this is the information stream
+        # a real -ExportCurrentState run emits -- note there is no
+        # "Desired policies:" line in it at all. Without this assertion
+        # the fallback below could be dead code and the suite would not
+        # notice.
+        $syncStream = @(
+            'Mode            : Export'
+            'Environment     : lab'
+            'az context OK: contoso-lab.cloud -> example.onmicrosoft.com'
+            'Tenant policies : 8'
+        )
+        $counts = ConvertFrom-DlpInformationCount -Lines $syncStream
+        $counts.DesiredPolicies | Should -BeNullOrEmpty
+        $counts.TenantPolicies | Should -Be 8
+    }
+
+    It 'the script takes the count BEFORE the export overwrites the file' {
+        # Ordering is the whole fix: read it after the export and the
+        # number is the tenant's, not the repo's, and the record silently
+        # stops meaning what it says.
+        $capture = [regex]::Match($script:ScriptSource, '(?s)\$desiredCountBeforeExport = Get-DesiredPolicyCountFromYaml.*?
+?
+')
+        $capture.Success | Should -BeTrue
+        $exportCall = $script:ScriptSource.IndexOf('-ExportCurrentState -Force -Confirm:$false -Path $yamlPath')
+        $exportCall | Should -BeGreaterThan 0
+        $capture.Index | Should -BeLessThan $exportCall
+    }
+
+    It 'the fallback only fires when the reconciler supplied no count' {
+        $script:ScriptSource | Should -Match '\$null -eq \$counts\.DesiredPolicies\) \{ \$counts\.DesiredPolicies = \$desiredCountBeforeExport \}'
+    }
+}
+
+Describe 'The drift-back push survives a stale remote-tracking ref (issue #279)' {
+    # --force-with-lease takes its expected value from
+    # refs/remotes/<remote>/<syncBranch>. This runbook's own workflow deletes
+    # that branch from the remote once the drift-back PR is closed, and a plain
+    # `git fetch` never prunes the now-stale tracking ref -- so run N+1 on the
+    # same workstation died with `! [rejected] ... (stale info)` AFTER
+    # detecting the drift and making the commit. Deterministic, not flaky.
+
+    It 'prunes the sync branch''s tracking ref immediately before pushing' {
+        $script:ScriptSource | Should -Match "'fetch', '--prune'"
+        $prune = $script:ScriptSource.IndexOf("'fetch', '--prune'")
+        $push  = $script:ScriptSource.IndexOf("'push', '--force-with-lease'")
+        $prune | Should -BeGreaterThan 0
+        $push  | Should -BeGreaterThan 0
+        $prune | Should -BeLessThan $push
+    }
+
+    It 'uses a WILDCARD refspec, because an exact one is fatal when the branch is gone' {
+        # `git fetch --prune origin +refs/heads/b:refs/remotes/origin/b` fails
+        # with "couldn't find remote ref" and prunes nothing when the branch is
+        # absent remotely -- which is exactly the case this fixes. Only a
+        # wildcard pattern prunes. Verified empirically before shipping.
+        $script:ScriptSource | Should -Match '\+refs/heads/\$SyncBranch\*:refs/remotes/\$Remote/\$SyncBranch\*'
+    }
+
+    It 'anchors the wildcard to the sync branch, so other auto/* refs are untouched' {
+        $script:ScriptSource | Should -Not -Match '\+refs/heads/auto/\*'
+    }
+
+    It 'KEEPS the lease rather than reaching for --force' {
+        # The branch is force-pushed; the lease is what stops a concurrent
+        # update -- another operator's run, or a reviewer's commit on the PR --
+        # from being silently overwritten. Dropping it would fix the symptom by
+        # deleting the safety property.
+        $script:ScriptSource | Should -Match "'push', '--force-with-lease'"
+        $script:ScriptSource | Should -Not -Match "'push', '--force'"
+    }
+
+    It 'prunes in the REPO, not the throwaway worktree' {
+        # The stale ref lives in the operator's own clone; pruning inside the
+        # temporary worktree would fix nothing that outlives the run.
+        $script:ScriptSource | Should -Match "'-C', \`$repoRoot, 'fetch', '--prune'"
     }
 }

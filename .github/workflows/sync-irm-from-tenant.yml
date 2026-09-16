@@ -7,18 +7,58 @@ name: sync-irm-from-tenant
 # target tenant (selected environment) and opens (or refreshes) a GitHub
 # ISSUE describing the drift.
 #
-# Tier-3 surface -- ISSUE, not PR. Unlike the sensitivity-label,
-# auto-label, and DLP surfaces, scripts/Deploy-IRMPolicies.ps1 exposes
-# NO -ExportCurrentState and NO -VerifyPublished switch, so this
-# workflow cannot round-trip tenant state back into
-# data-plane/irm/policies.yaml as a re-export pull request. Instead it
-# runs the reconciler in read-only ADR 0029 audit mode and opens a
-# GitHub issue so a human decides how to reconcile (accept into YAML,
-# overwrite the portal via deploy-irm.yml repo-wins, or ratify via an
-# ADR). This is the reverse leg the companion-workflow rule in
+# ISSUE, not PR -- and no longer because the reconciler cannot export.
+# This workflow was built when IRM was a Tier-3 (export-incapable)
+# surface. That is no longer true: scripts/Deploy-IRMPolicies.ps1 gained
+# -ExportCurrentState under issue #177, and deploy-irm.yml gained the
+# full two-pass portal-wins enumerate plus a drift-back PR job, so IRM
+# left the validate.yml full-circle exempt list.
+#
+# This reverse leg deliberately still opens an ISSUE, and the reason has
+# changed since it was written. The original blocker was the ADR 0036
+# skip baseline: the four operator-authored `IRM Lab — *` policies were
+# ratified as permanently skipped and were absent from
+# data-plane/irm/policies.yaml, so an export-and-diff would have proposed
+# ADDING all four every single day, defeating the baseline's purpose.
+# That blocker is GONE -- the #177 scope decision codified all four (they
+# now read NoChange, which makes the post-filter below inert for them).
+#
+# What keeps this leg issue-based now is that it is no longer the only
+# producer on this surface, and a schedule is the worst of the three to
+# let write YAML:
+#   * deploy-irm.yml opens a drift-back PR on
+#     auto/irm-portal-wins-drift-<env> whenever its portal-wins apply
+#     skips something -- push- or dispatch-triggered, so a human already
+#     caused it.
+#   * scripts/Invoke-LocalIrmDriftSync.ps1 opens one on
+#     auto/irm-drift-sync-<env> for a governance-locked tenant no
+#     workflow can reach -- operator-run, so a human is present.
+#   * this workflow fires unattended on a daily cron. A third producer
+#     racing the other two for the same file, with nobody watching, buys
+#     no coverage the other two lack.
+#
+# One asymmetry survives and would have to be handled by any future
+# conversion: this job post-filters the ADR 0036 baseline out of the
+# drift rows, whereas the exporter captures every tenant policy except
+# IRM_Tenant_Setting_*. An export-and-diff would need to re-apply that
+# filter to the exported YAML before diffing, or it would propose changes
+# this job deliberately ignores.
+#
+# So this workflow runs the reconciler in read-only ADR 0029 audit mode,
+# post-filters the baseline out, and opens a GitHub issue so a human
+# decides how to reconcile (accept into YAML, overwrite the portal via
+# deploy-irm.yml repo-wins, ratify via an ADR, or let one of the two
+# PR-opening producers above carry it).
+#
+# This is the reverse leg the companion-workflow rule in
 # .github/instructions/github-actions.instructions.md requires; the
 # forward apply leg is deploy-irm.yml, which owns this surface and
 # nothing else and is gated by its own ADR 0029 contract.
+#
+# Note the drift-back branches never collide: deploy-irm.yml's push-time
+# job uses auto/irm-portal-wins-drift-<env>, Invoke-LocalIrmDriftSync.ps1
+# uses auto/irm-drift-sync-<env>, and any future PR shape here would use
+# a third name, so no two mechanisms can fight over one branch.
 #
 # Why not the generic drift-detection.yml: that workflow greps a
 # "Plan: N adds/updates/removes" banner these compliance-plane
@@ -44,9 +84,11 @@ name: sync-irm-from-tenant
 # baseline names from the returned object rows after the fact. The
 # baseline default mirrors the `skip_names_irm` default in
 # deploy-irm.yml verbatim -- a TWO-way byte-lockstep, reduced from
-# three-way when ADR 0051 retired deploy-data-plane.yml (1
-# Microsoft-managed IRM_Tenant_Setting_* policy + 4 operator-authored
-# mid-testing policies; docs/adr/0036-irm-tenant-setting-immovable.md).
+# three-way when ADR 0051 retired deploy-data-plane.yml (the 4
+# operator-authored mid-testing policies; the system-managed
+# IRM_Tenant_Setting_* container was dropped from the baseline as
+# redundant on 2026-07-12, see
+# docs/adr/0036-irm-tenant-setting-immovable.md).
 #
 # Self-provisioned issue labels: `gh issue create --label <name>`
 # fails the entire call (and creates nothing) if any referenced label
@@ -81,6 +123,19 @@ name: sync-irm-from-tenant
 #   https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability
 #   https://cli.github.com/manual/gh_issue_create
 #   https://cli.github.com/manual/gh_label_create
+#
+# This is IRM's slice of issue #167, which tracks the same gap across the
+# four sibling sync-from-tenant workflows. sync-dlp-from-tenant.yml got the
+# first one under #164; the remaining three (labels, label-policies,
+# auto-label-policies) stay on #167.
+#
+# Trade-off, accepted deliberately and identical to the DLP leg: the
+# dispatched run's own preflight still applies ADR 0054's onboarding-signal
+# check, but NOT ADR 0060's CI_DATA_PLANE_ENABLED gate, because that gate is
+# defined to apply only to the `schedule` event and the dispatched run's
+# event is `workflow_dispatch`. This matches how an operator's manual
+# dispatch has always behaved: a governance lock fails the dispatched run
+# loudly rather than skipping silently a second time.
 #
 # Skip gate (ADR 0054): this schedule-triggered workflow fires on every
 # un-onboarded template copy, including this repository itself, and
@@ -187,16 +242,20 @@ jobs:
         shell: pwsh
         run: |
           if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
-            Write-Host "::notice::secrets.AZURE_CLIENT_ID is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Write-Host "::warning::secrets.AZURE_CLIENT_ID is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## NOT VERIFIED -- the tenant was not contacted`n`nThis run skipped its tenant-touching job, so it checked nothing. A green tick here means the run completed, **not** that the tenant matches this repository. See issue #245."
           } elseif ([string]::IsNullOrEmpty($env:KEY_VAULT_NAME)) {
-            Write-Host "::notice::vars.KEY_VAULT_NAME is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Write-Host "::warning::vars.KEY_VAULT_NAME is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## NOT VERIFIED -- the tenant was not contacted`n`nThis run skipped its tenant-touching job, so it checked nothing. A green tick here means the run completed, **not** that the tenant matches this repository. See issue #245."
           } elseif ($env:EVENT_NAME -eq 'schedule' -and $env:CI_DATA_PLANE_ENABLED -eq 'false') {
-            Write-Host "::notice::vars.CI_DATA_PLANE_ENABLED is 'false' on this GitHub Environment (ADR 0060) -- skipping this scheduled tenant-touching run. Trigger workflow_dispatch manually to run anyway."
+            Write-Host "::warning::vars.CI_DATA_PLANE_ENABLED is 'false' on this GitHub Environment (ADR 0060) -- skipping this scheduled tenant-touching run. Trigger workflow_dispatch manually to run anyway."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## NOT VERIFIED -- the tenant was not contacted`n`nThis run skipped its tenant-touching job, so it checked nothing. A green tick here means the run completed, **not** that the tenant matches this repository. See issue #245."
           } else {
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=true"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Tenant-touching job will run`n`nPreflight passed, so this run contacts the tenant. Whether it verified clean is reported by that job, not here."
           }
 
   sync:
@@ -233,25 +292,18 @@ jobs:
           # Reference: https://learn.microsoft.com/en-us/powershell/exchange/exchange-online-powershell-v2
           Install-Module ExchangeOnlineManagement -Force -Scope CurrentUser -AllowPrerelease
 
+      # Ownership-aware open. `opened` is true ONLY when this run is the
+      # one that changed the vault from locked to open, so only that run
+      # re-locks it on exit. The step this replaces wrote `opened=true`
+      # unconditionally, which made every run in a fan-out re-lock and
+      # strand the stragglers -- see the action for the measurements
+      # behind that (issues #306, #311).
       - name: Temporarily allow Key Vault public access
         id: kv-open
-        shell: pwsh
-        run: |
-          # KEY_VAULT_NAME is guaranteed non-empty here: the preflight job
-          # (ADR 0054) already checked it and this job would have been
-          # skipped, not started, if it were absent.
-          # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
-          az keyvault update `
-            --name $env:KEY_VAULT_NAME `
-            --public-network-access Enabled `
-            --default-action Allow `
-            --only-show-errors `
-            -o none
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "opened=true"
-          # Wait for the network rule change to propagate before the
-          # first data-plane call. 30s matches the sibling sync
-          # workflows.
-          Start-Sleep -Seconds 30
+        uses: ./.github/actions/open-key-vault-firewall
+        with:
+          key-vault-name: ${{ env.KEY_VAULT_NAME }}
+          propagation-seconds: '30'
 
       - name: Detect IRM drift in ADR 0029 audit mode
         id: detect
@@ -347,7 +399,9 @@ jobs:
           [void]$sb.AppendLine('')
           [void]$sb.AppendLine('## Why an issue and not a pull request')
           [void]$sb.AppendLine('')
-          [void]$sb.AppendLine('Insider Risk Management is a Tier-3 surface: `scripts/Deploy-IRMPolicies.ps1` exposes no `-ExportCurrentState` switch, so tenant state cannot be round-tripped back into `data-plane/irm/policies.yaml` as a re-export PR. Reconcile by hand instead.')
+          [void]$sb.AppendLine('`scripts/Deploy-IRMPolicies.ps1` does expose `-ExportCurrentState`, so a re-export PR is technically possible here. This workflow deliberately stops at an issue anyway, because it is not the only producer on this surface: `deploy-irm.yml` already opens a drift-back PR on `auto/irm-portal-wins-drift-<environment>` whenever its portal-wins apply skips something, and `scripts/Invoke-LocalIrmDriftSync.ps1` opens one on `auto/irm-drift-sync-<environment>` for a governance-locked tenant that no workflow can reach. A third producer proposing the same YAML from a schedule would race the other two for the same file.')
+          [void]$sb.AppendLine('')
+          [void]$sb.AppendLine('There is also a filtering asymmetry to respect: this job post-filters the ADR 0036 skip baseline out of the drift rows, whereas the exporter captures every tenant policy except `IRM_Tenant_Setting_*`. An export-and-diff conversion would therefore have to re-apply that filter to the exported YAML before diffing it, or it would propose changes this job deliberately ignores.')
           [void]$sb.AppendLine('')
           [void]$sb.AppendLine('## Next steps')
           [void]$sb.AppendLine('')
@@ -356,6 +410,7 @@ jobs:
           [void]$sb.AppendLine('   - **Accept into source** — add / update the entry in `data-plane/irm/policies.yaml`, then let `deploy-irm.yml` converge (it applies on merge via its `push:` path trigger).')
           [void]$sb.AppendLine('   - **Overwrite the portal** — dispatch `deploy-irm.yml` with `irm_direction_policy=repo-wins` and the typed `confirm_overwrite_irm=overwrite portal` token.')
           [void]$sb.AppendLine('   - **Ratify the deviation** — extend the `skip_names_irm` baseline (and ADR 0036) if the policy is intentionally portal-owned.')
+          [void]$sb.AppendLine('   - **Let a drift-back PR carry it** — on a tenant CI can reach, dispatch `deploy-irm.yml` under `portal-wins`, which re-exports and opens the PR for you; on a governance-locked tenant, run `scripts/Invoke-LocalIrmDriftSync.ps1` locally (see `docs/runbooks/irm-local-drift-sync.md`).')
           [void]$sb.AppendLine('3. Close this issue once the drift is resolved. The next scheduled run reopens a fresh issue only if drift remains.')
           [void]$sb.AppendLine('')
           [void]$sb.AppendLine('## References')
@@ -443,7 +498,13 @@ jobs:
           }
 
       - name: Restore Key Vault network defaults
-        if: always() && steps.kv-open.outputs.opened == 'true'
+        # `opened` is true only for the run that actually changed the vault
+        # from locked to open. KV_REOPENED_BY_RETRY covers the other way a
+        # run can become responsible for the window: the #306 retry in
+        # Get-PurviewIPPSAccessToken.ps1 re-opening a vault a sibling closed
+        # mid-run. Without that second clause a retry could leave the vault
+        # open with nobody owning it (issues #306, #311).
+        if: always() && (steps.kv-open.outputs.opened == 'true' || env.KV_REOPENED_BY_RETRY == 'true')
         shell: pwsh
         run: |
           # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update

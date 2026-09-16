@@ -1,0 +1,98 @@
+name: Validate a drift-back export
+description: >
+  Runs the gates validate.yml would have run on a drift-back pull request,
+  BEFORE that pull request is opened, so a bad export never becomes one.
+
+# WHY THIS EXISTS (issue #274)
+#
+# Every automated drift-back PR in this repository is opened by
+# peter-evans/create-pull-request using the default GITHUB_TOKEN, and GitHub
+# does not run `pull_request` or `push` workflows for events raised by that
+# token. So NO CI EVER RUNS ON A DRIFT-BACK PR. Proved by controlled
+# comparison, not inference: PR #257 on `auto/irm-drift-sync-lab`, opened with
+# an operator's own token via `gh api`, got a `validate` run with 10 jobs and a
+# green conclusion; PRs #260 and #262 on `auto/irm-portal-wins-drift-dev`,
+# opened by the bot, each got a run with ZERO jobs that was finalised `failure`
+# when the PR closed.
+#
+# The cosmetic half of that is red runs in the Actions list that mean nothing.
+# The half that matters is the ADR 0055 identifier-residual scan. A drift-back
+# PR's content is by construction a fresh `-ExportCurrentState` dump of LIVE
+# TENANT STATE, and ADR 0055 exists because real Entra group object IDs once
+# sat in active desired-state lists in a public template repo. On a drift-back
+# PR that fail-closed gate did not run until AFTER the merge -- by which point
+# a real tenant GUID is already committed.
+#
+# Running the gates here rather than on the PR is not a workaround, it is
+# strictly better: the producing run fails, the failure is attributable to the
+# job that made the export, and no pull request is opened at all. The residue
+# scan reads tracked AND untracked-but-not-ignored files from the working tree,
+# so it sees the re-export exactly as create-pull-request will commit it.
+#
+# The yamllint invocation below is held byte-identical to validate.yml's by
+# tests/workflows/DriftBackExportValidation.Tests.ps1 -- the same lockstep
+# guard this repo already uses for SKIP_NAMES_IRM across two workflows. Change
+# one and the test tells you to change the other.
+#
+# Reference: docs/adr/0055-identifier-shaped-residual-scan.md
+# Reference: docs/adr/0029-source-of-truth-direction-policy.md
+
+runs:
+  using: composite
+  steps:
+    # Short-circuit. The reverse-sync workflows run this every day whether or
+    # not the tenant drifted, and create-pull-request itself no-ops on an
+    # unchanged tree -- so with no export to check there is nothing to gate,
+    # and installing a linter and a PowerShell module to scan an unchanged
+    # working tree is pure runner time. Skipping is safe precisely because it
+    # is conditioned on the same thing the pull request is: whether the export
+    # actually changed anything under data-plane/.
+    - name: Is there an export to validate?
+      id: changed
+      shell: bash
+      run: |
+        if [ -n "$(git status --porcelain -- data-plane/)" ]; then
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "Export changed data-plane/; running the pre-pull-request gates."
+          git status --porcelain -- data-plane/
+        else
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::No change under data-plane/ -- nothing to validate, and create-pull-request will open nothing."
+        fi
+
+    - if: steps.changed.outputs.changed == 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install yamllint
+      if: steps.changed.outputs.changed == 'true'
+      shell: bash
+      run: pip install yamllint
+
+    # examples/ is linted alongside data-plane/ (ADR 0056), matching validate.yml.
+    - name: Run yamllint
+      if: steps.changed.outputs.changed == 'true'
+      shell: bash
+      run: |
+        yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable}}' data-plane/ examples/
+
+    - name: Install powershell-yaml
+      if: steps.changed.outputs.changed == 'true'
+      shell: pwsh
+      run: Install-Module powershell-yaml -Force -Scope CurrentUser
+
+    - name: Test-IdentifierResidue
+      if: steps.changed.outputs.changed == 'true'
+      shell: pwsh
+      run: |
+        # -FailOnReview matches validate.yml: the reviewRequired quarantine is
+        # empty, so the scan fails closed with no standing exceptions and a
+        # Review row (an identifier of unresolved provenance) blocks the export
+        # immediately rather than passing silently in report mode.
+        $rows = ./scripts/Test-IdentifierResidue.ps1 -FailOnReview
+        if ($rows) { $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::The drift-back export failed the ADR 0055 identifier-residual scan. No pull request will be opened. Resolve the identifier at its source -- the tenant object, or an acquittal rule in .github/agents/tenant-placeholders.yaml -- rather than editing the export by hand."
+        }
+        exit $LASTEXITCODE

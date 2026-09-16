@@ -118,16 +118,20 @@ jobs:
         shell: pwsh
         run: |
           if ([string]::IsNullOrEmpty($env:AZURE_CLIENT_ID)) {
-            Write-Host "::notice::secrets.AZURE_CLIENT_ID is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Write-Host "::warning::secrets.AZURE_CLIENT_ID is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## NOT VERIFIED -- the tenant was not contacted`n`nThis run skipped its tenant-touching job, so it checked nothing. A green tick here means the run completed, **not** that the tenant matches this repository. See issue #245."
           } elseif ([string]::IsNullOrEmpty($env:KEY_VAULT_NAME)) {
-            Write-Host "::notice::vars.KEY_VAULT_NAME is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
+            Write-Host "::warning::vars.KEY_VAULT_NAME is not set on this GitHub Environment. This copy is not onboarded to a Purview tenant (ADR 0054) -- skipping the tenant-touching job."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## NOT VERIFIED -- the tenant was not contacted`n`nThis run skipped its tenant-touching job, so it checked nothing. A green tick here means the run completed, **not** that the tenant matches this repository. See issue #245."
           } elseif ($env:EVENT_NAME -eq 'schedule' -and $env:CI_DATA_PLANE_ENABLED -eq 'false') {
-            Write-Host "::notice::vars.CI_DATA_PLANE_ENABLED is 'false' on this GitHub Environment (ADR 0060) -- skipping this scheduled tenant-touching run. Trigger workflow_dispatch manually to run anyway."
+            Write-Host "::warning::vars.CI_DATA_PLANE_ENABLED is 'false' on this GitHub Environment (ADR 0060) -- skipping this scheduled tenant-touching run. Trigger workflow_dispatch manually to run anyway."
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=false"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## NOT VERIFIED -- the tenant was not contacted`n`nThis run skipped its tenant-touching job, so it checked nothing. A green tick here means the run completed, **not** that the tenant matches this repository. See issue #245."
           } else {
             Add-Content -Path $env:GITHUB_OUTPUT -Value "configured=true"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## Tenant-touching job will run`n`nPreflight passed, so this run contacts the tenant. Whether it verified clean is reported by that job, not here."
           }
 
   sync:
@@ -160,23 +164,18 @@ jobs:
           Install-Module powershell-yaml -Force -Scope CurrentUser
           Install-Module ExchangeOnlineManagement -Force -Scope CurrentUser
 
+      # Ownership-aware open. `opened` is true ONLY when this run is the
+      # one that changed the vault from locked to open, so only that run
+      # re-locks it on exit. The step this replaces wrote `opened=true`
+      # unconditionally, which made every run in a fan-out re-lock and
+      # strand the stragglers -- see the action for the measurements
+      # behind that (issues #306, #311).
       - name: Temporarily allow Key Vault public access
         id: kv-open
-        shell: pwsh
-        run: |
-          # KEY_VAULT_NAME is guaranteed non-empty here: the preflight job
-          # (ADR 0054) already checked it and this job would have been
-          # skipped, not started, if it were absent.
-          az keyvault update `
-            --name $env:KEY_VAULT_NAME `
-            --public-network-access Enabled `
-            --default-action Allow `
-            --only-show-errors `
-            -o none
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "opened=true"
-          # Wait for the network rule change to propagate before the first
-          # data-plane call (matches the local lab smoke recipe).
-          Start-Sleep -Seconds 25
+        uses: ./.github/actions/open-key-vault-firewall
+        with:
+          key-vault-name: ${{ env.KEY_VAULT_NAME }}
+          propagation-seconds: '25'
 
       - name: Export tenant labels into tracked YAML
         shell: pwsh
@@ -198,6 +197,14 @@ jobs:
             -Confirm:$false `
             -Path 'data-plane/information-protection/labels.yaml'
 
+      # Issue #274: a GITHUB_TOKEN-authored pull request runs NO workflows, so
+      # nothing -- including the ADR 0055 identifier-residual scan -- would look
+      # at this export until after it was merged. Gate it here instead, where a
+      # failure is attributable to the run that produced it and no pull request
+      # is opened at all.
+      - name: Validate the export before opening a pull request
+        uses: ./.github/actions/validate-driftback-export
+
       - name: Open or update drift-back PR
         id: cpr
         # peter-evans/create-pull-request@v8.1.1
@@ -205,6 +212,10 @@ jobs:
         # https://github.com/peter-evans/create-pull-request/releases/tag/v8.1.1
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1
         with:
+          # With no DRIFT_PR_TOKEN secret set this is github.token -- today's
+          # behaviour exactly. Adding one later gives drift-back PRs real,
+          # PR-attached CI and stops the zero-job red runs, with no edit here (#274).
+          token: ${{ secrets.DRIFT_PR_TOKEN || github.token }}
           add-paths: data-plane/information-protection/labels.yaml
           # Environment-suffixed so lab and dev drift-back PRs never
           # fight over one branch; base follows the triggering branch
@@ -272,7 +283,13 @@ jobs:
             Refs: #143
 
       - name: Restore Key Vault network defaults
-        if: always() && steps.kv-open.outputs.opened == 'true'
+        # `opened` is true only for the run that actually changed the vault
+        # from locked to open. KV_REOPENED_BY_RETRY covers the other way a
+        # run can become responsible for the window: the #306 retry in
+        # Get-PurviewIPPSAccessToken.ps1 re-opening a vault a sibling closed
+        # mid-run. Without that second clause a retry could leave the vault
+        # open with nobody owning it (issues #306, #311).
+        if: always() && (steps.kv-open.outputs.opened == 'true' || env.KV_REOPENED_BY_RETRY == 'true')
         shell: pwsh
         run: |
           az keyvault update `

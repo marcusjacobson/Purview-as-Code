@@ -651,6 +651,8 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules/TenantContextGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
 
 # In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
 # refusal, which prevents a prune against a zero-entry desired state from
@@ -882,6 +884,9 @@ if (-not $accountJson) {
 $account  = ($accountJson -join "`n") | ConvertFrom-Json
 $tenantId = [string]$account.tenantId
 if (-not $tenantId) { Write-Error 'az account show did not return a tenantId. Re-run `az login` and retry.'; return }
+# --- az context / tenant-match guard (issue #215; the #41 incident) ---
+Assert-TenantContextMatchesParametersFile -Account $account -ExpectedDomain $TenantDomain `
+    -EnvironmentName $parameters.environment -ParametersFile $ParametersFile
 Write-Information ("Subscription    : {0}" -f $account.name) -InformationAction Continue
 
 #endregion

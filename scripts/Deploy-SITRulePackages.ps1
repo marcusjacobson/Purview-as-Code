@@ -410,6 +410,7 @@ Import-Module $module -ErrorAction Stop
 
 Import-Module (Join-Path $PSScriptRoot 'modules/PruneGuard.psm1')     -Force -Scope Local -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1')    -Force -Scope Local -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules/TenantContextGuard.psm1') -Force -Scope Local -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') -Force -Scope Local -ErrorAction Stop
 
 #endregion
@@ -551,6 +552,9 @@ if (-not $accountJson) { Write-Error 'No active Azure CLI session. Run `az login
 $account  = ($accountJson -join "`n") | ConvertFrom-Json
 $tenantId = [string]$account.tenantId
 if (-not $tenantId) { Write-Error 'az account show returned no tenantId.'; return }
+# --- az context / tenant-match guard (issue #215; the #41 incident) ---
+Assert-TenantContextMatchesParametersFile -Account $account -ExpectedDomain $TenantDomain `
+    -EnvironmentName $parameters.environment -ParametersFile $ParametersFile
 Write-Information ("Subscription    : {0}" -f $account.name) -InformationAction Continue
 
 #endregion

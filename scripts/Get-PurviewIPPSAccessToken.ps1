@@ -158,6 +158,233 @@ function ConvertFrom-Base64Std {
     return [Convert]::FromBase64String($s)
 }
 
+function Test-KeyVaultFirewallClosure {
+    # Classify an `az keyvault` failure as "the vault's public endpoint was
+    # closed underneath us" rather than a permission or lookup problem.
+    #
+    # Both spellings are emitted by the same event: the CLI prints the ARM
+    # error text, and the inner code is what the service returns. Matching
+    # either keeps this working if one of the two wordings changes.
+    # Reference: https://learn.microsoft.com/en-us/azure/key-vault/general/network-security
+    param([Parameter(Mandatory = $false)][AllowNull()][string] $Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
+    return ($Text -match 'ForbiddenByConnection') -or
+           ($Text -match 'Public network access is disabled')
+}
+
+function Get-KeyVaultPublicAccessState {
+    # Read back the vault's firewall posture for a diagnostic message. Best
+    # effort by design: this runs on a path that has ALREADY failed, and the
+    # control-plane read can fail too (no reader role, wrong subscription).
+    # A diagnostic that throws would replace the real error with its own.
+    # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-show
+    param([Parameter(Mandatory = $true)][string] $VaultName)
+
+    try {
+        $state = az keyvault show --name $VaultName `
+            --query '{pna:properties.publicNetworkAccess,da:properties.networkAcls.defaultAction}' `
+            --only-show-errors -o tsv 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $state) { return 'unknown (control-plane read failed)' }
+        return ([string]$state).Trim() -replace '\s+', '/'
+    }
+    catch { return 'unknown (control-plane read threw)' }
+}
+
+function Set-KeyVaultReopenedFlag {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Supporting ShouldProcess here would reintroduce the exact defect this function exists to prevent. Its callers run inside the deploy workflows enumerate pass, which invokes the reconciler with -WhatIf, and this function records a CLEANUP HINT for the surrounding job rather than performing the previewed operation. Muted under -WhatIf, a run whose retry re-opened the Key Vault would leave it open with no run owning the window -- see issues #311 and #312, where the same ShouldProcess-honouring plumbing silently swallowed a stderr capture. It changes no tenant, Azure or filesystem state beyond appending one line to the GitHub Actions env file.')]
+    # Tell the surrounding GitHub Actions job that this run re-opened the
+    # vault and therefore owns the window now. No-op outside Actions, and
+    # best effort inside it: failing to write a cleanup hint must never be
+    # what fails a run that has otherwise recovered.
+    param([Parameter(Mandatory = $false)][string] $EnvFilePath = $env:GITHUB_ENV)
+
+    if ([string]::IsNullOrWhiteSpace($EnvFilePath)) { return $false }
+    try {
+        $WhatIfPreference = $false
+        Add-Content -LiteralPath $EnvFilePath -Value 'KV_REOPENED_BY_RETRY=true'
+        return $true
+    }
+    catch { return $false }
+}
+
+function Invoke-KeyVaultCliWithFirewallRetry {
+    # Run a Key Vault DATA-PLANE call, and survive the shared firewall being
+    # closed underneath it mid-run.
+    #
+    # WHY THIS EXISTS (issue #306). Every deploy-* and sync-* workflow opens
+    # the one shared vault firewall at the start of its job and closes it in
+    # an `if: always()` step at the end. Nothing serialises them against each
+    # other, so a push that fans out to several workflows -- any push touching
+    # this file, `infra/parameters/*.yaml`, or `scripts/modules/DirectionPolicy.psm1`
+    # -- has the first run to FINISH re-lock the vault while the rest are still
+    # working. Measured on dev 2026-09-07: deploy-irm re-locked at 23:47:47 and
+    # three sibling runs died within the next 27 seconds, each reporting a
+    # permission problem that did not exist.
+    #
+    # WHAT THIS DOES NOT DO. It does not make the race impossible -- another
+    # run can re-lock between the re-open and the retry. It makes it
+    # survivable. That was the deliberate trade: the alternative that removes
+    # the race outright (deferring the re-lock to a scheduled job) widens the
+    # window in which the vault is publicly reachable, which is a posture
+    # change rather than a bug fix. Here the vault still ends closed and each
+    # open window stays tied to one run.
+    #
+    # A shared GitHub `concurrency.group` is NOT the fix and must not be added
+    # to that set: only one run may be pending per group, so five workflows
+    # from one push become one run, one pending, and three SILENTLY CANCELLED
+    # -- a loud failure turned into a silent no-apply, which is the confusion
+    # issue #245 exists to remove.
+    #
+    # -Call must return a hashtable with ExitCode, Output and Error keys, so
+    # the retry logic stays pure and unit-testable without invoking `az`.
+    param(
+        [Parameter(Mandatory = $true)][scriptblock] $Call,
+        [Parameter(Mandatory = $true)][string] $VaultName,
+        [Parameter(Mandatory = $true)][string] $Operation,
+        [Parameter(Mandatory = $true)][string] $PermissionHint,
+        [Parameter(Mandatory = $false)][ValidateRange(1, 10)][int] $MaxAttempts = 3,
+        # Matches the propagation wait the workflows use after their own open
+        # (30s, issue #144). A network-rule change is not instantly effective,
+        # so retrying immediately would just burn an attempt.
+        [Parameter(Mandatory = $false)][ValidateRange(0, 120)][int] $PropagationSeconds = 30,
+        [Parameter(Mandatory = $false)][scriptblock] $ReopenVault,
+        [Parameter(Mandatory = $false)][scriptblock] $WaitAction,
+        # Injectable so the unit tests do not shell out to `az` on the
+        # give-up path. Production leaves it unset.
+        [Parameter(Mandatory = $false)][scriptblock] $StateReader
+    )
+
+    if (-not $ReopenVault) {
+        # Same command the workflows' own "Temporarily allow Key Vault public
+        # access" step runs, under the same az context, which has already
+        # exercised this permission by the time the script is called in CI.
+        # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault#az-keyvault-update
+        $ReopenVault = {
+            param($Vault)
+            $out = az keyvault update --name $Vault `
+                --public-network-access Enabled --default-action Allow `
+                --only-show-errors -o none 2>&1
+            return @{ Ok = ($LASTEXITCODE -eq 0); Text = ($out | Out-String) }
+        }
+    }
+    if (-not $WaitAction) { $WaitAction = { param($Seconds) Start-Sleep -Seconds $Seconds } }
+    if (-not $StateReader) { $StateReader = { param($Vault) Get-KeyVaultPublicAccessState -VaultName $Vault } }
+
+    $reopenFailed = $false
+    $reopenText = ''
+    $lastText = ''
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        $result = & $Call
+        if ($result.ExitCode -eq 0 -and $result.Output) { return $result.Output }
+
+        $lastText = (@($result.Output, $result.Error) | Where-Object { $_ }) -join "`n"
+        if (-not (Test-KeyVaultFirewallClosure -Text $lastText)) { break }
+        if ($attempt -ge $MaxAttempts) { break }
+
+        Write-Warning ("Key Vault '{0}' refused {1}: its public endpoint is closed. A concurrent workflow re-locked it mid-run (issue #306). Re-opening and retrying (attempt {2} of {3})." -f $VaultName, $Operation, ($attempt + 1), $MaxAttempts)
+        # Accepts either a bare boolean or @{ Ok; Text }. The boolean form
+        # is kept because it is the simplest thing a caller can inject, and
+        # the tests use it wherever the reason does not matter.
+        $reopen = & $ReopenVault $VaultName
+        $reopenOk = if ($reopen -is [hashtable]) { [bool]$reopen.Ok } else { [bool]$reopen }
+        if (-not $reopenOk -and ($reopen -is [hashtable])) { $reopenText = [string]$reopen.Text }
+        if ($reopenOk) {
+            # Re-opening makes THIS run responsible for the window, and the
+            # run that originally opened it has already re-locked and gone.
+            # Since #311 the workflows' restore step only fires for the run
+            # that owns the window, so without this flag a recovered run
+            # would leave the vault open with nobody closing it.
+            # Reference: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#setting-an-environment-variable
+            # $null = ... is load-bearing. PowerShell adds ANY uncaptured
+            # value to the output stream, so a bare call returns the helper's
+            # boolean alongside the certificate JSON and the caller parses
+            # @($false, '{"cer":...}') instead of the JSON.
+            $null = Set-KeyVaultReopenedFlag
+            & $WaitAction $PropagationSeconds
+        }
+        else {
+            # Keep going: a sibling run may re-open the vault anyway, and the
+            # final message records that this run could not.
+            $reopenFailed = $true
+            & $WaitAction $PropagationSeconds
+        }
+    }
+
+    if (Test-KeyVaultFirewallClosure -Text $lastText) {
+        $state = & $StateReader $VaultName
+        # Do not guess at the cause of a failed re-open. ARM rejects
+        # simultaneous writes to one vault with ConflictError (issue #311),
+        # and that is a LOST RACE, not a missing role -- blaming RBAC there
+        # is the same wrong signpost that cost the first hour of #306.
+        $extra = if (-not $reopenFailed) { '' }
+        elseif ($reopenText -match 'ConflictError') {
+            ' This run also could not re-open the firewall, because another run was writing to the vault at the same moment (ConflictError). That is contention, not a permissions problem.'
+        }
+        elseif ($reopenText) {
+            " This run also could not re-open the firewall: $($reopenText.Trim())"
+        }
+        else {
+            ' This run also could not re-open the firewall, and reported no reason; a missing firewall-toggler role is one possible cause.'
+        }
+        throw ("{0} failed on vault '{1}': THE VAULT FIREWALL IS CLOSED, not a permission problem. Current posture (publicNetworkAccess/defaultAction): {2}. A concurrent deploy-*/sync-* run re-locks the shared vault when it finishes, which fails any run still working (issue #306); {3} attempt(s) with a re-open in between did not recover.{4}" -f $Operation, $VaultName, $state, $MaxAttempts, $extra)
+    }
+    throw ("{0} failed on vault '{1}'. {2} Error: {3}" -f $Operation, $VaultName, $PermissionHint, $lastText.Trim())
+}
+
+function Invoke-AzCliCapture {
+    # Run `az` and capture stdout, stderr and the exit code together. stderr
+    # goes to a temp FILE rather than through `2>&1`, which would merge
+    # ErrorRecords into the success stream and corrupt the JSON the callers
+    # parse on the happy path.
+    param([Parameter(Mandatory = $true)][string[]] $Arguments)
+
+    # -WhatIf MUST NOT reach this function's plumbing. The callers run under
+    # the deploy workflows' `-WhatIf` enumerate pass, and PowerShell's file
+    # redirection is implemented through Out-File, which honours
+    # ShouldProcess -- so `2>$errFile` silently becomes a no-op, stderr is
+    # never captured, and Test-KeyVaultFirewallClosure is handed an EMPTY
+    # string. A firewall closure then classifies as a generic failure, the
+    # retry never fires, and the operator gets the old misleading permission
+    # hint with a blank `Error:` on the end. Observed on lab run 34775003781.
+    # Nothing here is a tenant write that -WhatIf should be suppressing: the
+    # `az` call is a read (or a crypto op) and runs regardless; only this
+    # function's own temp file was being skipped -- which also leaked it,
+    # since Remove-Item was suppressed too.
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_preference_variables
+    $WhatIfPreference = $false
+
+    $errFile = [System.IO.Path]::GetTempFileName()
+    try {
+        $out = $null
+        $code = 0
+        try {
+            $out = & az @Arguments 2>$errFile
+            $code = $LASTEXITCODE
+        }
+        catch {
+            # The script runs under $ErrorActionPreference = 'Stop', and newer
+            # PowerShell versions can promote a native command's non-zero exit
+            # into a terminating error ($PSNativeCommandUseErrorActionPreference).
+            # Today it does not -- the pre-#306 code reached its own
+            # `if ($LASTEXITCODE -ne 0)` check, which is how the original error
+            # text got into the run log -- but a thrown failure must still arrive
+            # at the caller as a classifiable RESULT, or the retry would never
+            # see the firewall error it exists to recognise.
+            $code = if ($LASTEXITCODE -ne 0) { $LASTEXITCODE } else { 1 }
+            $out = ''
+            Add-Content -LiteralPath $errFile -Value ([string]$_) -ErrorAction SilentlyContinue
+        }
+        $err = if (Test-Path -LiteralPath $errFile) { Get-Content -LiteralPath $errFile -Raw } else { '' }
+        return @{
+            ExitCode = $code
+            Output   = ($out | Out-String).Trim()
+            Error    = $err
+        }
+    }
+    finally { Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue }
+}
 function Resolve-LocalSigningCert {
     # Resolve a thumbprint to a usable signing certificate in
     # Cert:\CurrentUser\My. Throws with an explicit reason if the cert
@@ -242,15 +469,19 @@ if ($localCert) {
 else {
     # Reference: https://learn.microsoft.com/en-us/cli/azure/keyvault/certificate#az-keyvault-certificate-show
     Write-Verbose "Fetching certificate '$CertificateName' from vault '$VaultName'."
-    $certJson = az keyvault certificate show `
-        --vault-name $VaultName `
-        --name $CertificateName `
-        --only-show-errors `
-        --query "{cer:cer, kid:kid}" `
-        -o json
-    if ($LASTEXITCODE -ne 0 -or -not $certJson) {
-        throw "Failed to read certificate '$CertificateName' from vault '$VaultName'. Verify 'Key Vault Certificate User' role and that the cert exists."
-    }
+    $certJson = Invoke-KeyVaultCliWithFirewallRetry -VaultName $VaultName `
+        -Operation "Reading certificate '$CertificateName'" `
+        -PermissionHint "Verify 'Key Vault Certificate User' role and that the cert exists." `
+        -Call {
+            Invoke-AzCliCapture -Arguments @(
+                'keyvault', 'certificate', 'show',
+                '--vault-name', $VaultName,
+                '--name', $CertificateName,
+                '--only-show-errors',
+                '--query', '{cer:cer, kid:kid}',
+                '-o', 'json'
+            )
+        }
     $certInfo = $certJson | ConvertFrom-Json
     $certBytes = [Convert]::FromBase64String($certInfo.cer)
 }
@@ -295,16 +526,24 @@ else {
     $digestBytes = [System.Security.Cryptography.SHA256]::Create().ComputeHash($signingInputBytes)
     $digestB64 = [Convert]::ToBase64String($digestBytes)
     Write-Verbose "Signing JWT digest with Key Vault key '$CertificateName' (PS256)."
-    $signResult = az keyvault key sign `
-        --vault-name $VaultName `
-        --name $CertificateName `
-        --algorithm PS256 `
-        --digest $digestB64 `
-        --only-show-errors `
-        -o json
-    if ($LASTEXITCODE -ne 0 -or -not $signResult) {
-        throw "Key Vault sign failed. Verify 'Key Vault Crypto User' role on '$VaultName'."
-    }
+    # Second data-plane call, and the reason the retry is a helper rather than
+    # a patch at the certificate read: on 2026-09-07 deploy-label-policies got
+    # its certificate, applied successfully, and THEN died here on the
+    # -VerifyPublished pass's second token acquisition (issue #306).
+    $signResult = Invoke-KeyVaultCliWithFirewallRetry -VaultName $VaultName `
+        -Operation 'Signing the JWT digest' `
+        -PermissionHint "Verify 'Key Vault Crypto User' role on '$VaultName'." `
+        -Call {
+            Invoke-AzCliCapture -Arguments @(
+                'keyvault', 'key', 'sign',
+                '--vault-name', $VaultName,
+                '--name', $CertificateName,
+                '--algorithm', 'PS256',
+                '--digest', $digestB64,
+                '--only-show-errors',
+                '-o', 'json'
+            )
+        }
     $sig = ($signResult | ConvertFrom-Json).signature
     # Azure CLI returns signature as base64url already, but normalize defensively.
     $sigBytes = ConvertFrom-Base64Std -Value $sig

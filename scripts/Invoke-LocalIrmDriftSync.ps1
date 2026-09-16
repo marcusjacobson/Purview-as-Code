@@ -154,50 +154,6 @@ function Get-ExpectedEnvironmentForBranch {
     return 'lab'
 }
 
-function Test-TenantDomainMatch {
-    <#
-    .SYNOPSIS
-        Returns $true if the current az context's tenant ID resolves (via
-        the ARM /tenants list) to a tenant whose defaultDomain or domains[]
-        contains ExpectedDomain, case-insensitively.
-
-    .DESCRIPTION
-        Pure over its inputs -- the caller is responsible for producing
-        $Tenants from `az rest --url https://management.azure.com/tenants?api-version=2022-12-01`
-        and $CurrentTenantId from `az account show`. This is the #41
-        incident guard: an inherited $env:PURVIEW_PARAMETERS_FILE / az
-        context mismatch pointed a run at the wrong subscription with no
-        error until the tenant call itself failed or, worse, silently
-        succeeded against the wrong tenant.
-
-    .PARAMETER Tenants
-        Array of objects (or hashtables) each with at least tenantId,
-        defaultDomain, and domains (array of string).
-
-    .PARAMETER CurrentTenantId
-        The tenantId from `az account show`.
-
-    .PARAMETER ExpectedDomain
-        The parameters file's automation.tenantDomain value.
-    #>
-    [CmdletBinding()]
-    [OutputType([bool])]
-    param(
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Tenants,
-        [Parameter(Mandatory = $true)][string]$CurrentTenantId,
-        [Parameter(Mandatory = $true)][string]$ExpectedDomain
-    )
-    $match = $Tenants | Where-Object { [string]$_.tenantId -ieq $CurrentTenantId }
-    if (-not $match) { return $false }
-    foreach ($tenant in @($match)) {
-        if ([string]$tenant.defaultDomain -ieq $ExpectedDomain) { return $true }
-        foreach ($domain in @($tenant.domains)) {
-            if ([string]$domain -ieq $ExpectedDomain) { return $true }
-        }
-    }
-    return $false
-}
-
 function ConvertFrom-IrmInformationCount {
     <#
     .SYNOPSIS
@@ -211,10 +167,14 @@ function ConvertFrom-IrmInformationCount {
 
     .OUTPUTS
         [pscustomobject] with DesiredPolicies / TenantPolicies, each
-        [int] or $null if the line was not present (e.g. audit mode's
-        early short-circuit skips the tenant-side line when the script
-        errors before reaching it). This surface has no rules, so there
-        is no third count line to parse.
+        [int] or $null if the line was not present. The routine case for
+        a $null DesiredPolicies is not an error at all: a SYNC run drives
+        Deploy-IRMPolicies.ps1 with -ExportCurrentState, whose export
+        short-circuit returns before the desired-state file is read, so
+        "Desired policies: N" is never emitted on the success path. The
+        caller supplies that count itself (issue #258) rather than
+        recording a hole. This surface has no rules, so there is no third
+        count line to parse.
     #>
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -233,6 +193,52 @@ function ConvertFrom-IrmInformationCount {
         }
     }
     return $result
+}
+
+function Get-DesiredPolicyCountFromYaml {
+    <#
+    .SYNOPSIS
+        Counts the `policies:` entries in a desired-state YAML document.
+
+    .DESCRIPTION
+        A sync run replaces the worktree's desired-state file with a fresh
+        export, and Deploy-IRMPolicies.ps1's export path never emits the
+        "Desired policies: N" line (it returns before reading that file),
+        so the count has to be taken here -- BEFORE the export overwrites
+        it -- or the audit record ships a null and the operations console
+        renders "Desired: --" for every drifted surface (issue #258).
+
+        Returns 0 rather than throwing for an absent, empty, or
+        structurally unexpected document: this feeds a reporting field,
+        and a malformed desired-state file is already going to fail the
+        reconciler with a better message than this helper could give.
+
+    .PARAMETER YamlText
+        The raw document text. Null or whitespace yields 0.
+
+    .OUTPUTS
+        [int]
+
+    .LINK
+        https://github.com/cloudbase/powershell-yaml
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][string]$YamlText
+    )
+    if ([string]::IsNullOrWhiteSpace($YamlText)) { return 0 }
+    try {
+        $doc = ConvertFrom-Yaml -Yaml $YamlText
+    }
+    catch {
+        return 0
+    }
+    if ($null -eq $doc) { return 0 }
+    $policies = $null
+    if ($doc -is [System.Collections.IDictionary]) { $policies = $doc['policies'] }
+    if ($null -eq $policies) { return 0 }
+    return @($policies).Count
 }
 
 function ConvertTo-IrmAuditRecord {
@@ -420,6 +426,7 @@ $scriptRoot = Split-Path -Parent $PSCommandPath
 $repoRoot = Split-Path -Parent $scriptRoot
 
 Import-Module (Join-Path $scriptRoot 'modules/ExportDiffFilter.psm1') -Force -Scope Local -ErrorAction Stop
+Import-Module (Join-Path $scriptRoot 'modules/TenantContextGuard.psm1') -Force -Scope Local -ErrorAction Stop
 
 # --- Parameters file resolution (mirrors Deploy-IRMPolicies.ps1) ---
 if (-not $ParametersFile) {
@@ -447,15 +454,11 @@ if ([string]::IsNullOrWhiteSpace($env:PURVIEW_LOCAL_CERT_THUMBPRINT)) {
     throw "`$env:PURVIEW_LOCAL_CERT_THUMBPRINT is not set. This script requires the ADR 0028 local-certificate transport -- see docs/runbooks/irm-local-drift-sync.md."
 }
 
-# --- az context / tenant-match guard (the #41 incident) ---
+# --- az context / tenant-match guard (issue #215; the #41 incident) ---
 $accountJson = Invoke-ChildProcess -FilePath 'az' -ArgumentList @('account', 'show', '-o', 'json')
 $account = ($accountJson -join "`n") | ConvertFrom-Json -Depth 10
-$tenantsJson = Invoke-ChildProcess -FilePath 'az' -ArgumentList @('rest', '--method', 'get', '--url', 'https://management.azure.com/tenants?api-version=2022-12-01')
-$tenants = (($tenantsJson -join "`n") | ConvertFrom-Json -Depth 10).value
-if (-not (Test-TenantDomainMatch -Tenants $tenants -CurrentTenantId $account.tenantId -ExpectedDomain $expectedTenantDomain)) {
-    throw ("The current az context (tenant '{0}', account '{1}') does not resolve to the expected tenant domain '{2}' from '{3}'. Run `az account set --subscription <name>` for the {4} environment first." -f $account.tenantId, $account.name, $expectedTenantDomain, $ParametersFile, $environmentName)
-}
-Write-Information ("az context OK: {0} -> {1}" -f $account.name, $expectedTenantDomain) -InformationAction Continue
+Assert-TenantContextMatchesParametersFile -Account $account -ExpectedDomain $expectedTenantDomain `
+    -EnvironmentName $environmentName -ParametersFile $ParametersFile
 
 # --- ADR 0057 branch/environment guard ---
 if (-not $BaseBranch) {
@@ -479,6 +482,13 @@ try {
     $yamlPath = Join-Path $worktreePath 'data-plane/irm/policies.yaml'
     $mode = if ($AuditOnly.IsPresent) { 'audit' } else { 'sync' }
 
+    # Taken BEFORE the export below overwrites the file, because a sync
+    # run's reconciler never reports it (issue #258).
+    $desiredCountBeforeExport = $null
+    if (-not $AuditOnly.IsPresent) {
+        $desiredCountBeforeExport = Get-DesiredPolicyCountFromYaml -YamlText (Get-Content -LiteralPath $yamlPath -Raw)
+    }
+
     $rows = @()
     if ($AuditOnly.IsPresent) {
         $reportRows = & $irmScriptPath -DirectionPolicy audit -WhatIf -Confirm:$false -Path $yamlPath -ParametersFile $ParametersFile -InformationVariable iv 6>$null
@@ -495,6 +505,7 @@ try {
     }
     $infoLines = @($iv) | ForEach-Object { [string]$_.MessageData }
     $counts = ConvertFrom-IrmInformationCount -Lines $infoLines
+    if ($null -eq $counts.DesiredPolicies) { $counts.DesiredPolicies = $desiredCountBeforeExport }
     Write-Information ("Desired policies: {0}  Tenant policies: {1}" -f $counts.DesiredPolicies, $counts.TenantPolicies) -InformationAction Continue
 
     $diffDetected = $false
@@ -520,6 +531,30 @@ try {
                 Invoke-ChildProcess -FilePath 'git' -ArgumentList @('-C', $worktreePath, 'add', 'data-plane/irm/policies.yaml') | Out-Null
                 $commitMessage = "chore(data-plane): sync IRM policies from tenant`n`nAutomated drift-back from scripts/Invoke-LocalIrmDriftSync.ps1 (ADR 0060).`nRe-exports the live Microsoft Purview Insider Risk Management (IRM)`npolicy set in the $environmentName tenant into`ndata-plane/irm/policies.yaml so the repo remains source of truth."
                 Invoke-ChildProcess -FilePath 'git' -ArgumentList @('-C', $worktreePath, 'commit', '-m', $commitMessage) | Out-Null
+                # Reconcile the remote-tracking ref for THIS branch before the
+                # push (issue #279). --force-with-lease takes its expected value
+                # from refs/remotes/<remote>/<syncBranch>, and this runbook's own
+                # workflow deletes the branch from the remote once the drift-back
+                # PR is closed -- while a plain `git fetch` never prunes the now
+                # stale tracking ref. Without this, run N+1 on the same
+                # workstation dies with `! [rejected] ... (stale info)` every
+                # time, having already detected the drift and made the commit.
+                #
+                # The trailing '*' is load-bearing: an exact refspec is a FATAL
+                # error when the branch is absent remotely (`couldn't find remote
+                # ref`) and prunes nothing. Only a wildcard pattern prunes. The
+                # pattern is anchored to the sync branch name, so other auto/*
+                # tracking refs are left alone.
+                #
+                # This keeps the lease rather than reaching for --force: the
+                # branch IS force-pushed, and the lease is what stops a
+                # concurrent update -- another operator's run, or a reviewer's
+                # commit on the PR -- from being silently overwritten.
+                #
+                # Reference: https://git-scm.com/docs/git-push#Documentation/git-push.txt---no-force-with-lease
+                Invoke-ChildProcess -FilePath 'git' -ArgumentList @(
+                    '-C', $repoRoot, 'fetch', '--prune', $Remote,
+                    "+refs/heads/$SyncBranch*:refs/remotes/$Remote/$SyncBranch*") | Out-Null
                 Invoke-ChildProcess -FilePath 'git' -ArgumentList @('-C', $worktreePath, 'push', '--force-with-lease', $Remote, "HEAD:refs/heads/$SyncBranch") | Out-Null
 
                 $remoteUrl = (Invoke-ChildProcess -FilePath 'git' -ArgumentList @('-C', $worktreePath, 'remote', 'get-url', $Remote))[0]

@@ -723,10 +723,23 @@ function ConvertTo-TenantPolicyHash {
         #   - "<Parent> - <Child>" composite display names (occasional)
         #   - bare <DisplayName> for sublabels created via the Purview
         #     portal (observed 2026-05-14; issue #230)
-        #   - slugified <DisplayName> where ' ', '(' and ')' have been
-        #     replaced with '-' (e.g. `External--Restricted-` for
-        #     `External (Restricted)`; also observed 2026-05-14; issue #230)
-        # All four shapes must collapse to the same canonical GUID so
+        #   - the label's immutable `Name`, which Purview derives from the
+        #     display name by replacing every NON-alphanumeric character
+        #     with '-' (e.g. `External--Restricted-` for
+        #     `External (Restricted)`; observed 2026-05-14, issue #230).
+        #     `Deploy-Labels.ps1` uses that same formula when it creates a
+        #     label, so it is the canonical one -- the narrower `[\s()]`
+        #     guess this function used until #299 left every display name
+        #     containing any other punctuation unresolved. An em dash is
+        #     the case that bit: `Pilot — Confidential A0 (Lab)` reads back
+        #     as `Pilot---Confidential-A0--Lab-`, which fell through to the
+        #     raw string and was then written into the exported YAML as if
+        #     it were a display name (issue #299, found live on dev
+        #     2026-09-08). Not every `Name` is a slug of the CURRENT display
+        #     name either -- a grouping parent reads back as
+        #     `Highly ConfidentialGroup` -- so the tenant's own `Name` is
+        #     keyed directly as well as slugified.
+        # All of these shapes must collapse to the same canonical GUID so
         # downstream delta comparisons against the YAML's GUID-translated
         # desired state do not produce false-positive add/remove churn.
         # If no labels were supplied, fall back to the raw strings so
@@ -744,7 +757,9 @@ function ConvertTo-TenantPolicyHash {
                 }
                 else { [string]$l.DisplayName }
                 $renderToGuid[$rendered] = [string]$l.Guid
-                $renderSlug = $rendered -replace '[\s()]', '-'
+                # Canonical Purview Name slug. Keep in step with the create
+                # path in Deploy-Labels.ps1, which builds `Name` this way.
+                $renderSlug = $rendered -replace '[^A-Za-z0-9]', '-'
                 if (-not $renderToGuid.ContainsKey($renderSlug)) {
                     $renderToGuid[$renderSlug] = [string]$l.Guid
                 }
@@ -754,8 +769,14 @@ function ConvertTo-TenantPolicyHash {
                 # see the raw entry passed through and the diff will
                 # surface as drift the operator can resolve in YAML.
                 $bare = [string]$l.DisplayName
-                $bareSlug = $bare -replace '[\s()]', '-'
-                foreach ($key in @($bare, $bareSlug)) {
+                $bareSlug = $bare -replace '[^A-Za-z0-9]', '-'
+                # The tenant's own `Name`, when the object carries one. A
+                # guessed slug cannot recover a `Name` that was not derived
+                # from the current display name (issue #299).
+                $tenantName = if ($l.PSObject.Properties['Name']) { [string]$l.Name } else { '' }
+                $candidateKeys = @($bare, $bareSlug)
+                if ($tenantName) { $candidateKeys += $tenantName }
+                foreach ($key in $candidateKeys) {
                     if ($bareToGuid.ContainsKey($key)) {
                         if ($bareToGuid[$key] -ne [string]$l.Guid) {
                             [void]$bareCollisions.Add($key)
@@ -774,6 +795,16 @@ function ConvertTo-TenantPolicyHash {
             if ($renderToGuid.ContainsKey($s)) { $translated += $renderToGuid[$s] }
             elseif ($bareToGuid.ContainsKey($s)) { $translated += $bareToGuid[$s] }
             else { $translated += $s }
+        }
+        # Drop pure grouping parents from the tenant side. The repo cannot
+        # express one in desired state (New-LabelPolicy rejects it), so
+        # carrying it here makes every such policy read as permanent drift
+        # and makes the exporter re-add an entry the create path refuses.
+        # Both sides of every comparison drop them; see
+        # Get-GroupingParentLabelGuid for the evidence rule (issue #299).
+        $groupingParents = Get-GroupingParentLabelGuid -Labels $TenantLabels
+        if ($groupingParents.Count -gt 0) {
+            $translated = @($translated | Where-Object { -not $groupingParents.Contains([string]$_) })
         }
         $h.labels = @($translated | Sort-Object -Unique)
     }
@@ -865,6 +896,86 @@ function ConvertTo-LabelGuidLookup {
         $byKey[$key] = [string]$l.Guid
     }
     return $byKey
+}
+
+function ConvertTo-LabelCompositeKey {
+    # Inverse of ConvertTo-LabelGuidLookup: GUID -> composite key.
+    # Built directly rather than by inverting the forward lookup, which is
+    # many-to-one (a display name, its slug and its Name all map to the
+    # same GUID) and so resolves to whichever key enumerated last. Same
+    # shape as Deploy-AutoLabelPolicies.ps1's helper of this name.
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-label
+    param([Parameter(Mandatory = $true)][object[]]$Labels)
+
+    $byGuid = @{}
+    foreach ($l in $Labels) { $byGuid[[string]$l.Guid] = [string]$l.DisplayName }
+
+    $guidToKey = @{}
+    foreach ($l in $Labels) {
+        $key = if ($l.ParentId -and $byGuid.ContainsKey([string]$l.ParentId)) {
+            "$($byGuid[[string]$l.ParentId])/$([string]$l.DisplayName)"
+        }
+        else {
+            [string]$l.DisplayName
+        }
+        $guidToKey[[string]$l.Guid] = $key
+    }
+    return $guidToKey
+}
+
+function Get-GroupingParentLabelGuid {
+    # Identify pure grouping parent labels: a label that has at least one
+    # sublabel and that the tenant reports with an EMPTY ContentType.
+    # Purview's New-LabelPolicy refuses to publish one -- "Label group(s)
+    # ... can not be published" -- discovered live on the dev tenant on
+    # 2026-07-22 and recorded in the desired-state file itself. The repo
+    # therefore cannot express one, while a portal-created or grandfathered
+    # policy may still carry it. Callers drop these GUIDs from BOTH sides of
+    # every comparison so a difference the repo is not allowed to close does
+    # not read as drift on every run, and so -ExportCurrentState does not
+    # write back an entry the create path would reject (issue #299).
+    #
+    # Requires POSITIVE evidence, the same no-evidence / contrary-evidence
+    # split the tenant-context guard draws (#242): a label object that does
+    # not carry a ContentType property at all is left alone.
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-label
+    param([Parameter(Mandatory = $false)][object[]]$Labels = @())
+
+    $grouping = New-Object 'System.Collections.Generic.HashSet[string]'
+    if (-not $Labels -or $Labels.Count -eq 0) { return , $grouping }
+
+    $hasChild = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($l in $Labels) {
+        if ($l.ParentId) { [void]$hasChild.Add([string]$l.ParentId) }
+    }
+
+    foreach ($l in $Labels) {
+        $prop = $l.PSObject.Properties['ContentType']
+        if (-not $prop) { continue }
+        # ContentType is a MultiValuedProperty on a live Get-Label result
+        # and a plain string or array on a synthetic one; flatten both.
+        $contentType = (@($prop.Value) | ForEach-Object { [string]$_ }) -join ','
+        # `Get-Label` reports the literal string 'None' as a TENANT-SIDE
+        # SENTINEL for "no content types set" -- it does not return an empty
+        # value. Deploy-Labels.ps1 filters the same sentinel when it
+        # re-shapes ContentType (issue #129); this is the same filter, and
+        # omitting it is why the first cut of this function detected zero
+        # grouping parents against the live dev tenant.
+        $types = @($contentType -split ',' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and $_ -ne 'None' })
+        if ($types.Count -gt 0) { continue }
+        if (-not $hasChild.Contains([string]$l.Guid)) { continue }
+        [void]$grouping.Add([string]$l.Guid)
+    }
+    # Unary comma. PowerShell ENUMERATES an IEnumerable on return, so a
+    # bare `return $grouping` hands the caller $null for an empty set and a
+    # plain object[] for a populated one -- and `$null.Contains(...)` throws
+    # "You cannot call a method on a null-valued expression" at the two
+    # desired-side call sites. `$null.Count` is 0 in PowerShell, so a test
+    # that asserts only on .Count cannot see this.
+    # Reference: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_return
+    return , $grouping
 }
 
 function Resolve-DesiredLabelGuid {
@@ -962,6 +1073,8 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 # terminal.
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
+    -Force -Scope Local -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules/TenantContextGuard.psm1') `
     -Force -Scope Local -ErrorAction Stop
 
 # In-repo -PruneMissing safety guard (issue #13): the empty-desired-set
@@ -1152,6 +1265,9 @@ if (-not $tenantId) {
     Write-Error 'az account show did not return a tenantId. Re-run `az login` and retry.'
     return
 }
+# --- az context / tenant-match guard (issue #215; the #41 incident) ---
+Assert-TenantContextMatchesParametersFile -Account $account -ExpectedDomain $TenantDomain `
+    -EnvironmentName $parameters.environment -ParametersFile $ParametersFile
 Write-Information ("Subscription    : {0}" -f $account.name) -InformationAction Continue
 
 #endregion
@@ -1357,16 +1473,21 @@ try {
         # Reference: https://learn.microsoft.com/en-us/powershell/module/exchangepowershell/get-label
         $tenantLabels = @(Get-Label -ErrorAction Stop)
         $labelLookup = ConvertTo-LabelGuidLookup -Labels $tenantLabels
+        $groupingParents = Get-GroupingParentLabelGuid -Labels $tenantLabels
 
         # Resolve desired composite-key label references to GUIDs so
         # the comparison runs against canonical identifiers (same as
-        # the Apply path's pre-categorize step).
+        # the Apply path's pre-categorize step). Grouping parents are
+        # dropped here as well as on the tenant side -- lab's committed
+        # file declares two of them and the tenant hash no longer carries
+        # them, so an asymmetric filter would invent drift (issue #299).
         $resolvedDesired = @()
         foreach ($d in $desiredHashes) {
             $resolved = @()
             $missing = @()
             foreach ($ref in $d.labels) {
                 $g = Resolve-DesiredLabelGuid -Reference $ref -Lookup $labelLookup
+                if ($g -and $groupingParents.Contains([string]$g)) { continue }
                 if ($g) { $resolved += $g } else { $missing += $ref }
             }
             $advMissing = Resolve-DesiredAdvancedSettingLabel -Hash $d -Lookup $labelLookup
@@ -1445,9 +1566,11 @@ try {
         $allLabels = @(Get-Label -ErrorAction Stop)
         $byGuid = @{}
         foreach ($l in $allLabels) { $byGuid[[string]$l.Guid] = $l }
-        $byKey = ConvertTo-LabelGuidLookup -Labels $allLabels
-        $guidToKey = @{}
-        foreach ($k in $byKey.Keys) { $guidToKey[$byKey[$k]] = $k }
+        # GUID -> composite key, built directly. Inverting the forward
+        # lookup used to pick whichever of a label's several accepted keys
+        # enumerated last, which could be its slug rather than its display
+        # name (issue #299).
+        $guidToKey = ConvertTo-LabelCompositeKey -Labels $allLabels
 
         # Stable top-level key sequence: name, mode, exchangeLocation,
         # labels, advancedSettings. Keys with empty values are still
@@ -1548,7 +1671,7 @@ try {
         else {
             # Reference: https://www.powershellgallery.com/packages/powershell-yaml
             $body = ([ordered]@{ labelPolicies = @($exportEntries) }) | ConvertTo-Yaml -Options WithIndentedSequences
-            # Normalize dvancedSettings: block to canonical key casing +
+            # Normalize the advancedSettings: block to canonical key casing +
             # double-quoted scalar values per issue #503 so the export round-trips
             # byte-identical against the apply-side YAML convention.
             $body = Format-AdvancedSettingsYamlBlock -Yaml $body
@@ -1591,6 +1714,9 @@ try {
     $tenantLabels = @(Get-Label -ErrorAction Stop)
     Write-Information ("Read {0} label(s) from tenant for label-reference resolution." -f $tenantLabels.Count) -InformationAction Continue
     $labelLookup = ConvertTo-LabelGuidLookup -Labels $tenantLabels
+    # Grouping parents are dropped from the desired side too; see the
+    # matching filter in ConvertTo-TenantPolicyHash (issue #299).
+    $groupingParents = Get-GroupingParentLabelGuid -Labels $tenantLabels
 
     $tenantByName = @{}
     foreach ($p in $tenantPolicies) { $tenantByName[[string]$p.Name] = $p }
@@ -1602,6 +1728,7 @@ try {
         $missing = @()
         foreach ($ref in $d.labels) {
             $guid = Resolve-DesiredLabelGuid -Reference $ref -Lookup $labelLookup
+            if ($guid -and $groupingParents.Contains([string]$guid)) { continue }
             if ($guid) { $resolvedLabels += $guid }
             else { $missing += $ref }
         }

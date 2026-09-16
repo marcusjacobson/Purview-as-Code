@@ -181,6 +181,7 @@ Import-Module (Join-Path $PSScriptRoot 'modules\DirectionPolicy.psm1') -Force -S
 # -PruneMissing delete) can be entered unattended from a local terminal.
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules\ConfirmGate.psm1') -Force -Scope Local -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules\TenantContextGuard.psm1') -Force -Scope Local -ErrorAction Stop
 # In-repo -PruneMissing safety guard (issue #13): the empty-desired-set refusal,
 # which prevents a prune against a zero-entry desired state from classifying
 # every live tenant object as an orphan. Shared with the other Deploy-*.ps1
@@ -1606,6 +1607,35 @@ Write-Information ("Force           : {0}" -f $Force.IsPresent) -InformationActi
 # ADR 0053: -Force and -OverwriteForeignAuthor are independent. Print both so
 # the run log shows exactly which guard the operator suppressed.
 Write-Information ("OverwriteForeignAuthor : {0}" -f $OverwriteForeignAuthor.IsPresent) -InformationAction Continue
+
+#region Azure context (read-only preamble)
+
+# --- az context / tenant-match guard (issue #235; the #41 incident) ---
+# Unlike the classic Data Map reconcilers, this script's endpoint
+# ($script:UnifiedCatalogEndpoint) is the GLOBAL api.purview-service.microsoft.com
+# and carries neither account nor tenant in its path -- the acquired token's
+# tenant is the ONLY thing deciding which tenant is read and written. A stale az
+# session therefore reconciles the wrong tenant silently, with the run log still
+# naming the intended environment. That is the #41 incident exactly. Verify the
+# context here, before Get-UnifiedCatalogApiContext -- this script's first tenant
+# contact -- acquires the token.
+# Reference: https://learn.microsoft.com/en-us/cli/azure/account#az-account-show
+$accountJson = az account show -o json --only-show-errors 2>$null
+if (-not $accountJson) {
+    Write-Error 'No active Azure CLI session. Run `az login` before invoking this script.'
+    return
+}
+$account = ($accountJson -join "`n") | ConvertFrom-Json
+$expectedTenantDomain = [string]$parameters.automation.tenantDomain
+if (-not $expectedTenantDomain) {
+    Write-Error ("Parameters file '{0}' is missing required key 'automation.tenantDomain'. Reference: docs/adr/0012-environment-parameters-file.md." -f $ParametersFile)
+    return
+}
+Assert-TenantContextMatchesParametersFile -Account $account -ExpectedDomain $expectedTenantDomain `
+    -EnvironmentName $parameters.environment -ParametersFile $ParametersFile
+Write-Information ("Subscription    : {0}" -f $account.name) -InformationAction Continue
+
+#endregion
 
 $desiredDocs = @{}
 foreach ($concept in $script:UnifiedCatalogConcepts) {

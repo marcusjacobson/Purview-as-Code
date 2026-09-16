@@ -57,7 +57,17 @@ function Test-ExportDiffMeaningful {
 
     .PARAMETER DiffText
         The raw output of `git diff -U0 -- <path>` (or an equivalent
-        unified diff), as a single string with embedded newlines.
+        unified diff). Accepts either a single string with embedded
+        newlines, or the line-per-element array PowerShell actually
+        produces when a multi-line external-command output is captured
+        into a variable (`$diff = git diff -U0 -- $path`) -- which is how
+        every caller in this repository invokes it. Issue #224: a
+        `[string]` parameter throws on that array input under strict
+        argument-transformation ("Cannot process argument transformation
+        ... Cannot convert value to type System.String"), latent until a
+        surface actually had a multi-line diff to pass -- a single-line
+        diff coerces to `[string]` without incident, which is why this
+        went unnoticed until a real drift report finally exercised it.
 
     .EXAMPLE
         Test-ExportDiffMeaningful -DiffText $diff
@@ -65,12 +75,16 @@ function Test-ExportDiffMeaningful {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
-        [Parameter()][AllowNull()][AllowEmptyString()][string]$DiffText
+        [Parameter()][AllowNull()][AllowEmptyString()][string[]]$DiffText
     )
-    if ([string]::IsNullOrEmpty($DiffText)) {
+    if (-not $DiffText -or $DiffText.Count -eq 0) {
         return $false
     }
-    foreach ($line in ($DiffText -split "`n")) {
+    $text = $DiffText -join "`n"
+    if ([string]::IsNullOrEmpty($text)) {
+        return $false
+    }
+    foreach ($line in ($text -split "`n")) {
         if ($line -notmatch '^[-+]') { continue }
         if ($line -match '^(---|\+\+\+)') { continue }
         $payload = $line.Substring(1)
@@ -93,7 +107,11 @@ function Get-ExportDiffSummary {
         two functions never disagree about what counts as meaningful.
 
     .PARAMETER DiffText
-        The raw output of `git diff -U0 -- <path>`.
+        The raw output of `git diff -U0 -- <path>`. Accepts either a
+        single string with embedded newlines, or the line-per-element
+        array PowerShell produces when capturing multi-line external
+        command output -- see `Test-ExportDiffMeaningful`'s remarks on
+        issue #224 for why the parameter type matters here.
 
     .OUTPUTS
         [hashtable] with keys `AddedLines`, `RemovedLines`,
@@ -106,7 +124,7 @@ function Get-ExportDiffSummary {
     [CmdletBinding()]
     [OutputType([hashtable])]
     param(
-        [Parameter()][AllowNull()][AllowEmptyString()][string]$DiffText
+        [Parameter()][AllowNull()][AllowEmptyString()][string[]]$DiffText
     )
     $summary = @{
         AddedLines      = 0
@@ -114,11 +132,16 @@ function Get-ExportDiffSummary {
         MeaningfulLines = 0
         CosmeticOnly    = $true
     }
-    if ([string]::IsNullOrEmpty($DiffText)) {
+    if (-not $DiffText -or $DiffText.Count -eq 0) {
         $summary.CosmeticOnly = $false
         return $summary
     }
-    foreach ($line in ($DiffText -split "`n")) {
+    $text = $DiffText -join "`n"
+    if ([string]::IsNullOrEmpty($text)) {
+        $summary.CosmeticOnly = $false
+        return $summary
+    }
+    foreach ($line in ($text -split "`n")) {
         if ($line -notmatch '^[-+]') { continue }
         if ($line -match '^(---|\+\+\+)') { continue }
         $payload = $line.Substring(1)

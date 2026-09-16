@@ -349,6 +349,31 @@ $script:TrackedScalarFields = @('tooltip', 'comment')
 # include RFC 2606-reserved DNS). See issue #137.
 $script:RedactedIdentityPattern = '(?i)@(contoso|fabrikam|adatum)\.com$|@example\.(com|org)$'
 
+# Well-known SYMBOLIC rights identities (issue #225). These are Microsoft
+# rights-management constants, not principals: they name a role the service
+# resolves at consumption time (the content owner; any authenticated user),
+# carry no tenant information, and are identical in every tenant on earth.
+# `-RedactIdentities` must therefore leave them alone -- redacting one is
+# both a disclosure no-op and actively lossy, because it rewrites a
+# meaningful desired-state value ("the owner holds OWNER") into a
+# placeholder principal that means something else entirely, and then drifts
+# forever because the tenant keeps returning the symbolic form.
+#
+# The dev tenant's `Pilot - Confidential A1 (Lab)` label is exactly this
+# case; labels.schema.json's own Identity description already anticipated
+# it by naming `AuthenticatedUsers` as a legitimate value.
+#
+# FAIL-CLOSED by design: this is an allow-list, so an identity that is not
+# listed here is redacted, whatever it looks like. A future symbolic value
+# is therefore over-redacted (visible as drift, which prompts review)
+# rather than silently disclosed. Add entries only with evidence from a
+# live export, never speculatively.
+# Reference: https://learn.microsoft.com/en-us/azure/information-protection/configure-usage-rights
+$script:WellKnownSymbolicIdentities = @(
+    'IPC_USER_ID_OWNER'
+    'AuthenticatedUsers'
+)
+
 function ConvertTo-LabelHash {
     # Normalize a desired-state YAML entry into a comparable hashtable.
     # Drops nulls, lowercases enum-like content types into a sorted
@@ -754,26 +779,54 @@ function Compare-LabelHash {
     # comparison so contributors authoring real principals still get a
     # truthful diff.
     # Reference: https://learn.microsoft.com/en-us/powershell/module/exchange/get-label
+    # PER-ENTRY, not all-or-nothing (issue #225). The original mitigation
+    # only engaged when EVERY desired identity was a placeholder, and fell
+    # back to strict identity comparison otherwise. That was adequate while
+    # a file was either fully redacted or fully real -- but preserving
+    # well-known symbolic identities made MIXED files the normal case: one
+    # `AuthenticatedUsers` alongside four placeholders is exactly what lab's
+    # tenant produces. Under the old rule those labels reported drift on
+    # every run, because the placeholders were then compared literally
+    # against real tenant principals they can never equal.
+    #
+    # So classify each desired entry instead of the collection:
+    #   * a REDACTED identity is opaque -- it says nothing about WHO, only
+    #     that some principal holds these rights, so it may only be matched
+    #     on Rights;
+    #   * a real or symbolic identity is meaningful and is matched exactly.
+    # Then require a one-to-one pairing: every named entry must be present
+    # in the tenant identically, and the leftover tenant entries must carry
+    # exactly the multiset of Rights the placeholders claim.
     $dRights = @($de.rightsDefinitions)
     $tRights = @($te.rightsDefinitions)
-    $allDesiredRedacted = ($dRights.Count -gt 0) -and (-not ($dRights |
-        Where-Object { $_.Identity -notmatch $script:RedactedIdentityPattern }))
-    if ($allDesiredRedacted) {
-        if ($dRights.Count -ne $tRights.Count) {
-            $diffs += 'encryption.rightsDefinitions'
-        }
-        else {
-            $dRightsSorted = @($dRights | ForEach-Object { $_.Rights } | Sort-Object)
-            $tRightsSorted = @($tRights | ForEach-Object { $_.Rights } | Sort-Object)
-            if (($dRightsSorted -join ';') -ne ($tRightsSorted -join ';')) {
-                $diffs += 'encryption.rightsDefinitions'
-            }
-        }
+    if ($dRights.Count -ne $tRights.Count) {
+        $diffs += 'encryption.rightsDefinitions'
     }
-    else {
-        $drd = ($dRights | ForEach-Object { "$($_.Identity)=$($_.Rights)" }) -join ';'
-        $trd = ($tRights | ForEach-Object { "$($_.Identity)=$($_.Rights)" }) -join ';'
-        if ($drd -ne $trd) { $diffs += 'encryption.rightsDefinitions' }
+    elseif ($dRights.Count -gt 0) {
+        $namedDesired = @($dRights | Where-Object { $_.Identity -notmatch $script:RedactedIdentityPattern })
+        $opaqueDesired = @($dRights | Where-Object { $_.Identity -match $script:RedactedIdentityPattern })
+
+        # Consume the tenant entries each named desired entry claims.
+        $remainingTenant = [System.Collections.Generic.List[object]]::new()
+        foreach ($t in $tRights) { $remainingTenant.Add($t) | Out-Null }
+
+        $mismatch = $false
+        foreach ($d in $namedDesired) {
+            $hit = $remainingTenant | Where-Object {
+                ([string]$_.Identity -ieq [string]$d.Identity) -and ([string]$_.Rights -eq [string]$d.Rights)
+            } | Select-Object -First 1
+            if ($null -eq $hit) { $mismatch = $true; break }
+            $remainingTenant.Remove($hit) | Out-Null
+        }
+
+        if (-not $mismatch) {
+            # Whatever is left must match the placeholders on Rights alone.
+            $opaqueSorted = @($opaqueDesired | ForEach-Object { [string]$_.Rights } | Sort-Object)
+            $leftoverSorted = @($remainingTenant | ForEach-Object { [string]$_.Rights } | Sort-Object)
+            if (($opaqueSorted -join ';') -ne ($leftoverSorted -join ';')) { $mismatch = $true }
+        }
+
+        if ($mismatch) { $diffs += 'encryption.rightsDefinitions' }
     }
 
     return $diffs
@@ -865,9 +918,20 @@ function ConvertTo-LabelCmdletArgument {
             # a fully-redacted YAML is unsupported by design (the operator
             # must supply a real identity); call sites can detect this by
             # the absent splat key.
-            $allRedacted = -not ($enc.rightsDefinitions |
-                Where-Object { $_.Identity -notmatch $script:RedactedIdentityPattern })
-            if (-not $allRedacted) {
+            # ANY placeholder, not only ALL (issue #225). Preserving symbolic
+            # identities made mixed files normal -- lab commits one
+            # `AuthenticatedUsers` beside four placeholders -- and the old
+            # all-or-nothing test let a MIXED set through, which is worse than
+            # either extreme: EncryptionRightsDefinitions is written whole, so
+            # a partial write would push `user@contoso.com` at the tenant
+            # (TextEmptyException, the exact failure this guard exists to
+            # prevent) and, if it did land, would drop the rights of every
+            # entry not named. There is no correct partial write here, so if
+            # any desired identity is unresolvable, omit the key entirely and
+            # preserve whatever the tenant already has.
+            $anyRedacted = [bool](@($enc.rightsDefinitions |
+                    Where-Object { $_.Identity -match $script:RedactedIdentityPattern }).Count)
+            if (-not $anyRedacted) {
                 $cmdletArgs['EncryptionRightsDefinitions'] = ($enc.rightsDefinitions | ForEach-Object { "$($_.Identity):$($_.Rights)" }) -join ';'
             }
         }
@@ -1148,6 +1212,8 @@ Import-Module (Join-Path $PSScriptRoot 'modules/DirectionPolicy.psm1') `
 # Reference: docs/adr/0052-destructive-confirmation-gate-at-script-layer.md
 Import-Module (Join-Path $PSScriptRoot 'modules/ConfirmGate.psm1') `
     -Force -Scope Local -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules/TenantContextGuard.psm1') `
+    -Force -Scope Local -ErrorAction Stop
 
 # In-repo -PruneMissing safety guards (issue #13): the empty-desired-set
 # refusal, the sanity-ratio refusal, and the $ErrorActionPreference-safe
@@ -1360,6 +1426,9 @@ if (-not $tenantId) {
     Write-Error 'az account show did not return a tenantId. Re-run `az login` and retry.'
     return
 }
+# --- az context / tenant-match guard (issue #215; the #41 incident) ---
+Assert-TenantContextMatchesParametersFile -Account $account -ExpectedDomain $TenantDomain `
+    -EnvironmentName $parameters.environment -ParametersFile $ParametersFile
 Write-Information ("Subscription    : {0}" -f $account.name) -InformationAction Continue
 
 #endregion
@@ -1518,12 +1587,37 @@ try {
                 if ($RedactIdentities -and $rightsDefs) {
                     $redacted = @()
                     foreach ($rd in @($rightsDefs)) {
+                        # Issue #225: preserve well-known symbolic identities
+                        # verbatim. They are service constants, not principals,
+                        # so redacting them discloses nothing and destroys real
+                        # desired-state meaning. See
+                        # $script:WellKnownSymbolicIdentities for why this is an
+                        # allow-list (fail-closed) rather than a shape test.
+                        $identity = if ($script:WellKnownSymbolicIdentities -contains [string]$rd.Identity) {
+                            [string]$rd.Identity
+                        } else {
+                            'user@contoso.com'
+                        }
                         $redacted += [pscustomobject]@{
-                            Identity = 'user@contoso.com'
+                            Identity = $identity
                             Rights   = $rd.Rights
                         }
                     }
-                    $rightsDefs = @($redacted | Sort-Object Identity)
+                    # Sort by Identity AND Rights (issue #225 follow-up). Sorting
+                    # on Identity alone was an all-ties key here: the redaction
+                    # above has just collapsed every Identity to the same literal,
+                    # so the sort had no total order to work with and emission fell
+                    # back to whatever order the tenant returned. Sort-Object is
+                    # NOT stable without -Stable, and the tenant's order is not a
+                    # contract either, so two exports of an unchanged tenant could
+                    # emit these entries in different orders -- a re-export is a
+                    # PRODUCER on this surface (sync-labels-from-tenant.yml opens a
+                    # drift-back PR from it), so that surfaces as a reordering-only
+                    # PR indistinguishable from a real portal edit. Same failure
+                    # mode as #194, which is why the fix follows its convention:
+                    # give the sort a real total order rather than reach for
+                    # -Stable (which has no precedent in this repo).
+                    $rightsDefs = @($redacted | Sort-Object Identity, Rights)
                 }
                 # Stable encryption sub-key sequence.
                 $enc = [ordered]@{}
